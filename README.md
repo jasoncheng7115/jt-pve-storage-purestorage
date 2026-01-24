@@ -406,7 +406,7 @@ MIT License
 
 ## Author
 
-Jason Cheng (jasoncheng7115)
+Jason Cheng (Jason Tools)
 
 ## Acknowledgements
 
