@@ -32,7 +32,7 @@
 - 自動在 Pure Storage 上註冊 Host
 
 ### 協定支援
-- iSCSI 自動 Target 發現與登入
+- iSCSI 自動 Target 探索與登入
 - Fibre Channel WWN 自動偵測
 - Multipath I/O 自動配置
 
@@ -119,7 +119,7 @@ pvesm add purestorage pure1 \
 | `pure-protocol` | 否 | iscsi | SAN 協定：`iscsi` 或 `fc` |
 | `pure-host-mode` | 否 | per-node | Host 模式：`per-node` 或 `shared` |
 | `pure-cluster-name` | 否 | pve | 用於 Host 命名的叢集名稱 |
-| `pure-device-timeout` | 否 | 60 | 裝置發現逾時秒數 |
+| `pure-device-timeout` | 否 | 60 | 裝置探索逾時秒數 |
 | `pure-pod` | 否 | - | ActiveCluster Pod 名稱（用於同步複製） |
 | `content` | 是 | - | 內容類型：`images`、`rootdir` |
 
