@@ -6,19 +6,19 @@
 
 > **免責聲明**
 >
-> 本專案為新開發項目，尚未經過大規模生產環境驗證。
+> 本專案仍在初期開發階段，尚未經過大規模正式環境驗證。
 >
 > - **iSCSI**：基本功能已測試，但尚未進行大規模驗證
 > - **Fibre Channel**：基本功能已測試，包含 FC 網路連線驗證與診斷日誌
 >
-> **使用風險自負。** 作者不對因使用本 Plugin 而造成的任何資料遺失、系統停機或其他損害承擔責任。請務必在非生產環境中充分測試後，再部署到生產系統。使用前請確保已有適當的備份。
+> **使用風險自負。** 作者不對因使用本 Plugin 而造成的任何資料遺失、系統停機或其他損害承擔責任。請務必在測試環境中充分測試後，再部署到正式環境。使用前請確保已有適當的備份。
 
 ## 功能特色
 
 ### 儲存操作
-- 直接 Volume 配置（無需傳統 SAN 的 LUN 間接層）
+- 直接 Volume 建置（無需傳統 SAN 的 LUN 間接層）
 - 線上磁碟擴充（不需重啟 VM）
-- 自動配置 Pure Storage 裝置的 Multipath
+- 自動設定 Pure Storage 裝置的 Multipath
 
 ### Snapshot 與 Clone
 - 透過 Pure Storage 原生 snapshot 實現瞬間建立/刪除/還原
@@ -35,7 +35,7 @@
 ### 協定支援
 - iSCSI 自動 Target 探索與登入
 - Fibre Channel WWN 自動偵測
-- Multipath I/O 自動配置
+- Multipath I/O 自動設定
 
 ### 內容類型
 - VM 磁碟映像（`images`）
@@ -498,7 +498,7 @@ Pure Storage snapshot 後綴只允許英數字元和連字號（`-`）。PVE sna
 
 ### FC 裝置未出現
 
-1. 檢查 FC HBA Port 是否在線：
+1. 檢查 FC HBA Port 是否為 Online：
    ```bash
    cat /sys/class/fc_host/host*/port_state
    ```
@@ -549,7 +549,7 @@ Pure Storage snapshot 後綴只允許英數字元和連字號（`-`）。PVE sna
 ### 列表效能緩慢
 
 1. 確保使用最新版本的 Plugin（已優化 API 查詢）
-2. Pod 配置使用 `pod.name` 過濾器提升效率
+2. Pod 設定使用 `pod.name` 過濾器提升效率
 3. 檢查與 Pure Storage 管理介面的網路延遲
 
 ### Linked Clone 未顯示父子關係
