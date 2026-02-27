@@ -1,0 +1,20 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        echo "Removing Pure Storage FlashArray Plugin..."
+        echo "NOTE: Existing storage configurations will remain in /etc/pve/storage.cfg"
+        echo "      Please remove them manually if no longer needed."
+        ;;
+    failed-upgrade)
+        ;;
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

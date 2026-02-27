@@ -4,12 +4,12 @@
 
 此 Plugin 讓 Proxmox VE 9.1 以上版本可以透過 iSCSI 或 Fibre Channel 協定使用 Pure Storage FlashArray 作為 VM 和 Container 的磁碟儲存。
 
-> **⚠️ 免責聲明**
+> **免責聲明**
 >
 > 本專案為新開發項目，尚未經過大規模生產環境驗證。
 >
 > - **iSCSI**：基本功能已測試，但尚未進行大規模驗證
-> - **Fibre Channel**：尚未完整驗證，可能存在未發現的問題
+> - **Fibre Channel**：基本功能已測試，包含 FC 網路連線驗證與診斷日誌
 >
 > **使用風險自負。** 作者不對因使用本 Plugin 而造成的任何資料遺失、系統停機或其他損害承擔責任。請務必在非生產環境中充分測試後，再部署到生產系統。使用前請確保已有適當的備份。
 
@@ -25,6 +25,7 @@
 - 從 Template 進行 Linked Clone（瞬間完成，使用 Pure Storage snapshot clone）
 - RAM Snapshot 支援（Include RAM 選項）
 - Clone 依賴保護（Pure Storage 會防止刪除有 clone 依賴的 snapshot）
+- **自動 VM 設定備份** - 每次建立 snapshot 時自動將 VM 設定檔備份到 Pure Storage
 
 ### 高可用性
 - 叢集感知，支援 Live Migration（Volume 會連接到所有節點）
@@ -62,7 +63,7 @@
 ### 從 .deb 套件安裝（建議）
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.0.35-1_all.deb
+dpkg -i jt-pve-storage-purestorage_1.0.49-1_all.deb
 apt-get install -f  # 如需安裝相依套件
 ```
 
@@ -231,6 +232,7 @@ qm migrate 100 pve2 --online
 | Container rootfs | Volume | `pve-{storage}-{vmid}-disk{diskid}` |
 | Cloud-init | Volume | `pve-{storage}-{vmid}-cloudinit` |
 | RAM 狀態 | Volume | `pve-{storage}-{vmid}-state-{snapname}` |
+| VM 設定備份 | Volume | `pve-{storage}-{vmid}-vmconf-{snapname}` |
 | Snapshot | Volume Snapshot | `{volume}.pve-snap-{snapname}` |
 | Template 標記 | Volume Snapshot | `{volume}.pve-base` |
 | PVE 節點 | Host | `pve-{cluster}-{node}` |
@@ -290,6 +292,164 @@ pve-mycluster-shared
 - 自動容錯
 - Pod 配額顯示為儲存容量
 
+## VM 設定備份
+
+建立 snapshot 時，Plugin 會自動將 VM 設定檔備份到 Pure Storage。這讓您不僅可以還原磁碟資料，也可以還原該時間點的 VM 設定。
+
+### 運作方式
+
+- **自動執行**：建立任何 snapshot 時自動備份設定
+- **獨立儲存**：每個 snapshot 都有獨立的設定備份
+- **儲存格式**：1MB ext4 volume，內含 `{vmid}.conf` 和 `metadata.txt`
+- **隱藏顯示**：設定備份 volume 不會出現在 PVE 磁碟列表中
+
+### 自動清理
+
+設定備份 volume 會自動清理：
+- 刪除 snapshot 時，對應的設定備份 volume 也會被刪除
+- 刪除 VM（最後一個磁碟被刪除）時，該 VM 所有的設定備份 volume 都會被刪除
+
+### 取回設定備份
+
+使用 `pve-pure-config-get` 命令列工具輕鬆取回設定備份。
+
+**使用方式：**
+```
+pve-pure-config-get -s <storage> -v <vmid> [-n <snap>] [-o <output_dir>] [-l] [-r]
+```
+
+**選項：**
+
+| 選項 | 說明 |
+|------|------|
+| `-s, --storage <name>` | Pure Storage 儲存區 ID（必填） |
+| `-v, --vmid <id>` | 要取回設定的 VM ID（必填） |
+| `-n, --snap <name>` | 指定要取回的 snapshot 名稱（跳過互動選擇） |
+| `-o, --output <dir>` | 輸出目錄（預設：`/tmp`） |
+| `-l, --list` | 僅列出可用的 snapshot，不取回 |
+| `-r, --restore` | 災難復原模式（詳見下方說明） |
+| `-h, --help` | 顯示說明訊息 |
+
+**輸出檔案：**
+```
+/tmp/vm-{vmid}-{snapname}-{vmid}.conf      # VM 設定檔
+/tmp/vm-{vmid}-{snapname}-metadata.txt     # 備份中繼資料（時間戳記、來源資訊）
+```
+
+**範例：**
+
+```bash
+# 列出 VM 100 可用的設定備份
+pve-pure-config-get -s pure1 -v 100 -l
+
+# 互動式取回設定（會提示選擇）
+pve-pure-config-get -s pure1 -v 100
+
+# 直接取回指定 snapshot 的設定
+pve-pure-config-get -s pure1 -v 100 -n snap1
+
+# 取回到指定目錄
+pve-pure-config-get -s pure1 -v 100 -n snap1 -o /root/configs
+```
+
+**操作範例：**
+```
+$ pve-pure-config-get -s pure1 -v 100
+
+Searching for config backups for VM 100...
+
+Available config backups:
+-----------------------------------------------------------
+  No.  Snapshot Name  Volume
+-----------------------------------------------------------
+     1  backup1        pve1::pve-pure1-100-vmconf-backup1
+     2  daily-0126     pve1::pve-pure1-100-vmconf-daily-0126
+-----------------------------------------------------------
+
+Enter number to retrieve (1-2), or 'q' to quit: 1
+
+Retrieving config from: pve1::pve-pure1-100-vmconf-backup1
+Connecting volume to host 'pve-mycluster-pve1'...
+Volume WWID: 624a9370...
+Scanning for device...
+Found device: /dev/mapper/3624a9370...
+Mounting to /tmp/...
+Saved: /tmp/vm-100-backup1-100.conf
+Saved: /tmp/vm-100-backup1-metadata.txt
+Cleaning up...
+
+Done! Config file saved to: /tmp/vm-100-backup1-100.conf
+To restore: cp /tmp/vm-100-backup1-100.conf /etc/pve/qemu-server/100.conf
+```
+
+### 災難復原 (-r / --restore)
+
+復原模式可從 Pure Storage 的已刪除 volumes 完整還原 VM。當 VM 被意外刪除，但 volumes 仍在 Pure Storage 的「Destroyed Volumes」中（尚未被 eradicate），即可使用此功能。
+
+**功能：**
+- 搜尋包含 active 和 destroyed 的 volumes
+- 顯示 volume 狀態（`[active]` 或 `[DESTROYED]`）
+- 自動恢復已刪除的 config 和 disk volumes
+- 將設定檔放到正確的 PVE 位置（`/etc/pve/qemu-server/` 或 `/etc/pve/lxc/`）
+- 連接 disk volumes 到 host
+- 安全檢查：如 VM 設定已存在則拒絕覆蓋
+
+**使用方式：**
+
+```bash
+# 列出可用備份（包含已刪除的 volumes）
+pve-pure-config-get -s pure1 -v 100 -r -l
+
+# 完整還原 VM（從已刪除的 volumes 恢復）
+pve-pure-config-get -s pure1 -v 100 -n snap1 -r
+```
+
+**還原操作範例：**
+```
+$ pve-pure-config-get -s pure1 -v 100 -n snap1 -r
+
+Restore mode: Will recover destroyed volumes and place config in PVE
+
+Searching for config backups for VM 100...
+
+Available config backups:
+-------------------------------------------------------------------------
+  No.  Snapshot Name  Volume                                  Status
+-------------------------------------------------------------------------
+     1  snap1          pve1::pve-pure1-100-vmconf-snap1        [DESTROYED]
+-------------------------------------------------------------------------
+
+Retrieving config from: pve1::pve-pure1-100-vmconf-snap1
+Recovering destroyed config volume...
+Config volume recovered.
+Connecting volume to host 'pve-mycluster-pve1'...
+...
+
+=== Starting VM Restore ===
+Found 1 disk volume(s) in config
+Recovering destroyed volume: pve1::pve-pure1-100-disk0 ... OK
+
+Connecting disk volumes to host 'pve-mycluster-pve1'...
+Rescanning for devices...
+
+Placing config in /etc/pve/qemu-server/100.conf...
+Cleaning up config volume...
+
+============================================================
+VM 100 restored successfully!
+============================================================
+Config file: /etc/pve/qemu-server/100.conf
+Recovered volumes: 1
+
+You can now start the VM from PVE web UI or CLI:
+  qm start 100
+```
+
+**重要說明：**
+- 即使 VM 已完全從 PVE 刪除也能運作
+- Volumes 必須尚未從 Pure Storage 被 eradicate（仍在「Destroyed Volumes」中）
+- 如果 PVE 中已存在該 VM 設定，還原會被拒絕（請先刪除或使用其他 VMID）
+
 ## 已知限制
 
 ### Full Clone 限制
@@ -334,6 +494,40 @@ Pure Storage snapshot 後綴只允許英數字元和連字號（`-`）。PVE sna
 5. 重載 Multipath：
    ```bash
    multipathd reconfigure
+   ```
+
+### FC 裝置未出現
+
+1. 檢查 FC HBA Port 是否在線：
+   ```bash
+   cat /sys/class/fc_host/host*/port_state
+   ```
+
+2. 檢查 FC Target Port 是否可見：
+   ```bash
+   ls /sys/class/fc_remote_ports/
+   ```
+
+3. 驗證 FC Zoning - 確認主機 WWPN 可以看到 Pure Storage Target WWPN：
+   ```bash
+   cat /sys/class/fc_host/host*/port_name
+   cat /sys/class/fc_remote_ports/rport-*/port_name
+   ```
+
+4. 發送 LIP（Loop Initialization Primitive）重新掃描 Fabric：
+   ```bash
+   echo 1 > /sys/class/fc_host/host0/issue_lip
+   ```
+
+5. 重新掃描 SCSI Host 以發現新 LUN：
+   ```bash
+   echo "- - -" > /sys/class/scsi_host/host0/scan
+   ```
+
+6. 檢查 Multipath：
+   ```bash
+   multipathd show maps
+   multipath -ll
    ```
 
 ### 認證失敗
@@ -397,6 +591,7 @@ make install
 |------|------|
 | Plugin 模組 | `/usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm` |
 | API 模組 | `/usr/share/perl5/PVE/Storage/Custom/PureStorage/API.pm` |
+| 設定取回工具 | `/usr/bin/pve-pure-config-get` |
 | Storage 設定 | `/etc/pve/storage.cfg` |
 | Multipath 設定 | `/etc/multipath/conf.d/pure-storage.conf` |
 

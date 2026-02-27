@@ -1,0 +1,31 @@
+Source: jt-pve-storage-purestorage
+Section: admin
+Priority: optional
+Maintainer: Jason Cheng (Jason Tools) <jason@jason.tools>
+Build-Depends: debhelper (>= 12)
+Standards-Version: 4.5.0
+Homepage: https://github.com/jasoncheng7115/jt-pve-storage-purestorage
+
+Package: jt-pve-storage-purestorage
+Architecture: all
+Depends: ${misc:Depends},
+         proxmox-ve (>= 9.1) | pve-manager (>= 9.1),
+         libwww-perl,
+         libjson-perl,
+         liburi-perl,
+         open-iscsi,
+         multipath-tools,
+         sg3-utils,
+         psmisc
+Recommends: lsscsi
+Description: Pure Storage FlashArray Storage Plugin for Proxmox VE
+ This plugin enables Proxmox VE to use Pure Storage FlashArray for VM
+ disk storage via iSCSI or Fibre Channel protocol.
+ .
+ Features:
+  - Direct volume provisioning
+  - Snapshot create/delete/rollback
+  - Instant clone via Pure Storage snapshots
+  - Multipath I/O support
+  - Cluster-aware for live migration
+  - Support for both iSCSI and Fibre Channel

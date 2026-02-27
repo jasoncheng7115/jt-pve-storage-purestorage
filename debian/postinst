@@ -1,0 +1,50 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    configure)
+        echo "Pure Storage FlashArray Plugin installed successfully."
+        echo ""
+        echo "To configure, add storage with:"
+        echo "  pvesm add purestorage <storage-id> \\"
+        echo "    --pure-portal <pure-array-ip> \\"
+        echo "    --pure-api-token <api-token> \\"
+        echo "    --content images"
+        echo ""
+        echo "Or with username/password:"
+        echo "  pvesm add purestorage <storage-id> \\"
+        echo "    --pure-portal <pure-array-ip> \\"
+        echo "    --pure-username <user> \\"
+        echo "    --pure-password <password> \\"
+        echo "    --content images"
+        echo ""
+        echo "See /usr/share/doc/jt-pve-storage-purestorage/README.md for details."
+
+        # Ensure required services are enabled (with timeout to prevent hang)
+        if timeout 5 systemctl is-active --quiet iscsid 2>/dev/null; then
+            echo "iSCSI initiator daemon is running."
+        else
+            echo "NOTE: iscsid service is not running. Starting..."
+            timeout 10 systemctl enable iscsid 2>/dev/null || true
+            timeout 10 systemctl start iscsid 2>/dev/null || true
+        fi
+
+        if timeout 5 systemctl is-active --quiet multipathd 2>/dev/null; then
+            echo "Multipath daemon is running."
+        else
+            echo "NOTE: multipathd service is not running. Starting..."
+            timeout 10 systemctl enable multipathd 2>/dev/null || true
+            timeout 10 systemctl start multipathd 2>/dev/null || true
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

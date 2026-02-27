@@ -1,0 +1,540 @@
+#!/usr/bin/perl
+# pve-pure-config-get - Retrieve VM config backup from Pure Storage
+# Copyright (c) 2026 Jason Cheng (Jason Tools)
+# Licensed under the MIT License
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+use File::Temp qw(tempdir);
+use File::Copy qw(copy);
+
+# Add library path
+use lib '/usr/share/perl5';
+
+use PVE::Storage::Custom::PureStorage::API;
+use PVE::Storage::Custom::PureStorage::Naming qw(
+    encode_config_volume_name
+    decode_config_volume_name
+    sanitize_for_pure
+);
+use PVE::Storage::Custom::PureStorage::Multipath qw(
+    wait_for_multipath_device
+    multipath_reload
+    cleanup_lun_devices
+    rescan_scsi_hosts
+);
+use PVE::Storage::Custom::PureStorage::ISCSI qw(
+    rescan_sessions
+);
+
+my $VERSION = '1.0.46';
+
+# Command line options
+my $storage_id;
+my $vmid;
+my $output_dir = '/tmp';
+my $list_only = 0;
+my $snap_name;
+my $restore_mode = 0;
+my $help = 0;
+
+GetOptions(
+    'storage|s=s' => \$storage_id,
+    'vmid|v=i'    => \$vmid,
+    'output|o=s'  => \$output_dir,
+    'list|l'      => \$list_only,
+    'snap|n=s'    => \$snap_name,
+    'restore|r'   => \$restore_mode,
+    'help|h'      => \$help,
+) or usage();
+
+usage() if $help;
+
+sub usage {
+    print <<EOF;
+pve-pure-config-get v$VERSION - Retrieve VM config backup from Pure Storage
+
+Usage: pve-pure-config-get -s <storage> -v <vmid> [-n <snap>] [-o <output_dir>] [-l] [-r]
+
+Options:
+    -s, --storage <name>   Pure Storage storage ID (required)
+    -v, --vmid <id>        VM ID to retrieve config for (required)
+    -n, --snap <name>      Snapshot name to retrieve (skip interactive selection)
+    -o, --output <dir>     Output directory (default: /tmp)
+    -l, --list             List available snapshots only, don't retrieve
+    -r, --restore          Restore mode: recover destroyed volumes and place
+                           config in PVE location for immediate VM startup
+    -h, --help             Show this help
+
+Examples:
+    # List available config backups for VM 100
+    pve-pure-config-get -s pure1 -v 100 -l
+
+    # Retrieve config interactively
+    pve-pure-config-get -s pure1 -v 100
+
+    # Retrieve specific snapshot's config directly
+    pve-pure-config-get -s pure1 -v 100 -n snap1
+
+    # Retrieve to specific directory
+    pve-pure-config-get -s pure1 -v 100 -n snap1 -o /root/configs
+
+    # Disaster recovery: restore VM from destroyed volumes
+    pve-pure-config-get -s pure1 -v 100 -n snap1 -r
+
+EOF
+    exit(1);
+}
+
+# Validate required parameters
+die "Error: --storage is required\n" unless $storage_id;
+die "Error: --vmid is required\n" unless $vmid;
+die "Error: output directory '$output_dir' does not exist\n" unless $restore_mode || -d $output_dir;
+
+# Read storage configuration
+sub read_storage_config {
+    my ($storage_id) = @_;
+
+    my $config_file = '/etc/pve/storage.cfg';
+    die "Error: Cannot read $config_file\n" unless -r $config_file;
+
+    open(my $fh, '<', $config_file) or die "Cannot open $config_file: $!\n";
+
+    my %config;
+    my $current_storage;
+    my $current_type;
+
+    while (<$fh>) {
+        chomp;
+        s/^\s+//;
+        s/\s+$//;
+        next if /^#/ || /^$/;
+
+        if (/^(\w+):\s*(\S+)/) {
+            $current_type = $1;
+            $current_storage = $2;
+            $config{$current_storage} = { type => $current_type };
+        } elsif ($current_storage && /^(\S+)\s+(.+)$/) {
+            $config{$current_storage}{$1} = $2;
+        }
+    }
+    close($fh);
+
+    return $config{$storage_id};
+}
+
+# Get API connection
+sub get_api {
+    my ($scfg) = @_;
+
+    my $portal = $scfg->{'pure-portal'}
+        or die "Error: pure-portal not configured for storage\n";
+
+    my %api_opts = (
+        host       => $portal,
+        ssl_verify => $scfg->{'pure-ssl-verify'} // 0,
+    );
+
+    if ($scfg->{'pure-api-token'}) {
+        $api_opts{api_token} = $scfg->{'pure-api-token'};
+    } elsif ($scfg->{'pure-username'} && $scfg->{'pure-password'}) {
+        $api_opts{username} = $scfg->{'pure-username'};
+        $api_opts{password} = $scfg->{'pure-password'};
+    } else {
+        die "Error: No API credentials configured (need pure-api-token or pure-username/pure-password)\n";
+    }
+
+    return PVE::Storage::Custom::PureStorage::API->new(%api_opts);
+}
+
+# Get host name
+sub get_host_name {
+    my ($scfg) = @_;
+
+    my $cluster_name = $scfg->{'pure-cluster-name'} // 'pve';
+    my $mode = $scfg->{'pure-host-mode'} // 'per-node';
+
+    my $nodename = `hostname -s`;
+    chomp($nodename);
+
+    my $san_cluster = sanitize_for_pure($cluster_name, 20);
+
+    if ($mode eq 'shared') {
+        return "pve-${san_cluster}-shared";
+    } else {
+        my $san_node = sanitize_for_pure($nodename, 20);
+        return "pve-${san_cluster}-${san_node}";
+    }
+}
+
+# Main
+my $scfg = read_storage_config($storage_id);
+die "Error: Storage '$storage_id' not found or not a purestorage type\n"
+    unless $scfg && $scfg->{type} eq 'purestorage';
+
+my $api = get_api($scfg);
+my $pod = $scfg->{'pure-pod'};
+
+# Restore mode: check if VM config already exists in PVE
+if ($restore_mode) {
+    my $qemu_conf = "/etc/pve/qemu-server/${vmid}.conf";
+    my $lxc_conf = "/etc/pve/lxc/${vmid}.conf";
+
+    if (-f $qemu_conf) {
+        die "Error: VM $vmid already exists in PVE ($qemu_conf)\n" .
+            "Cannot restore over existing VM. Please remove it first or use a different VMID.\n";
+    }
+    if (-f $lxc_conf) {
+        die "Error: Container $vmid already exists in PVE ($lxc_conf)\n" .
+            "Cannot restore over existing container. Please remove it first or use a different VMID.\n";
+    }
+    print "Restore mode: Will recover destroyed volumes and place config in PVE\n\n";
+}
+
+# Build pattern to find config volumes
+my $san_storage = sanitize_for_pure($storage_id, 24);
+$san_storage =~ s/-/_/g;
+my $pattern = "pve-${san_storage}-${vmid}-vmconf-*";
+
+# Include pod prefix if configured
+if ($pod) {
+    $pattern = "${pod}::${pattern}";
+}
+
+print "Searching for config backups for VM $vmid...\n";
+
+# Query active volumes
+my $volumes = eval { $api->volume_list($pattern); };
+if ($@) {
+    if ($@ =~ /does not exist|not found/i) {
+        $volumes = [];
+    } else {
+        die "Error querying Pure Storage: $@\n";
+    }
+}
+
+# In restore mode, also query destroyed volumes
+if ($restore_mode) {
+    my $destroyed_vols = eval { $api->volume_list_destroyed($pattern); };
+    if ($destroyed_vols && @$destroyed_vols) {
+        push @$volumes, @$destroyed_vols;
+    }
+}
+
+# Filter volumes - in restore mode, include destroyed volumes
+my @configs;
+for my $vol (@$volumes) {
+    # Skip destroyed volumes unless in restore mode
+    next if $vol->{destroyed} && !$restore_mode;
+
+    my $volname = $vol->{name};
+    # Remove pod prefix if present
+    $volname =~ s/^[^:]+:://;
+
+    my $decoded = decode_config_volume_name($volname);
+    next unless $decoded;
+
+    push @configs, {
+        name      => $vol->{name},
+        snapname  => $decoded->{snapname},
+        size      => $vol->{space}{total_provisioned} // $vol->{size} // 0,
+        created   => $vol->{created} // 'unknown',
+        destroyed => $vol->{destroyed} ? 1 : 0,
+    };
+}
+
+if (!@configs) {
+    print "No config backups found for VM $vmid on storage $storage_id.\n";
+    print "Config backups are created automatically when you create snapshots.\n";
+    exit(0);
+}
+
+# Sort by name
+@configs = sort { $a->{snapname} cmp $b->{snapname} } @configs;
+
+# Display available configs
+my $selected;
+
+# If snapshot name specified, find it directly
+if ($snap_name) {
+    for my $cfg (@configs) {
+        if ($cfg->{snapname} eq $snap_name) {
+            $selected = $cfg;
+            last;
+        }
+    }
+    unless ($selected) {
+        print "Error: Config backup for snapshot '$snap_name' not found.\n";
+        print "\nAvailable snapshots:\n";
+        for my $cfg (@configs) {
+            print "  - $cfg->{snapname}\n";
+        }
+        exit(1);
+    }
+} else {
+    # Show list - calculate column widths dynamically
+    my $max_snap_len = length("Snapshot Name");
+    my $max_vol_len = length("Volume");
+    for my $cfg (@configs) {
+        $max_snap_len = length($cfg->{snapname}) if length($cfg->{snapname}) > $max_snap_len;
+        $max_vol_len = length($cfg->{name}) if length($cfg->{name}) > $max_vol_len;
+    }
+
+    # Add status column in restore mode
+    my $status_col = $restore_mode ? 12 : 0;
+    my $line_len = 6 + $max_snap_len + 2 + $max_vol_len + $status_col;
+
+    print "\nAvailable config backups:\n";
+    print "-" x $line_len . "\n";
+    if ($restore_mode) {
+        printf "  %4s  %-${max_snap_len}s  %-${max_vol_len}s  %s\n", "No.", "Snapshot Name", "Volume", "Status";
+    } else {
+        printf "  %4s  %-${max_snap_len}s  %s\n", "No.", "Snapshot Name", "Volume";
+    }
+    print "-" x $line_len . "\n";
+
+    for my $i (0 .. $#configs) {
+        if ($restore_mode) {
+            my $status = $configs[$i]{destroyed} ? "[DESTROYED]" : "[active]";
+            printf "  %4d  %-${max_snap_len}s  %-${max_vol_len}s  %s\n",
+                $i + 1,
+                $configs[$i]{snapname},
+                $configs[$i]{name},
+                $status;
+        } else {
+            printf "  %4d  %-${max_snap_len}s  %s\n",
+                $i + 1,
+                $configs[$i]{snapname},
+                $configs[$i]{name};
+        }
+    }
+    print "-" x $line_len . "\n";
+
+    exit(0) if $list_only;
+
+    # Ask user to select
+    print "\nEnter number to retrieve (1-" . scalar(@configs) . "), or 'q' to quit: ";
+    my $choice = <STDIN>;
+    chomp($choice);
+
+    exit(0) if $choice eq 'q' || $choice eq '';
+
+    my $idx = int($choice) - 1;
+    if ($idx < 0 || $idx > $#configs) {
+        die "Invalid selection.\n";
+    }
+
+    $selected = $configs[$idx];
+}
+print "\nRetrieving config from: $selected->{name}\n";
+
+# Get full volume name with pod prefix
+my $config_vol = $selected->{name};
+
+# In restore mode, recover destroyed config volume first
+if ($restore_mode && $selected->{destroyed}) {
+    print "Recovering destroyed config volume...\n";
+    eval { $api->volume_recover($config_vol); };
+    if ($@) {
+        die "Failed to recover config volume: $@\n";
+    }
+    print "Config volume recovered.\n";
+}
+
+# Connect volume to host
+my $host = get_host_name($scfg);
+print "Connecting volume to host '$host'...\n";
+
+eval { $api->volume_connect_host($config_vol, $host); };
+if ($@ && $@ !~ /already connected|already exists/i) {
+    die "Failed to connect volume: $@\n";
+}
+
+# Get WWID
+my $wwid = eval { $api->volume_get_wwid($config_vol); };
+die "Cannot get WWID for volume: $@\n" unless $wwid;
+
+print "Volume WWID: $wwid\n";
+
+# Rescan for device
+print "Scanning for device...\n";
+my $protocol = $scfg->{'pure-protocol'} // 'iscsi';
+if ($protocol eq 'iscsi') {
+    eval { rescan_sessions(); };
+} else {
+    eval { rescan_scsi_hosts(); };
+}
+multipath_reload();
+
+# Wait for device
+my $timeout = $scfg->{'pure-device-timeout'} // 60;
+my $device = wait_for_multipath_device($wwid, timeout => $timeout);
+
+unless ($device) {
+    print "Warning: Device not found, trying to disconnect...\n";
+    eval { $api->volume_disconnect_host($config_vol, $host); };
+    die "Failed to find device for volume. Check iSCSI/FC connectivity.\n";
+}
+
+print "Found device: $device\n";
+
+# Mount and copy
+my $mount_point = tempdir(CLEANUP => 1);
+print "Mounting to $mount_point...\n";
+
+system('mount', '-o', 'ro', $device, $mount_point);
+if ($? != 0) {
+    print "Warning: Mount failed, cleaning up...\n";
+    cleanup_lun_devices($wwid);
+    eval { $api->volume_disconnect_host($config_vol, $host); };
+    die "Failed to mount device. The volume may not be formatted correctly.\n";
+}
+
+# Find and copy config file
+my @conf_files = glob("$mount_point/*.conf");
+my $metadata_file = "$mount_point/metadata.txt";
+
+if (!@conf_files) {
+    system('umount', $mount_point);
+    cleanup_lun_devices($wwid);
+    eval { $api->volume_disconnect_host($config_vol, $host); };
+    die "No config file found in the backup volume.\n";
+}
+
+# Read config content for restore mode
+my $config_content;
+for my $conf (@conf_files) {
+    open(my $fh, '<', $conf) or next;
+    local $/;
+    $config_content = <$fh>;
+    close($fh);
+    last;
+}
+
+if ($restore_mode) {
+    # === RESTORE MODE ===
+    print "\n=== Starting VM Restore ===\n";
+
+    # Determine if QEMU or LXC based on config content
+    # Detect LXC: must have rootfs: (LXC-specific), not just arch: (QEMU also has arch:)
+    my $is_lxc = ($config_content =~ /^rootfs:/m) ? 1 : 0;
+    my $pve_conf_dir = $is_lxc ? "/etc/pve/lxc" : "/etc/pve/qemu-server";
+    my $pve_conf_file = "${pve_conf_dir}/${vmid}.conf";
+    my $vm_type = $is_lxc ? "Container" : "VM";
+
+    # Check and recover disk volumes
+    my $disk_pattern = "pve-${san_storage}-${vmid}-disk*";
+    $disk_pattern = "${pod}::${disk_pattern}" if $pod;
+
+    # Get active disk volumes
+    my $active_disks = eval { $api->volume_list($disk_pattern); } // [];
+
+    # Get destroyed disk volumes
+    my $destroyed_disks = eval { $api->volume_list_destroyed($disk_pattern); } // [];
+
+    my %disk_status;
+    for my $d (@$active_disks) {
+        $disk_status{$d->{name}} = { destroyed => 0, vol => $d };
+    }
+    for my $d (@$destroyed_disks) {
+        $disk_status{$d->{name}} = { destroyed => 1, vol => $d };
+    }
+
+    # Recover destroyed disk volumes
+    my $recovered_count = 0;
+    for my $volname (sort keys %disk_status) {
+        my $info = $disk_status{$volname};
+        if ($info->{destroyed}) {
+            print "Recovering destroyed volume: $volname ... ";
+            eval { $api->volume_recover($volname); };
+            if ($@) {
+                print "FAILED: $@\n";
+            } else {
+                print "OK\n";
+                $recovered_count++;
+            }
+        } else {
+            print "Volume OK: $volname\n";
+        }
+    }
+
+    # Connect disk volumes to host
+    print "\nConnecting disk volumes to host '$host'...\n";
+    for my $volname (sort keys %disk_status) {
+        eval { $api->volume_connect_host($volname, $host); };
+        if ($@ && $@ !~ /already connected|already exists/i) {
+            warn "Warning: Failed to connect $volname: $@\n";
+        }
+    }
+
+    # Rescan to discover devices
+    print "Rescanning for devices...\n";
+    my $protocol = $scfg->{'pure-protocol'} // 'iscsi';
+    if ($protocol eq 'iscsi') {
+        eval { rescan_sessions(); };
+    } else {
+        eval { rescan_scsi_hosts(); };
+    }
+    multipath_reload();
+    sleep(2);  # Give time for devices to appear
+
+    # Place config in PVE location
+    print "\nPlacing config in $pve_conf_file...\n";
+    my $write_err;
+    eval {
+        open(my $cfh, '>', $pve_conf_file) or die "Cannot write $pve_conf_file: $!\n";
+        print $cfh $config_content;
+        close($cfh);
+    };
+    $write_err = $@ if $@;
+
+    # Cleanup config volume connection (always runs, even if config write failed)
+    print "Cleaning up config volume...\n";
+    system('umount', $mount_point);
+    cleanup_lun_devices($wwid);
+    eval { $api->volume_disconnect_host($config_vol, $host); };
+
+    die "Restore failed: $write_err" if $write_err;
+
+    print "\n" . "=" x 60 . "\n";
+    print "$vm_type $vmid restored successfully!\n";
+    print "=" x 60 . "\n";
+    print "Config file: $pve_conf_file\n";
+    print "Recovered volumes: $recovered_count\n";
+    print "\nYou can now start the $vm_type from PVE web UI or CLI:\n";
+    if ($is_lxc) {
+        print "  pct start $vmid\n";
+    } else {
+        print "  qm start $vmid\n";
+    }
+
+} else {
+    # === NORMAL MODE - just copy to output directory ===
+    my $output_prefix = "${output_dir}/vm-${vmid}-$selected->{snapname}";
+
+    for my $conf (@conf_files) {
+        my $basename = $conf;
+        $basename =~ s|.*/||;
+        my $dest = "${output_prefix}-${basename}";
+        copy($conf, $dest) or warn "Failed to copy $conf: $!\n";
+        print "Saved: $dest\n";
+    }
+
+    if (-f $metadata_file) {
+        my $dest = "${output_prefix}-metadata.txt";
+        copy($metadata_file, $dest);
+        print "Saved: $dest\n";
+    }
+
+    # Cleanup
+    print "Cleaning up...\n";
+    system('umount', $mount_point);
+    cleanup_lun_devices($wwid);
+    eval { $api->volume_disconnect_host($config_vol, $host); };
+
+    my $saved_conf = "${output_prefix}-${vmid}.conf";
+    print "\nDone! Config file saved to: $saved_conf\n";
+    print "To restore: cp $saved_conf /etc/pve/qemu-server/${vmid}.conf\n";
+}

@@ -1,0 +1,7 @@
+lib/PVE/Storage/Custom/PureStoragePlugin.pm usr/share/perl5/PVE/Storage/Custom/
+lib/PVE/Storage/Custom/PureStorage/API.pm usr/share/perl5/PVE/Storage/Custom/PureStorage/
+lib/PVE/Storage/Custom/PureStorage/ISCSI.pm usr/share/perl5/PVE/Storage/Custom/PureStorage/
+lib/PVE/Storage/Custom/PureStorage/Multipath.pm usr/share/perl5/PVE/Storage/Custom/PureStorage/
+lib/PVE/Storage/Custom/PureStorage/Naming.pm usr/share/perl5/PVE/Storage/Custom/PureStorage/
+lib/PVE/Storage/Custom/PureStorage/FC.pm usr/share/perl5/PVE/Storage/Custom/PureStorage/
+bin/pve-pure-config-get usr/bin/

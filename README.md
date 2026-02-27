@@ -4,12 +4,12 @@
 
 This plugin enables Proxmox VE 9.1+ to use Pure Storage FlashArray for VM and Container disk storage via iSCSI or Fibre Channel protocol.
 
-> **⚠️ DISCLAIMER**
+> **DISCLAIMER**
 >
 > This project is newly developed and has not been extensively tested in production environments.
 >
 > - **iSCSI**: Basic functionality tested, but not yet validated at scale
-> - **Fibre Channel**: Not fully verified, may have undiscovered issues
+> - **Fibre Channel**: Basic functionality tested with FC fabric connectivity verification and diagnostic logging
 >
 > **USE AT YOUR OWN RISK.** The author assumes no responsibility for any data loss, system downtime, or other damages that may result from using this plugin. Always test thoroughly in a non-production environment before deploying to production systems. Ensure you have proper backups before use.
 
@@ -25,6 +25,7 @@ This plugin enables Proxmox VE 9.1+ to use Pure Storage FlashArray for VM and Co
 - Linked Clone from templates (instant, uses Pure Storage snapshot clone)
 - RAM snapshot support (Include RAM option)
 - Clone dependency protection (Pure Storage prevents deleting snapshots with clones)
+- **Automatic VM config backup** - saves VM configuration to Pure Storage with each snapshot
 
 ### High Availability
 - Cluster-aware for live migration (volumes connected to all nodes)
@@ -62,7 +63,7 @@ This plugin enables Proxmox VE 9.1+ to use Pure Storage FlashArray for VM and Co
 ### From .deb package (Recommended)
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.0.35-1_all.deb
+dpkg -i jt-pve-storage-purestorage_1.0.49-1_all.deb
 apt-get install -f  # Install dependencies if needed
 ```
 
@@ -231,6 +232,7 @@ qm migrate 100 pve2 --online
 | Container rootfs | Volume | `pve-{storage}-{vmid}-disk{diskid}` |
 | Cloud-init | Volume | `pve-{storage}-{vmid}-cloudinit` |
 | RAM state | Volume | `pve-{storage}-{vmid}-state-{snapname}` |
+| VM config backup | Volume | `pve-{storage}-{vmid}-vmconf-{snapname}` |
 | Snapshot | Volume Snapshot | `{volume}.pve-snap-{snapname}` |
 | Template marker | Volume Snapshot | `{volume}.pve-base` |
 | PVE Node | Host | `pve-{cluster}-{node}` |
@@ -290,6 +292,164 @@ Features:
 - Automatic failover
 - Pod quota shown as storage capacity
 
+## VM Config Backup
+
+When creating a snapshot, the plugin automatically backs up the VM configuration file to Pure Storage. This allows you to recover not just the disk data, but also the VM settings at that point in time.
+
+### How It Works
+
+- **Automatic**: Config is saved automatically when creating any snapshot
+- **Per-snapshot**: Each snapshot gets its own independent config backup
+- **Format**: 1MB ext4 volume containing `{vmid}.conf` and `metadata.txt`
+- **Hidden**: Config volumes don't appear in PVE disk listings
+
+### Automatic Cleanup
+
+Config backup volumes are automatically cleaned up:
+- When a snapshot is deleted, its corresponding config volume is also deleted
+- When a VM is deleted (last disk removed), all its config volumes are deleted
+
+### Retrieving Config Backup
+
+Use the `pve-pure-config-get` command-line tool to easily retrieve config backups.
+
+**Usage:**
+```
+pve-pure-config-get -s <storage> -v <vmid> [-n <snap>] [-o <output_dir>] [-l] [-r]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-s, --storage <name>` | Pure Storage storage ID (required) |
+| `-v, --vmid <id>` | VM ID to retrieve config for (required) |
+| `-n, --snap <name>` | Snapshot name to retrieve (skip interactive selection) |
+| `-o, --output <dir>` | Output directory (default: `/tmp`) |
+| `-l, --list` | List available snapshots only, don't retrieve |
+| `-r, --restore` | Disaster recovery mode (see below) |
+| `-h, --help` | Show help message |
+
+**Output files:**
+```
+/tmp/vm-{vmid}-{snapname}-{vmid}.conf      # VM configuration
+/tmp/vm-{vmid}-{snapname}-metadata.txt     # Backup metadata (timestamp, source info)
+```
+
+**Examples:**
+
+```bash
+# List available config backups for VM 100
+pve-pure-config-get -s pure1 -v 100 -l
+
+# Retrieve config interactively (will prompt for selection)
+pve-pure-config-get -s pure1 -v 100
+
+# Retrieve specific snapshot's config directly
+pve-pure-config-get -s pure1 -v 100 -n snap1
+
+# Retrieve to a specific directory
+pve-pure-config-get -s pure1 -v 100 -n snap1 -o /root/configs
+```
+
+**Example session:**
+```
+$ pve-pure-config-get -s pure1 -v 100
+
+Searching for config backups for VM 100...
+
+Available config backups:
+-----------------------------------------------------------
+  No.  Snapshot Name  Volume
+-----------------------------------------------------------
+     1  backup1        pve1::pve-pure1-100-vmconf-backup1
+     2  daily-0126     pve1::pve-pure1-100-vmconf-daily-0126
+-----------------------------------------------------------
+
+Enter number to retrieve (1-2), or 'q' to quit: 1
+
+Retrieving config from: pve1::pve-pure1-100-vmconf-backup1
+Connecting volume to host 'pve-mycluster-pve1'...
+Volume WWID: 624a9370...
+Scanning for device...
+Found device: /dev/mapper/3624a9370...
+Mounting to /tmp/...
+Saved: /tmp/vm-100-backup1-100.conf
+Saved: /tmp/vm-100-backup1-metadata.txt
+Cleaning up...
+
+Done! Config file saved to: /tmp/vm-100-backup1-100.conf
+To restore: cp /tmp/vm-100-backup1-100.conf /etc/pve/qemu-server/100.conf
+```
+
+### Disaster Recovery (-r / --restore)
+
+The restore mode enables full VM recovery from destroyed volumes on Pure Storage. This is useful when a VM has been accidentally deleted but the volumes are still in Pure Storage's "Destroyed Volumes" (not yet eradicated).
+
+**Features:**
+- Searches both active and destroyed volumes
+- Displays volume status (`[active]` or `[DESTROYED]`)
+- Automatically recovers destroyed config and disk volumes
+- Places config file in correct PVE location (`/etc/pve/qemu-server/` or `/etc/pve/lxc/`)
+- Connects disk volumes to host
+- Safety check: refuses to overwrite existing VM config
+
+**Usage:**
+
+```bash
+# List available backups including destroyed volumes
+pve-pure-config-get -s pure1 -v 100 -r -l
+
+# Full VM restore from destroyed volumes
+pve-pure-config-get -s pure1 -v 100 -n snap1 -r
+```
+
+**Example restore session:**
+```
+$ pve-pure-config-get -s pure1 -v 100 -n snap1 -r
+
+Restore mode: Will recover destroyed volumes and place config in PVE
+
+Searching for config backups for VM 100...
+
+Available config backups:
+-------------------------------------------------------------------------
+  No.  Snapshot Name  Volume                                  Status
+-------------------------------------------------------------------------
+     1  snap1          pve1::pve-pure1-100-vmconf-snap1        [DESTROYED]
+-------------------------------------------------------------------------
+
+Retrieving config from: pve1::pve-pure1-100-vmconf-snap1
+Recovering destroyed config volume...
+Config volume recovered.
+Connecting volume to host 'pve-mycluster-pve1'...
+...
+
+=== Starting VM Restore ===
+Found 1 disk volume(s) in config
+Recovering destroyed volume: pve1::pve-pure1-100-disk0 ... OK
+
+Connecting disk volumes to host 'pve-mycluster-pve1'...
+Rescanning for devices...
+
+Placing config in /etc/pve/qemu-server/100.conf...
+Cleaning up config volume...
+
+============================================================
+VM 100 restored successfully!
+============================================================
+Config file: /etc/pve/qemu-server/100.conf
+Recovered volumes: 1
+
+You can now start the VM from PVE web UI or CLI:
+  qm start 100
+```
+
+**Important notes:**
+- Works even if VM is completely deleted from PVE
+- Volumes must not be eradicated from Pure Storage (still in "Destroyed Volumes")
+- If VM config already exists in PVE, restore will be refused (delete it first)
+
 ## Known Limitations
 
 ### Full Clone Limitation
@@ -334,6 +494,40 @@ Volumes that are destroyed but not yet eradicated on Pure Storage are automatica
 5. Reload multipath:
    ```bash
    multipathd reconfigure
+   ```
+
+### FC Device Not Appearing
+
+1. Check FC HBA ports are online:
+   ```bash
+   cat /sys/class/fc_host/host*/port_state
+   ```
+
+2. Check FC target ports are visible:
+   ```bash
+   ls /sys/class/fc_remote_ports/
+   ```
+
+3. Verify FC zoning - ensure host WWPNs can see Pure Storage target WWPNs:
+   ```bash
+   cat /sys/class/fc_host/host*/port_name
+   cat /sys/class/fc_remote_ports/rport-*/port_name
+   ```
+
+4. Issue LIP (Loop Initialization Primitive) to rescan fabric:
+   ```bash
+   echo 1 > /sys/class/fc_host/host0/issue_lip
+   ```
+
+5. Rescan SCSI hosts for new LUNs:
+   ```bash
+   echo "- - -" > /sys/class/scsi_host/host0/scan
+   ```
+
+6. Check multipath:
+   ```bash
+   multipathd show maps
+   multipath -ll
    ```
 
 ### Authentication Failures
@@ -397,6 +591,7 @@ make install
 |------|------|
 | Plugin module | `/usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm` |
 | API module | `/usr/share/perl5/PVE/Storage/Custom/PureStorage/API.pm` |
+| Config retrieval tool | `/usr/bin/pve-pure-config-get` |
 | Storage config | `/etc/pve/storage.cfg` |
 | Multipath config | `/etc/multipath/conf.d/pure-storage.conf` |
 
