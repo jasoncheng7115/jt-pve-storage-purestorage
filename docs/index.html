@@ -87,6 +87,10 @@
             <span class="lang-en">Architecture</span>
             <span class="lang-zh">系統架構</span>
         </a>
+        <a href="#vm-config-backup" class="sidebar__link">
+            <span class="lang-en">VM Config Backup</span>
+            <span class="lang-zh">VM 設定備份</span>
+        </a>
         <a href="#multipath-safety" class="sidebar__link">
             <span class="lang-en">Multipath Safety</span>
             <span class="lang-zh">Multipath 安全規則</span>
@@ -1003,6 +1007,180 @@
                 <span class="lang-zh">用於擷取陣列上 VM 設定備份的 CLI 工具，適用於災難復原情境。</span>
             </div>
         </div>
+    </div>
+</section>
+
+<!-- ---- VM Config Backup ---- -->
+<section class="doc-section" id="vm-config-backup">
+    <h2 class="section-title">
+        <span class="lang-en">VM Config Backup</span>
+        <span class="lang-zh">VM 設定備份</span>
+    </h2>
+    <p class="section-subtitle">
+        <span class="lang-en">When you create a snapshot, the plugin automatically backs up the VM configuration file to Pure Storage. This means you can recover not only the disk data but also the VM settings as they were at that point in time.</span>
+        <span class="lang-zh">建立快照時，Plugin 會自動將 VM 設定檔備份到 Pure Storage。這讓您不僅可以還原磁碟資料，也可以還原該時間點的 VM 設定。</span>
+    </p>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">How It Works</span>
+        <span class="lang-zh">運作方式</span>
+    </h3>
+    <ul>
+        <li>
+            <span class="lang-en"><strong>Automatic</strong> &mdash; the config is saved every time a snapshot is created. No extra setting required.</span>
+            <span class="lang-zh"><strong>自動</strong> &mdash; 每次建立快照都會儲存設定，不需任何額外設定。</span>
+        </li>
+        <li>
+            <span class="lang-en"><strong>Per-snapshot</strong> &mdash; each snapshot gets its own independent config backup, so different points in time can have different configs.</span>
+            <span class="lang-zh"><strong>獨立於每個快照</strong> &mdash; 每個快照都有自己獨立的設定備份，不同時間點可以有不同的設定。</span>
+        </li>
+        <li>
+            <span class="lang-en"><strong>Storage format</strong> &mdash; a 1MB ext4 volume named <code>pve-{storage}-{vmid}-vmconf-{snapname}</code> containing <code>{vmid}.conf</code> and a <code>metadata.txt</code> with timestamp and source info.</span>
+            <span class="lang-zh"><strong>儲存格式</strong> &mdash; 1MB 的 ext4 volume，命名為 <code>pve-{storage}-{vmid}-vmconf-{snapname}</code>，內含 <code>{vmid}.conf</code> 與標記時間戳與來源資訊的 <code>metadata.txt</code>。</span>
+        </li>
+        <li>
+            <span class="lang-en"><strong>Hidden from UI</strong> &mdash; config volumes do not appear in the Proxmox VE disk listing. They are storage-side artifacts only.</span>
+            <span class="lang-zh"><strong>不出現在 UI</strong> &mdash; 設定 volume 不會出現在 Proxmox VE 的磁碟清單中，純粹是儲存端的物件。</span>
+        </li>
+    </ul>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Automatic Cleanup</span>
+        <span class="lang-zh">自動清理</span>
+    </h3>
+    <ul>
+        <li>
+            <span class="lang-en">When a snapshot is deleted, its corresponding config volume is also deleted.</span>
+            <span class="lang-zh">刪除快照時，對應的設定 volume 也會一併刪除。</span>
+        </li>
+        <li>
+            <span class="lang-en">When the last disk of a VM is removed, all its config volumes are deleted along with it.</span>
+            <span class="lang-zh">當 VM 的最後一顆磁碟被刪除時，該 VM 所有的設定 volume 也會被一併刪除。</span>
+        </li>
+    </ul>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Retrieving a Config Backup</span>
+        <span class="lang-zh">取出設定備份</span>
+    </h3>
+    <p>
+        <span class="lang-en">The package ships with a CLI tool <code>pve-pure-config-get</code> for retrieving config backups.</span>
+        <span class="lang-zh">套件附帶 CLI 工具 <code>pve-pure-config-get</code>，用於取出設定備份。</span>
+    </p>
+    <pre><span class="cmd">pve-pure-config-get</span> <span class="flag">-s</span> &lt;storage&gt; <span class="flag">-v</span> &lt;vmid&gt; [<span class="flag">-n</span> &lt;snap&gt;] [<span class="flag">-o</span> &lt;output_dir&gt;] [<span class="flag">-l</span>] [<span class="flag">-r</span>]</pre>
+
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>
+                    <span class="lang-en">Option</span>
+                    <span class="lang-zh">選項</span>
+                </th>
+                <th>
+                    <span class="lang-en">Description</span>
+                    <span class="lang-zh">說明</span>
+                </th>
+            </tr></thead>
+            <tbody>
+                <tr><td><code>-s, --storage &lt;name&gt;</code></td><td>
+                    <span class="lang-en">Pure Storage storage ID (required)</span>
+                    <span class="lang-zh">Pure Storage 的 storage ID（必要）</span>
+                </td></tr>
+                <tr><td><code>-v, --vmid &lt;id&gt;</code></td><td>
+                    <span class="lang-en">VM ID to retrieve config for (required)</span>
+                    <span class="lang-zh">要取出設定的 VM ID（必要）</span>
+                </td></tr>
+                <tr><td><code>-n, --snap &lt;name&gt;</code></td><td>
+                    <span class="lang-en">Specific snapshot to retrieve (skips interactive selection)</span>
+                    <span class="lang-zh">指定要取出的快照名稱（跳過互動選擇）</span>
+                </td></tr>
+                <tr><td><code>-o, --output &lt;dir&gt;</code></td><td>
+                    <span class="lang-en">Output directory (default: <code>/tmp</code>)</span>
+                    <span class="lang-zh">輸出目錄（預設：<code>/tmp</code>）</span>
+                </td></tr>
+                <tr><td><code>-l, --list</code></td><td>
+                    <span class="lang-en">List available snapshots, do not retrieve</span>
+                    <span class="lang-zh">列出可用的快照，但不取出</span>
+                </td></tr>
+                <tr><td><code>-r, --restore</code></td><td>
+                    <span class="lang-en">Disaster recovery mode (see below)</span>
+                    <span class="lang-zh">災難復原模式（見下方）</span>
+                </td></tr>
+                <tr><td><code>-h, --help</code></td><td>
+                    <span class="lang-en">Show help message</span>
+                    <span class="lang-zh">顯示說明訊息</span>
+                </td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Examples</span>
+        <span class="lang-zh">範例</span>
+    </h3>
+    <pre><span class="comment"># List available config backups for VM 100</span>
+<span class="cmd">pve-pure-config-get</span> <span class="flag">-s</span> pure1 <span class="flag">-v</span> <span class="string">100</span> <span class="flag">-l</span>
+
+<span class="comment"># Interactive retrieval (will prompt for snapshot selection)</span>
+<span class="cmd">pve-pure-config-get</span> <span class="flag">-s</span> pure1 <span class="flag">-v</span> <span class="string">100</span>
+
+<span class="comment"># Retrieve a specific snapshot's config directly</span>
+<span class="cmd">pve-pure-config-get</span> <span class="flag">-s</span> pure1 <span class="flag">-v</span> <span class="string">100</span> <span class="flag">-n</span> snap1
+
+<span class="comment"># Retrieve to a custom directory</span>
+<span class="cmd">pve-pure-config-get</span> <span class="flag">-s</span> pure1 <span class="flag">-v</span> <span class="string">100</span> <span class="flag">-n</span> snap1 <span class="flag">-o</span> /root/configs</pre>
+
+    <p>
+        <span class="lang-en">Output files are written as:</span>
+        <span class="lang-zh">輸出檔案為：</span>
+    </p>
+    <pre>/tmp/vm-{vmid}-{snapname}-{vmid}.conf      <span class="comment"># VM config</span>
+/tmp/vm-{vmid}-{snapname}-metadata.txt     <span class="comment"># Backup metadata</span></pre>
+
+    <p>
+        <span class="lang-en">To restore the config back into Proxmox VE, copy the <code>.conf</code> file to <code>/etc/pve/qemu-server/{vmid}.conf</code> (or <code>/etc/pve/lxc/{vmid}.conf</code> for LXC).</span>
+        <span class="lang-zh">要將設定還原到 Proxmox VE，將 <code>.conf</code> 檔複製到 <code>/etc/pve/qemu-server/{vmid}.conf</code>（LXC 則是 <code>/etc/pve/lxc/{vmid}.conf</code>）。</span>
+    </p>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Disaster Recovery (<code>-r</code> mode)</span>
+        <span class="lang-zh">災難復原（<code>-r</code> 模式）</span>
+    </h3>
+    <p>
+        <span class="lang-en">The <code>--restore</code> flag enables full VM recovery from <strong>destroyed</strong> volumes that have not yet been eradicated by Pure Storage. This is the lifeline when a VM has been accidentally deleted: while Pure's destroyed-volume window is still open (default 24 hours), both the config backup and the disk volumes can be brought back.</span>
+        <span class="lang-zh"><code>--restore</code> 旗標啟用從 <strong>已刪除但尚未 eradicate</strong> 的 volume 完整復原 VM。當 VM 被誤刪、但 Pure 的 destroyed-volume 視窗（預設 24 小時）還沒關閉時，這就是救命稻草：設定備份與磁碟 volume 都可以救回。</span>
+    </p>
+    <ul>
+        <li>
+            <span class="lang-en">Searches both active and destroyed volumes; shows status as <code>[active]</code> or <code>[DESTROYED]</code>.</span>
+            <span class="lang-zh">同時搜尋 active 與 destroyed 的 volume，狀態以 <code>[active]</code> 或 <code>[DESTROYED]</code> 顯示。</span>
+        </li>
+        <li>
+            <span class="lang-en">Automatically recovers destroyed config and disk volumes from Pure Storage.</span>
+            <span class="lang-zh">自動從 Pure Storage 救回已刪除的設定與磁碟 volume。</span>
+        </li>
+        <li>
+            <span class="lang-en">Places the config file directly into the correct Proxmox VE location (<code>/etc/pve/qemu-server/</code> or <code>/etc/pve/lxc/</code>).</span>
+            <span class="lang-zh">直接將設定檔放置到 Proxmox VE 正確位置（<code>/etc/pve/qemu-server/</code> 或 <code>/etc/pve/lxc/</code>）。</span>
+        </li>
+        <li>
+            <span class="lang-en">Connects the recovered disk volumes to this host so the VM can start.</span>
+            <span class="lang-zh">將救回的磁碟 volume 重新連到此主機，VM 即可啟動。</span>
+        </li>
+        <li>
+            <span class="lang-en">Safety check: refuses to overwrite an existing VM config (use a different VM ID or delete the existing one first).</span>
+            <span class="lang-zh">安全檢查：拒絕覆寫既有的 VM 設定（請改用其他 VM ID，或先刪除既有設定）。</span>
+        </li>
+    </ul>
+    <pre><span class="comment"># List available backups including destroyed volumes</span>
+<span class="cmd">pve-pure-config-get</span> <span class="flag">-s</span> pure1 <span class="flag">-v</span> <span class="string">100</span> <span class="flag">-r</span> <span class="flag">-l</span>
+
+<span class="comment"># Full VM restore from destroyed volumes</span>
+<span class="cmd">pve-pure-config-get</span> <span class="flag">-s</span> pure1 <span class="flag">-v</span> <span class="string">100</span> <span class="flag">-n</span> snap1 <span class="flag">-r</span></pre>
+
+    <div class="alert alert--warning">
+        <span class="lang-en"><strong>Note:</strong> Pure Storage's default destroyed-volume retention is 24 hours before automatic eradication. After eradication the data cannot be recovered by this tool. Adjust the array's eradication timer if you need a longer recovery window.</span>
+        <span class="lang-zh"><strong>注意：</strong>Pure Storage 預設保留 destroyed volume 24 小時後自動 eradicate；eradicate 之後此工具無法救回。如需更長的救援視窗，請調整陣列上的 eradication 時間。</span>
     </div>
 </section>
 
