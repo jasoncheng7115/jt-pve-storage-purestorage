@@ -1,6 +1,6 @@
 # Pure Storage FlashArray Storage Plugin for Proxmox VE
 
-**Language / 語言：** [English](README.md) | [繁體中文](README_zh-TW.md)
+**[English](README.md)** | **[繁體中文](README_zh-TW.md)** | **[線上文件](https://jasoncheng7115.github.io/jt-pve-storage-purestorage/?lang=zh)**
 
 此 Plugin 讓 Proxmox VE 9.1 以上版本可以透過 iSCSI 或 Fibre Channel 協定使用 Pure Storage FlashArray 作為 VM 和 Container 的磁碟儲存。
 
