@@ -370,8 +370,8 @@
             <span class="lang-zh">Proxmox VE 管理網路可連線至陣列管理 IP（HTTPS/443）</span>
         </li>
         <li>
-            <span class="lang-en">iSCSI or FC ports configured and reachable from PVE nodes</span>
-            <span class="lang-zh">已設定 iSCSI 或 FC port，且 PVE 節點可連線</span>
+            <span class="lang-en">iSCSI or FC ports configured and reachable from Proxmox VE nodes</span>
+            <span class="lang-zh">已設定 iSCSI 或 FC port，且 Proxmox VE 節點可連線</span>
         </li>
         <li>
             <span class="lang-en">User account with API token, or username + password with permissions for volume, host, snapshot, and pod operations</span>
@@ -1015,7 +1015,7 @@
     <div class="alert alert--danger">
         <strong>
             <span class="lang-en">READ THIS BEFORE INSTALLING. These rules prevent Proxmox VE node hangs and accidental disconnection of other storage.</span>
-            <span class="lang-zh">安裝前請務必閱讀。這些規則防止 PVE 節點當機及意外斷開其他儲存。</span>
+            <span class="lang-zh">安裝前請務必閱讀。這些規則防止 Proxmox VE 節點當機及意外斷開其他儲存。</span>
         </strong>
     </div>
 
@@ -1048,8 +1048,8 @@
         <span class="lang-zh">規則 3：檢查您的 multipath.conf 設定</span>
     </h3>
     <p>
-        <span class="lang-en">If your config contains any of these, the entire PVE node can hang when a Pure volume is deleted or becomes unavailable:</span>
-        <span class="lang-zh">如果您的設定包含以下任何一項，當 Pure volume 被刪除或變得不可用時，整個 PVE 節點可能會當機：</span>
+        <span class="lang-en">If your config contains any of these, the entire Proxmox VE node can hang when a Pure volume is deleted or becomes unavailable:</span>
+        <span class="lang-zh">如果您的設定包含以下任何一項，當 Pure volume 被刪除或變得不可用時，整個 Proxmox VE 節點可能會當機：</span>
     </p>
     <div class="table-wrap">
         <table>
@@ -1106,12 +1106,12 @@
     </div>
 
     <h3 class="subsection-title">
-        <span class="lang-en">Rule 4: lvm.conf global_filter on PVE 7&rarr;9 upgraded nodes</span>
-        <span class="lang-zh">規則 4：從 PVE 7 升級至 9 的節點需設定 lvm.conf global_filter</span>
+        <span class="lang-en">Rule 4: lvm.conf global_filter on Proxmox VE 7&rarr;9 upgraded nodes</span>
+        <span class="lang-zh">規則 4：從 Proxmox VE 7 升級至 9 的節點需設定 lvm.conf global_filter</span>
     </h3>
     <p>
-        <span class="lang-en">PVE 9.x ships <code>lvm.conf</code> without a <code>global_filter</code>. On nodes upgraded from PVE 7, the host LVM scanner can auto-activate VGs found INSIDE VM disks (guest OS LVM), which then become "holders" of the multipath device and block volume deletion. The postinst detects this and prints the exact filter to add:</span>
-        <span class="lang-zh">PVE 9.x 出廠的 <code>lvm.conf</code> 沒有 <code>global_filter</code>。從 PVE 7 升級的節點，主機 LVM 掃描器可能 auto-activate VM 磁碟內部的 VG（客體 OS 的 LVM），這些 VG 會成為 multipath 裝置的 "holder" 並擋住 volume 刪除。Postinst 會偵測並印出要加入的 filter：</span>
+        <span class="lang-en">Proxmox VE 9.x ships <code>lvm.conf</code> without a <code>global_filter</code>. On nodes upgraded from Proxmox VE 7, the host LVM scanner can auto-activate VGs found INSIDE VM disks (guest OS LVM), which then become "holders" of the multipath device and block volume deletion. The postinst detects this and prints the exact filter to add:</span>
+        <span class="lang-zh">Proxmox VE 9.x 出廠的 <code>lvm.conf</code> 沒有 <code>global_filter</code>。從 Proxmox VE 7 升級的節點，主機 LVM 掃描器可能 auto-activate VM 磁碟內部的 VG（客體 OS 的 LVM），這些 VG 會成為 multipath 裝置的 "holder" 並擋住 volume 刪除。Postinst 會偵測並印出要加入的 filter：</span>
     </p>
     <pre><span class="comment"># /etc/lvm/lvm.conf</span>
 global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <span class="string">"a|.*|"</span> ]</pre>
@@ -1314,7 +1314,7 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
     <pre><span class="comment"># Check storage status</span>
 <span class="cmd">pvesm</span> status
 
-<span class="comment"># Check PVE daemon logs</span>
+<span class="comment"># Check Proxmox VE daemon logs</span>
 <span class="cmd">journalctl</span> <span class="flag">-xeu</span> pvedaemon <span class="flag">--since</span> <span class="string">"10 minutes ago"</span>
 
 <span class="comment"># Check iSCSI sessions</span>
@@ -1402,8 +1402,8 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         </summary>
         <div class="detail-content">
             <p>
-                <span class="lang-en"><strong>Symptoms:</strong> <code>vgs</code> or other commands hang. <code>ps aux</code> shows processes in D state. PVE operations time out.</span>
-                <span class="lang-zh"><strong>症狀：</strong><code>vgs</code> 或其他指令卡住。<code>ps aux</code> 顯示 D state 的行程。PVE 操作逾時。</span>
+                <span class="lang-en"><strong>Symptoms:</strong> <code>vgs</code> or other commands hang. <code>ps aux</code> shows processes in D state. Proxmox VE operations time out.</span>
+                <span class="lang-zh"><strong>症狀：</strong><code>vgs</code> 或其他指令卡住。<code>ps aux</code> 顯示 D state 的行程。Proxmox VE 操作逾時。</span>
             </p>
             <p>
                 <span class="lang-en"><strong>Root cause:</strong> Usually a stale multipath device with <code>queue_if_no_path</code> or <code>no_path_retry queue</code>. Any process that touches the device enters uninterruptible sleep (D-state).</span>
@@ -1432,8 +1432,8 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         </summary>
         <div class="detail-content">
             <p>
-                <span class="lang-en"><strong>Symptoms:</strong> <code>Cannot delete volume: device is still in use (has holders)</code>. Common on PVE nodes upgraded from 7 to 8 to 9.</span>
-                <span class="lang-zh"><strong>症狀：</strong><code>Cannot delete volume: device is still in use (has holders)</code>。常見於從 PVE 7 升級至 8 再到 9 的節點。</span>
+                <span class="lang-en"><strong>Symptoms:</strong> <code>Cannot delete volume: device is still in use (has holders)</code>. Common on Proxmox VE nodes upgraded from 7 to 8 to 9.</span>
+                <span class="lang-zh"><strong>症狀：</strong><code>Cannot delete volume: device is still in use (has holders)</code>。常見於從 Proxmox VE 7 升級至 8 再到 9 的節點。</span>
             </p>
             <p>
                 <span class="lang-en"><strong>Root cause:</strong> The host's LVM scanner auto-activated VGs found INSIDE VM disks (guest OS LVM). This happens when <code>/etc/lvm/lvm.conf</code> has no <code>global_filter</code> to exclude Pure multipath devices. Note: kpartx partition holders are NOT this case (v1.1.7 fixed that separately).</span>
@@ -1516,8 +1516,8 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <div class="changelog-version">v1.1.8 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
         <div class="changelog-date">2026-04-26</div>
         <div class="changelog-summary">
-            <span class="lang-en">Sibling-pattern audit from NetApp v0.2.9 lessons. Fixed <code>_cleanup_orphaned_devices()</code> unconditionally untracking WWIDs after a failed cleanup (mirrors the conditional-untrack pattern in <code>free_image()</code>). Wrapped <code>glob("/dev/disk/by-id/...")</code> calls in <code>alarm(5)</code> to bound the lookup if the underlying block layer hangs.</span>
-            <span class="lang-zh">來自 NetApp v0.2.9 的 sibling-pattern 稽核。修復 <code>_cleanup_orphaned_devices()</code> 在清理失敗後仍無條件 untrack WWID（鏡像 <code>free_image()</code> 的 conditional-untrack 模式）。<code>glob("/dev/disk/by-id/...")</code> 加上 <code>alarm(5)</code> 保護，避免底層 block layer 卡住時無上限等待。</span>
+            <span class="lang-en">Sibling-pattern audit from author's related NetApp plugin v0.2.9. Fixed <code>_cleanup_orphaned_devices()</code> unconditionally untracking WWIDs after a failed cleanup (mirrors the conditional-untrack pattern in <code>free_image()</code>). Wrapped <code>glob("/dev/disk/by-id/...")</code> calls in <code>alarm(5)</code> to bound the lookup if the underlying block layer hangs.</span>
+            <span class="lang-zh">來自本作者相關專案 NetApp v0.2.9 的 sibling-pattern 稽核。修復 <code>_cleanup_orphaned_devices()</code> 在清理失敗後仍無條件 untrack WWID（鏡像 <code>free_image()</code> 的 conditional-untrack 模式）。<code>glob("/dev/disk/by-id/...")</code> 加上 <code>alarm(5)</code> 保護，避免底層 block layer 卡住時無上限等待。</span>
         </div>
     </div>
 
@@ -1534,8 +1534,8 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <div class="changelog-version">v1.1.6 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
         <div class="changelog-date">2026-04-10</div>
         <div class="changelog-summary">
-            <span class="lang-en">Postinst Service Reload + lvm.conf Detection. Reloads pvedaemon, pvestatd, pveproxy via SIGHUP (not restart, to avoid stop-phase hang on D-state children). Detects missing <code>lvm.conf global_filter</code> on PVE 7&rarr;9 upgraded nodes and prints the exact filter to add.</span>
-            <span class="lang-zh">Postinst 服務 Reload + lvm.conf 偵測。透過 SIGHUP reload pvedaemon、pvestatd、pveproxy（不用 restart，避免 stop 階段在 D-state child 上卡住）。偵測 PVE 7→9 升級節點上缺少的 <code>lvm.conf global_filter</code> 並印出正確 filter。</span>
+            <span class="lang-en">Postinst Service Reload + lvm.conf Detection. Reloads pvedaemon, pvestatd, pveproxy via SIGHUP (not restart, to avoid stop-phase hang on D-state children). Detects missing <code>lvm.conf global_filter</code> on Proxmox VE 7&rarr;9 upgraded nodes and prints the exact filter to add.</span>
+            <span class="lang-zh">Postinst 服務 Reload + lvm.conf 偵測。透過 SIGHUP reload pvedaemon、pvestatd、pveproxy（不用 restart，避免 stop 階段在 D-state child 上卡住）。偵測 Proxmox VE 7→9 升級節點上缺少的 <code>lvm.conf global_filter</code> 並印出正確 filter。</span>
         </div>
     </div>
 
@@ -1636,9 +1636,23 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-zh">致謝</span>
     </h2>
     <p>
-        <span class="lang-en">Thanks to the Proxmox VE community for the well-documented Storage Plugin API, and to Pure Storage for publishing comprehensive REST API documentation that made dual 1.x/2.x support straightforward.</span>
-        <span class="lang-zh">感謝 Proxmox VE 社群提供文件完善的 Storage Plugin API，也感謝 Pure Storage 公開完整的 REST API 文件，讓 1.x/2.x 雙版本支援得以順利實作。</span>
+        <span class="lang-en">Special thanks to:</span>
+        <span class="lang-zh">特別感謝：</span>
     </p>
+    <ul>
+        <li>
+            <span class="lang-en"><strong>Pure Storage</strong> &mdash; for excellent storage technology and comprehensive REST API documentation that made dual 1.x/2.x support straightforward.</span>
+            <span class="lang-zh"><strong>Pure Storage 原廠</strong> &mdash; 提供優秀的儲存技術與完善的 REST API，讓 1.x/2.x 雙版本支援得以順利實作。</span>
+        </li>
+        <li>
+            <span class="lang-en"><strong>MetaAge (邁達特)</strong> &mdash; for providing test equipment and environment for development and testing.</span>
+            <span class="lang-zh"><strong>MetaAge 邁達特（代理商）</strong> &mdash; 協助提供測試設備與環境進行開發測試。</span>
+        </li>
+        <li>
+            <span class="lang-en"><strong>Proxmox VE community</strong> &mdash; for the well-documented Storage Plugin API.</span>
+            <span class="lang-zh"><strong>Proxmox VE 社群</strong> &mdash; 提供文件完善的 Storage Plugin API。</span>
+        </li>
+    </ul>
 
     <h3 class="subsection-title">
         <span class="lang-en">References</span>

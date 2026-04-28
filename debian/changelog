@@ -22,8 +22,9 @@ jt-pve-storage-purestorage (1.1.8-1) stable; urgency=medium
     same kernel block-layer wait that blocks vgs and lvs. Pattern
     matches existing _run_cmd / sysfs_read_with_timeout style.
 
-  * Sibling-pattern audit driven by NetApp plugin v0.2.9 fixes. Three
-    of the NetApp issues did not have a counterpart here: Pure uses
+  * Sibling-pattern audit driven by the author's related
+    jt-pve-storage-netapp plugin v0.2.9 fixes. Three of the NetApp
+    issues did not have a counterpart here: Pure uses
     volume names directly as identifiers (no lookup-after-create
     eventual consistency window); alloc_image was already a bounded
     retry loop matching clone_image; multipath -F is already a

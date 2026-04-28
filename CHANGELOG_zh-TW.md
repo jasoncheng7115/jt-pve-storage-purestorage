@@ -10,10 +10,10 @@
 
 ## [1.1.8] - 2026-04-26
 
-### 來自 NetApp v0.2.9 的 sibling-pattern 稽核
+### 來自本作者相關專案 NetApp v0.2.9 的 sibling-pattern 稽核
 
-姊妹版 NetApp 插件針對兩個問題出了修正，引發本專案進行 sibling-pattern
-稽核。其中兩個在此程式碼有對應的 bug，另外三個沒有（Pure 直接以卷名做
+本作者另一個專案 jt-pve-storage-netapp v0.2.9 針對兩個問題出了修正，
+引發本專案進行 sibling-pattern 稽核。其中兩個在此程式碼有對應的 bug，另外三個沒有（Pure 直接以卷名做
 identifier，不會踩到 create-then-lookup 的 eventual consistency 視窗；
 `alloc_image` 早已是有界 retry loop；`multipath -F` 已是 forbidden
 pattern）。

@@ -10,10 +10,10 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ## [1.1.8] - 2026-04-26
 
-### Sibling-pattern audit from NetApp v0.2.9 lessons
+### Sibling-pattern audit from author's related NetApp plugin v0.2.9
 
-The sibling NetApp plugin shipped fixes for two issues that called for a
-sibling-pattern audit on this codebase. Two of those issues had real
+The author's sibling jt-pve-storage-netapp plugin shipped v0.2.9 fixes
+for two issues that called for a sibling-pattern audit on this codebase. Two of those issues had real
 counterparts here; three did not (Pure uses volume names directly as
 identifiers so it is not exposed to the lookup-after-create eventual
 consistency window; `alloc_image` was already a bounded retry loop;
