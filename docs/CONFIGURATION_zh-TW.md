@@ -4,9 +4,10 @@
 
 ## 儲存模型（快速回顧）
 
-本外掛採 **direct volume provisioning（直接卷供應）**：每一顆 VM 磁
-碟都是 Pure Storage 上一個獨立的 volume，大小即為當下要求的容量。
-陣列上沒有任何「預先建立的大 LUN」或儲存池在主機端被切片。
+本外掛採 **direct volume provisioning（直接 Volume 供應）**：每一
+顆 VM 磁碟都是 Pure Storage 上一個獨立的 Volume，大小即為當下要求
+的容量。陣列上沒有任何「預先建立的大 LUN」或儲存集區在主機端被切
+片。
 
 ```
 Traditional pool-based SAN              This plugin
@@ -61,12 +62,12 @@ Traditional pool-based SAN              This plugin
 | `pure-host-mode` | per-node | Host 模式： `per-node` 或 `shared` |
 | `pure-cluster-name` | pve | 用於 host 命名的叢集名稱 |
 | `pure-device-timeout` | 60 | 裝置探索逾時 （秒） |
-| `pure-pod` | （無） | ActiveCluster pod 名稱。設定後，所有卷都會以 `<pod>::` 為前綴建立 |
+| `pure-pod` | （無） | ActiveCluster pod 名稱。設定後，所有 Volume 都會以 `<pod>::` 為前綴建立 |
 
 ### Host 模式
 
 - **per-node** （預設，基於安全性建議使用）：每個 PVE 節點對應一個 Pure
-  host 物件，命名為 `pve-<cluster-name>-<nodename>`。每個卷都會連線到所有
+  host 物件，命名為 `pve-<cluster-name>-<nodename>`。每個 Volume 都會連線到所有
   節點的 host 以支援即時遷移。
 - **shared**：單一 Pure host 物件包含所有節點的 WWPN/IQN，命名為
   `pve-<cluster-name>-shared`。對應較簡單但隔離性較差。
@@ -132,7 +133,7 @@ purestorage: pure-pod1
     shared 1
 ```
 
-此儲存上的所有卷都會建立為 `testpod::pve-...`。外掛在透過 PVE 列出卷時
+此儲存上的所有 Volume 都會建立為 `testpod::pve-...`。外掛在透過 PVE 列出 Volume 時
 會自動剝除前綴。
 
 ## Pure Storage API 使用者設定

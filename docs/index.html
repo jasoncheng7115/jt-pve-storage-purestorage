@@ -914,7 +914,7 @@
     </h3>
     <p>
         <span class="lang-en">This plugin uses <strong>direct volume provisioning</strong>: every VM disk is allocated as its own dedicated Pure Storage volume, sized exactly to the requested capacity. There is no pre-allocated "big LUN" or storage pool that gets carved into smaller pieces on the host side, and no LVM-thin or FlexVol-style intermediate container. When Proxmox VE asks for a 50 GiB disk, the plugin calls <code>volume_create</code> on the array with size = 50 GiB. When Proxmox VE asks for a snapshot, the plugin calls <code>snapshot_create</code> on that volume. The semantics map 1:1, so Pure's data services (deduplication, compression, snapshot, ActiveCluster, async replication) all apply at the natural unit of one VM disk.</span>
-        <span class="lang-zh">本外掛採 <strong>direct volume provisioning（直接卷供應）</strong>：每一顆 VM 磁碟在 Pure FlashArray 上對應一個獨立的 volume，大小即為當下要求的容量。陣列上沒有任何「預先建立的大 LUN」或儲存池在主機端被切片，也沒有 LVM-thin 或 FlexVol 那種中間容器層。當 Proxmox VE 要求 50 GiB 磁碟時，外掛對陣列呼叫 <code>volume_create</code> 建立一顆 50 GiB 的 volume；要求快照時，外掛對該 volume 呼叫 <code>snapshot_create</code>。語意 1:1 對齊，Pure 的資料服務（重複資料刪除、壓縮、快照、ActiveCluster、非同步複寫）全部以「一顆 VM 磁碟」為自然單位作用。</span>
+        <span class="lang-zh">本外掛採 <strong>direct volume provisioning（直接 Volume 供應）</strong>：每一顆 VM 磁碟在 Pure FlashArray 上對應一個獨立的 Volume，大小即為當下要求的容量。陣列上沒有任何「預先建立的大 LUN」或儲存集區在主機端被切片，也沒有 LVM-thin 或 FlexVol 那種中間容器層。當 Proxmox VE 要求 50 GiB 磁碟時，外掛對陣列呼叫 <code>volume_create</code> 建立一顆 50 GiB 的 Volume；要求快照時，外掛對該 Volume 呼叫 <code>snapshot_create</code>。語意 1:1 對齊，Pure 的資料服務（重複資料刪除、壓縮、快照、ActiveCluster、非同步複寫）全部以「一顆 VM 磁碟」為自然單位作用。</span>
     </p>
     <div class="ascii-diagram">Proxmox VE Cluster                    Pure Storage FlashArray
 +------------------+                  +-------------------+
@@ -937,11 +937,11 @@
 
     <h3 class="subsection-title">
         <span class="lang-en">Direct Volume Provisioning vs Pool-Based SAN</span>
-        <span class="lang-zh">直接卷供應 vs 儲存池式 SAN</span>
+        <span class="lang-zh">直接 Volume 供應 vs 儲存集區式 SAN</span>
     </h3>
     <p>
         <span class="lang-en">The pool-based model puts an LVM (or LVM-thin) layer between the array and Proxmox VE. Snapshots, clones, and replication happen at the LVM layer &mdash; the array sees a single giant LUN that is permanently "in use", and its data services cannot reason about individual VM disks. This plugin removes that intermediate layer entirely.</span>
-        <span class="lang-zh">儲存池式模型在陣列與 Proxmox VE 之間插入一層 LVM（或 LVM-thin）。快照、複製、複寫都發生在 LVM 層 &mdash; 陣列只看到一顆永遠「使用中」的大 LUN，無法針對單一 VM 磁碟做 dedup ratio、replication policy、snapshot retention。本外掛完全移除這層中介。</span>
+        <span class="lang-zh">儲存集區式模型在陣列與 Proxmox VE 之間插入一層 LVM（或 LVM-thin）。快照、複製、複寫都發生在 LVM 層 &mdash; 陣列只看到一顆永遠「使用中」的大 LUN，無法針對單一 VM 磁碟做 dedup ratio、replication policy、snapshot retention。本外掛完全移除這層中介。</span>
     </p>
     <div class="ascii-diagram">Traditional pool-based SAN model
 =================================
@@ -1034,7 +1034,7 @@ QEMU block device               passed to qemu           (raw, no FS layer
         </li>
         <li>
             <span class="lang-en"><strong>Online resize is one API call</strong> &mdash; <code>volume_resize</code> on the array, then per-path SCSI rescan + <code>multipath_resize_map</code> on the host. No filesystem-level resize on a parent pool.</span>
-            <span class="lang-zh"><strong>線上擴充僅一次 API 呼叫</strong> &mdash; 對陣列下 <code>volume_resize</code>，主機端再進行每路徑 SCSI rescan 與 <code>multipath_resize_map</code>。沒有上層儲存池的檔案系統擴充步驟。</span>
+            <span class="lang-zh"><strong>線上擴充僅一次 API 呼叫</strong> &mdash; 對陣列下 <code>volume_resize</code>，主機端再進行每路徑 SCSI rescan 與 <code>multipath_resize_map</code>。沒有上層儲存集區的檔案系統擴充步驟。</span>
         </li>
         <li>
             <span class="lang-en"><strong>Live migration is implicit</strong> &mdash; every volume is connected to every node's host (per-node mode), so the same multipath device exists on every cluster node simultaneously. Proxmox VE just changes which node has the device open; no storage migration step is needed.</span>

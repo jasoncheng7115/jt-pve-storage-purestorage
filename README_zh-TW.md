@@ -142,9 +142,10 @@
 
 ## 儲存模型
 
-本外掛採 **direct volume provisioning（直接卷供應）** — 每一顆 VM
-磁碟在 Pure FlashArray 上對應一個獨立的 volume，大小即為當下要求的
-容量。陣列上沒有任何「預先建立的大 LUN」或儲存池在主機端被切片。
+本外掛採 **direct volume provisioning（直接 Volume 供應）** — 每
+一顆 VM 磁碟在 Pure FlashArray 上對應一個獨立的 Volume，大小即為當
+下要求的容量。陣列上沒有任何「預先建立的大 LUN」或儲存集區在主機端
+被切片。
 
 當 Proxmox VE 要求 50 GiB 磁碟時，外掛對陣列呼叫 `volume_create`
 建立一顆 50 GiB 的 volume；要求快照時，外掛對該 volume 呼叫
@@ -152,7 +153,7 @@
 壓縮、快照、ActiveCluster、非同步複寫）全部以「一顆 VM 磁碟」為自然
 單位作用。
 
-### 直接卷供應 vs 儲存池式 SAN 模型
+### 直接 Volume 供應 vs 儲存集區式 SAN 模型
 
 ```
 Traditional pool-based SAN model
@@ -196,7 +197,7 @@ This plugin (direct volume provisioning)
   the array, natively.
 ```
 
-儲存池式模型在陣列與 Proxmox VE 之間插入一層 LVM（或 LVM-thin）。
+儲存集區式模型在陣列與 Proxmox VE 之間插入一層 LVM（或 LVM-thin）。
 快照、複製、複寫都發生在 LVM 層 — 陣列只看到一顆永遠「使用中」的大
 LUN，無法針對單一 VM 磁碟做 dedup ratio、replication policy、
 snapshot retention。本外掛完全移除這層中介。
@@ -244,8 +245,8 @@ QEMU block device               passed to qemu           (raw, no FS layer
   直到被寫入。Proxmox VE 的「完整複製」是 Proxmox VE 設計選擇
   （透過 `qemu-img` 逐區塊複製），不是外掛限制。
 - **線上擴充僅一次 API 呼叫** — 對陣列下 `volume_resize`，主機端再
-  進行每路徑 SCSI rescan 與 `multipath_resize_map`。沒有上層儲存池
-  的檔案系統擴充步驟。
+  進行每路徑 SCSI rescan 與 `multipath_resize_map`。沒有上層儲存集
+  區的檔案系統擴充步驟。
 - **Live Migration 隱含完成** — 在 per-node 模式下，每個 volume
   都連到每個節點的 host，相同的 multipath 裝置同時存在於叢集所有
   節點。Proxmox VE 只是切換哪個節點開啟它，無需儲存遷移步驟。
