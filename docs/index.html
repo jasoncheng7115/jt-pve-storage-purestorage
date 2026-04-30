@@ -913,8 +913,8 @@
         <span class="lang-zh">1:1 架構模型</span>
     </h3>
     <p>
-        <span class="lang-en">Each VM disk maps directly to one Pure Storage volume. No intermediate FlexVol-style container -- the volume IS the disk. This makes snapshot, clone, and rollback semantics match the Proxmox VE model exactly.</span>
-        <span class="lang-zh">每個 VM 磁碟直接對應一個 Pure Storage volume。沒有 FlexVol 那種中間容器層 -- volume 即磁碟。快照、複製、倒回語意完全匹配 Proxmox VE 模型。</span>
+        <span class="lang-en">This plugin uses <strong>direct volume provisioning</strong>: every VM disk is allocated as its own dedicated Pure Storage volume, sized exactly to the requested capacity. There is no pre-allocated "big LUN" or storage pool that gets carved into smaller pieces on the host side, and no LVM-thin or FlexVol-style intermediate container. When Proxmox VE asks for a 50 GiB disk, the plugin calls <code>volume_create</code> on the array with size = 50 GiB. When Proxmox VE asks for a snapshot, the plugin calls <code>snapshot_create</code> on that volume. The semantics map 1:1, so Pure's data services (deduplication, compression, snapshot, ActiveCluster, async replication) all apply at the natural unit of one VM disk.</span>
+        <span class="lang-zh">本外掛採 <strong>direct volume provisioning（直接卷供應）</strong>：每一顆 VM 磁碟在 Pure FlashArray 上對應一個獨立的 volume，大小即為當下要求的容量。陣列上沒有任何「預先建立的大 LUN」或儲存池在主機端被切片，也沒有 LVM-thin 或 FlexVol 那種中間容器層。當 Proxmox VE 要求 50 GiB 磁碟時，外掛對陣列呼叫 <code>volume_create</code> 建立一顆 50 GiB 的 volume；要求快照時，外掛對該 volume 呼叫 <code>snapshot_create</code>。語意 1:1 對齊，Pure 的資料服務（重複資料刪除、壓縮、快照、ActiveCluster、非同步複寫）全部以「一顆 VM 磁碟」為自然單位作用。</span>
     </p>
     <div class="ascii-diagram">Proxmox VE Cluster                    Pure Storage FlashArray
 +------------------+                  +-------------------+
@@ -934,6 +934,117 @@
 |   | scsi0    |   |   multipath      |   for stretched   |
 |   +----------+   |                  |   ActiveCluster   |
 +------------------+                  +-------------------+</div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Direct Volume Provisioning vs Pool-Based SAN</span>
+        <span class="lang-zh">直接卷供應 vs 儲存池式 SAN</span>
+    </h3>
+    <p>
+        <span class="lang-en">The pool-based model puts an LVM (or LVM-thin) layer between the array and Proxmox VE. Snapshots, clones, and replication happen at the LVM layer &mdash; the array sees a single giant LUN that is permanently "in use", and its data services cannot reason about individual VM disks. This plugin removes that intermediate layer entirely.</span>
+        <span class="lang-zh">儲存池式模型在陣列與 Proxmox VE 之間插入一層 LVM（或 LVM-thin）。快照、複製、複寫都發生在 LVM 層 &mdash; 陣列只看到一顆永遠「使用中」的大 LUN，無法針對單一 VM 磁碟做 dedup ratio、replication policy、snapshot retention。本外掛完全移除這層中介。</span>
+    </p>
+    <div class="ascii-diagram">Traditional pool-based SAN model
+=================================
+
+  +----------------------------+
+  |  1x big LUN on array       |    admin pre-allocates one
+  |  (e.g. 10 TB)              |    giant LUN
+  +----------------------------+
+                |
+                v
+  +----------------------------+
+  |  LVM / LVM-thin on host    |
+  |  +------+ +------+ +-----+ |
+  |  | LV   | | LV   | | ... | |    each VM disk is an LV
+  |  | vm   | | vm   | |     | |    inside the host's LVM
+  |  | -100 | | -100 | |     | |
+  |  | -d0  | | -d1  | |     | |
+  |  +------+ +------+ +-----+ |
+  +----------------------------+
+
+  Snapshots / clones / replication happen at the LVM layer.
+  Array sees ONE LUN that is always "in use".
+
+
+This plugin (direct volume provisioning)
+========================================
+
+  +-----------------------------+
+  | Pure FlashArray             |
+  |                             |
+  |   Volume   pve-...-100-d0   |    each VM disk is its own
+  |   Volume   pve-...-100-d1   |    volume on the array, sized
+  |   Volume   pve-...-101-d0   |    exactly to the request
+  |   Volume   pve-...-102-d0   |
+  |        ...                  |
+  +-----------------------------+
+
+  No host-side LVM. Every volume has its own WWID, snapshot chain,
+  and host connections. Snapshots / clones / replication happen on
+  the array, natively.</div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">Layer Stack</span>
+        <span class="lang-zh">層級堆疊</span>
+    </h3>
+    <p>
+        <span class="lang-en">How a single Proxmox VE volname becomes a usable block device on the host:</span>
+        <span class="lang-zh">一個 Proxmox VE volname 如何在主機端變成可用的區塊裝置：</span>
+    </p>
+    <div class="ascii-diagram">Proxmox VE level                vm-100-disk-0            (PVE volname)
+        |
+        v
+Plugin encoding                 pve-pure1-100-disk0      (Naming.pm)
+        |
+        v
+Pure FlashArray volume          50 GiB, WWID 624a9370... (REST API)
+        |
+        v
+Host connections                connected to every       (per-node mode)
+                                "pve-{cluster}-*" host
+        |
+        v
+SCSI / FC transport             iSCSI sessions OR        (multiple paths
+                                FC fabric                  per host)
+        |
+        v
+Linux SCSI paths                /dev/sdc /dev/sdd ...    (one per portal /
+                                                          fabric link)
+        |
+        v
+multipath aggregation           /dev/mapper/3624a9370... (DM-multipath,
+                                = /dev/dm-N                ALUA, queue-length 0)
+        |
+        v
+QEMU block device               passed to qemu           (raw, no FS layer
+                                                          between)</div>
+
+    <h3 class="subsection-title">
+        <span class="lang-en">What This Means in Practice</span>
+        <span class="lang-zh">對使用者的意義</span>
+    </h3>
+    <ul>
+        <li>
+            <span class="lang-en"><strong>Snapshots are array-native</strong> &mdash; <code>volume_snapshot</code> calls <code>snapshot_create</code> on Pure; rollback uses <code>volume_overwrite</code>. No LVM copy-on-write cost.</span>
+            <span class="lang-zh"><strong>快照即陣列原生</strong> &mdash; <code>volume_snapshot</code> 呼叫 Pure 的 <code>snapshot_create</code>；倒回使用 <code>volume_overwrite</code>。沒有 LVM copy-on-write 成本。</span>
+        </li>
+        <li>
+            <span class="lang-en"><strong>Linked clones use array clone</strong> &mdash; instant; the new volume shares blocks with the source until written. Proxmox VE's "Full Clone" is a Proxmox VE design choice (block-by-block copy via <code>qemu-img</code>), not a plugin limit.</span>
+            <span class="lang-zh"><strong>連結複製即陣列複製</strong> &mdash; 瞬間完成；新 volume 與來源共享資料區塊直到被寫入。Proxmox VE 的「完整複製」是 Proxmox VE 設計選擇（透過 <code>qemu-img</code> 逐區塊複製），不是外掛限制。</span>
+        </li>
+        <li>
+            <span class="lang-en"><strong>Online resize is one API call</strong> &mdash; <code>volume_resize</code> on the array, then per-path SCSI rescan + <code>multipath_resize_map</code> on the host. No filesystem-level resize on a parent pool.</span>
+            <span class="lang-zh"><strong>線上擴充僅一次 API 呼叫</strong> &mdash; 對陣列下 <code>volume_resize</code>，主機端再進行每路徑 SCSI rescan 與 <code>multipath_resize_map</code>。沒有上層儲存池的檔案系統擴充步驟。</span>
+        </li>
+        <li>
+            <span class="lang-en"><strong>Live migration is implicit</strong> &mdash; every volume is connected to every node's host (per-node mode), so the same multipath device exists on every cluster node simultaneously. Proxmox VE just changes which node has the device open; no storage migration step is needed.</span>
+            <span class="lang-zh"><strong>Live Migration 隱含完成</strong> &mdash; 在 per-node 模式下，每個 volume 都連到每個節點的 host，相同的 multipath 裝置同時存在於叢集所有節點。Proxmox VE 只是切換哪個節點開啟它，無需儲存遷移步驟。</span>
+        </li>
+        <li>
+            <span class="lang-en"><strong>Per-VM array data services</strong> &mdash; dedup ratio, replication policy, snapshot retention, QoS, and ActiveCluster Pod membership can all be configured per VM disk, because each disk is its own object on the array.</span>
+            <span class="lang-zh"><strong>逐 VM 的陣列資料服務</strong> &mdash; dedup 比、複寫政策、快照保留、QoS 與 ActiveCluster Pod 成員資格都可以針對單一 VM 磁碟設定，因為每顆磁碟在陣列上都是獨立物件。</span>
+        </li>
+    </ul>
 
     <h3 class="subsection-title">
         <span class="lang-en">Object Mapping</span>

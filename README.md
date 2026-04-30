@@ -147,6 +147,126 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    ```
 8. **Move to the next node** only after the current node passes step 7.
 
+## Storage Model
+
+This plugin uses **direct volume provisioning** — every VM disk is
+allocated as its own dedicated Pure Storage volume, sized exactly to
+the requested capacity. There is no pre-allocated "big LUN" or storage
+pool that gets carved into smaller pieces on the host side.
+
+When Proxmox VE asks for a 50 GiB disk, the plugin calls
+`volume_create` on the array with size = 50 GiB. When Proxmox VE asks
+for a snapshot, the plugin calls `snapshot_create` on that volume.
+The semantics map 1:1 — Pure's data services (deduplication,
+compression, snapshot, ActiveCluster, async replication) all apply at
+the natural unit of one VM disk.
+
+### Direct Volume Provisioning vs Pool-Based SAN Models
+
+```
+Traditional pool-based SAN model
+=================================
+
+  +----------------------------+
+  |  1x big LUN on array       |    admin pre-allocates one
+  |  (e.g. 10 TB)              |    giant LUN
+  +----------------------------+
+                |
+                v
+  +----------------------------+
+  |  LVM / LVM-thin on host    |
+  |  +------+ +------+ +-----+ |
+  |  | LV   | | LV   | | ... | |    each VM disk is an LV
+  |  | vm   | | vm   | |     | |    inside the host's LVM
+  |  | -100 | | -100 | |     | |
+  |  | -d0  | | -d1  | |     | |
+  |  +------+ +------+ +-----+ |
+  +----------------------------+
+
+  Snapshots / clones / replication happen at the LVM layer.
+  Array sees ONE LUN that is always "in use".
+
+
+This plugin (direct volume provisioning)
+========================================
+
+  +-----------------------------+
+  | Pure FlashArray             |
+  |                             |
+  |   Volume   pve-...-100-d0   |    each VM disk is its own
+  |   Volume   pve-...-100-d1   |    volume on the array, sized
+  |   Volume   pve-...-101-d0   |    exactly to the request
+  |   Volume   pve-...-102-d0   |
+  |        ...                  |
+  +-----------------------------+
+
+  No host-side LVM. Every volume has its own WWID, snapshot chain,
+  and host connections. Snapshots / clones / replication happen on
+  the array, natively.
+```
+
+The pool-based model puts an LVM (or LVM-thin) layer between the
+array and Proxmox VE. Snapshots, clones, and replication then happen
+at LVM — the array sees a single giant LUN that is permanently "in
+use", and its data services cannot reason about individual VM disks.
+This plugin removes that intermediate layer entirely.
+
+### Layer Stack
+
+How a single Proxmox VE volname becomes a usable block device on the
+host:
+
+```
+Proxmox VE level                vm-100-disk-0            (PVE volname)
+        |
+        v
+Plugin encoding                 pve-pure1-100-disk0      (Naming.pm)
+        |
+        v
+Pure FlashArray volume          50 GiB, WWID 624a9370... (REST API)
+        |
+        v
+Host connections                connected to every       (per-node mode)
+                                "pve-<cluster>-*" host
+        |
+        v
+SCSI / FC transport             iSCSI sessions OR        (multiple paths
+                                FC fabric                  per host)
+        |
+        v
+Linux SCSI paths                /dev/sdc /dev/sdd ...    (one per portal /
+                                                          fabric link)
+        |
+        v
+multipath aggregation           /dev/mapper/3624a9370... (DM-multipath,
+                                = /dev/dm-N                ALUA, queue-length 0)
+        |
+        v
+QEMU block device               passed to qemu           (raw, no FS layer
+                                                          between)
+```
+
+### Implications
+
+- **Snapshots are array-native** — `volume_snapshot` calls
+  `snapshot_create` on Pure; rollback uses `volume_overwrite`. No LVM
+  copy-on-write cost.
+- **Linked clones use array clone** — instant; the new volume shares
+  blocks with the source until written. Proxmox VE's "Full Clone" is a
+  Proxmox VE design choice (block-by-block copy via `qemu-img`), not a
+  plugin limit.
+- **Online resize is one API call** — `volume_resize` on the array,
+  then per-path SCSI rescan + `multipath_resize_map` on the host. No
+  filesystem-level resize on a parent pool.
+- **Live migration is implicit** — every volume is connected to every
+  node's host (per-node mode), so the same multipath device exists on
+  every cluster node simultaneously. Proxmox VE just changes which
+  node has the device open; no storage migration step is needed.
+- **Per-VM array data services** — dedup ratio, replication policy,
+  snapshot retention, QoS, and ActiveCluster Pod membership can all
+  be configured per VM disk, because each disk is its own object on
+  the array.
+
 ## Features
 
 ### Storage Operations

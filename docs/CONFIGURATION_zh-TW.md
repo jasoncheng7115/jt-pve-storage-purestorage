@@ -2,6 +2,41 @@
 
 語言 / Language: [English](CONFIGURATION.md) | [繁體中文](CONFIGURATION_zh-TW.md)
 
+## 儲存模型（快速回顧）
+
+本外掛採 **direct volume provisioning（直接卷供應）**：每一顆 VM 磁
+碟都是 Pure Storage 上一個獨立的 volume，大小即為當下要求的容量。
+陣列上沒有任何「預先建立的大 LUN」或儲存池在主機端被切片。
+
+```
+Traditional pool-based SAN              This plugin
+=========================               ===========
+
+   1x big LUN on array                  Pure FlashArray
+            |                              Volume   pve-...-100-d0
+            v                              Volume   pve-...-100-d1
+   LVM / LVM-thin on host                  Volume   pve-...-101-d0
+   +------+ +------+ +-----+               Volume   pve-...-102-d0
+   | LV   | | LV   | | ... |                    ...
+   | -d0  | | -d1  | |     |
+   +------+ +------+ +-----+
+                                        one volume per VM disk;
+   snapshots / clones at LVM            snapshots / clones / replication
+   (array sees one LUN always           happen natively on the array
+    "in use")
+```
+
+**對設定的影響：**
+- 主機上不需要 `vgcreate` / `lvcreate` 步驟。
+- `pure-host-mode`（下方）控制外掛如何把每顆 disk 的 volume 對應到
+  host 連線 — `per-node` 將每個 volume 連到每個節點的 host（建議用
+  於 Live Migration）；`shared` 整個叢集共用一個 host 物件。
+- `pure-pod`（下方）把每顆 disk 的 volume 放進 ActiveCluster Pod，
+  volume 名稱前綴為 `<pod>::`。
+
+完整的儲存模型（含層級堆疊與逐 VM 資料服務影響），請參閱
+[README_zh-TW.md → 儲存模型](../README_zh-TW.md#儲存模型)。
+
 ## 儲存設定選項
 
 ### 必要選項

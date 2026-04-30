@@ -2,6 +2,43 @@
 
 語言 / Language: [English](CONFIGURATION.md) | [繁體中文](CONFIGURATION_zh-TW.md)
 
+## Storage Model (Quick Recap)
+
+This plugin uses **direct volume provisioning**: every VM disk is its
+own dedicated Pure Storage volume, sized exactly to the requested
+capacity. There is no pre-allocated "big LUN" or storage pool that
+gets carved into smaller pieces on the host side.
+
+```
+Traditional pool-based SAN              This plugin
+=========================               ===========
+
+   1x big LUN on array                  Pure FlashArray
+            |                              Volume   pve-...-100-d0
+            v                              Volume   pve-...-100-d1
+   LVM / LVM-thin on host                  Volume   pve-...-101-d0
+   +------+ +------+ +-----+               Volume   pve-...-102-d0
+   | LV   | | LV   | | ... |                    ...
+   | -d0  | | -d1  | |     |
+   +------+ +------+ +-----+
+                                        one volume per VM disk;
+   snapshots / clones at LVM            snapshots / clones / replication
+   (array sees one LUN always           happen natively on the array
+    "in use")
+```
+
+**Configuration implications:**
+- No `vgcreate` / `lvcreate` step on hosts.
+- `pure-host-mode` (below) controls how the plugin maps the per-disk
+  volume to host connections — `per-node` connects every volume to
+  every node's host (recommended for live migration); `shared` uses a
+  single host object for the whole cluster.
+- `pure-pod` (below) places the per-disk volume inside an
+  ActiveCluster Pod, prefixing the volume name with `<pod>::`.
+
+For the full storage model (including layer stack and per-VM data
+service implications), see [README.md → Storage Model](../README.md#storage-model).
+
 ## Storage Configuration Options
 
 ### Required Options

@@ -140,6 +140,119 @@
    ```
 8. **下個節點**，僅在當前節點通過第 7 步後再進行。
 
+## 儲存模型
+
+本外掛採 **direct volume provisioning（直接卷供應）** — 每一顆 VM
+磁碟在 Pure FlashArray 上對應一個獨立的 volume，大小即為當下要求的
+容量。陣列上沒有任何「預先建立的大 LUN」或儲存池在主機端被切片。
+
+當 Proxmox VE 要求 50 GiB 磁碟時，外掛對陣列呼叫 `volume_create`
+建立一顆 50 GiB 的 volume；要求快照時，外掛對該 volume 呼叫
+`snapshot_create`。語意 1:1 對齊 — Pure 的資料服務（重複資料刪除、
+壓縮、快照、ActiveCluster、非同步複寫）全部以「一顆 VM 磁碟」為自然
+單位作用。
+
+### 直接卷供應 vs 儲存池式 SAN 模型
+
+```
+Traditional pool-based SAN model
+=================================
+
+  +----------------------------+
+  |  1x big LUN on array       |    admin pre-allocates one
+  |  (e.g. 10 TB)              |    giant LUN
+  +----------------------------+
+                |
+                v
+  +----------------------------+
+  |  LVM / LVM-thin on host    |
+  |  +------+ +------+ +-----+ |
+  |  | LV   | | LV   | | ... | |    each VM disk is an LV
+  |  | vm   | | vm   | |     | |    inside the host's LVM
+  |  | -100 | | -100 | |     | |
+  |  | -d0  | | -d1  | |     | |
+  |  +------+ +------+ +-----+ |
+  +----------------------------+
+
+  Snapshots / clones / replication happen at the LVM layer.
+  Array sees ONE LUN that is always "in use".
+
+
+This plugin (direct volume provisioning)
+========================================
+
+  +-----------------------------+
+  | Pure FlashArray             |
+  |                             |
+  |   Volume   pve-...-100-d0   |    each VM disk is its own
+  |   Volume   pve-...-100-d1   |    volume on the array, sized
+  |   Volume   pve-...-101-d0   |    exactly to the request
+  |   Volume   pve-...-102-d0   |
+  |        ...                  |
+  +-----------------------------+
+
+  No host-side LVM. Every volume has its own WWID, snapshot chain,
+  and host connections. Snapshots / clones / replication happen on
+  the array, natively.
+```
+
+儲存池式模型在陣列與 Proxmox VE 之間插入一層 LVM（或 LVM-thin）。
+快照、複製、複寫都發生在 LVM 層 — 陣列只看到一顆永遠「使用中」的大
+LUN，無法針對單一 VM 磁碟做 dedup ratio、replication policy、
+snapshot retention。本外掛完全移除這層中介。
+
+### 層級堆疊
+
+一個 Proxmox VE volname 如何在主機端變成可用的區塊裝置：
+
+```
+Proxmox VE level                vm-100-disk-0            (PVE volname)
+        |
+        v
+Plugin encoding                 pve-pure1-100-disk0      (Naming.pm)
+        |
+        v
+Pure FlashArray volume          50 GiB, WWID 624a9370... (REST API)
+        |
+        v
+Host connections                connected to every       (per-node mode)
+                                "pve-<cluster>-*" host
+        |
+        v
+SCSI / FC transport             iSCSI sessions OR        (multiple paths
+                                FC fabric                  per host)
+        |
+        v
+Linux SCSI paths                /dev/sdc /dev/sdd ...    (one per portal /
+                                                          fabric link)
+        |
+        v
+multipath aggregation           /dev/mapper/3624a9370... (DM-multipath,
+                                = /dev/dm-N                ALUA, queue-length 0)
+        |
+        v
+QEMU block device               passed to qemu           (raw, no FS layer
+                                                          between)
+```
+
+### 對使用者的意義
+
+- **快照即陣列原生** — `volume_snapshot` 呼叫 Pure 的
+  `snapshot_create`；倒回使用 `volume_overwrite`。沒有 LVM
+  copy-on-write 成本。
+- **連結複製即陣列複製** — 瞬間完成；新 volume 與來源共享資料區塊
+  直到被寫入。Proxmox VE 的「完整複製」是 Proxmox VE 設計選擇
+  （透過 `qemu-img` 逐區塊複製），不是外掛限制。
+- **線上擴充僅一次 API 呼叫** — 對陣列下 `volume_resize`，主機端再
+  進行每路徑 SCSI rescan 與 `multipath_resize_map`。沒有上層儲存池
+  的檔案系統擴充步驟。
+- **Live Migration 隱含完成** — 在 per-node 模式下，每個 volume
+  都連到每個節點的 host，相同的 multipath 裝置同時存在於叢集所有
+  節點。Proxmox VE 只是切換哪個節點開啟它，無需儲存遷移步驟。
+- **逐 VM 的陣列資料服務** — dedup 比、複寫政策、快照保留、QoS 與
+  ActiveCluster Pod 成員資格都可以針對單一 VM 磁碟設定，因為每顆
+  磁碟在陣列上都是獨立物件。
+
 ## 功能特色
 
 ### 儲存操作
