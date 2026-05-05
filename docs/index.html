@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.8 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.9 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.8-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.9-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.8-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.9-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1817,6 +1817,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.9 <span class="changelog-tag changelog-tag--critical">Critical</span></div>
+        <div class="changelog-date">2026-05-05</div>
+        <div class="changelog-summary">
+            <span class="lang-en">Unreachable iSCSI Portal Stall Fix. <code>activate_storage()</code> now TCP-probes every iSCSI portal returned by <code>iscsi_get_ports()</code> before invoking <code>iscsiadm</code>, skipping unreachable portals in seconds instead of stalling 30s (discovery) + 60s (login) per dead LIF. Field reproducer: 4-LIF Pure with asymmetric cabling that only reached one controller wedged <code>pvesm add</code> and every <code>pvestatd</code> poll, leaving the web UI Status panel stuck on "Loading...". New tunable <code>pure-portal-probe-timeout</code> (default 2s, set 0 to disable). Hard-fails when zero portals are reachable, with an actionable message pointing at <code>--nodes</code> binding.</span>
+            <span class="lang-zh">無法連通的 iSCSI Portal 卡死修復。<code>activate_storage()</code> 在呼叫 <code>iscsiadm</code> 前先對 <code>iscsi_get_ports()</code> 回傳的每個 portal 做 TCP 預探測，幾秒內跳過不通的 portal，不再讓每個失效 LIF 各吃 30 秒（discovery）+ 60 秒（login）的 timeout。實際案例：4 LIF Pure 線路不對稱，只連得到其中一個控制器，導致 <code>pvesm add</code> 與每輪 <code>pvestatd</code> 全部卡死，Web UI Status 永遠停在「Loading...」。新增可調 <code>pure-portal-probe-timeout</code>（預設 2 秒，設為 0 可停用）。零 portal 可連通時直接 fail-fast，錯誤訊息提示 <code>--nodes</code> 綁定。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.8 <span class="changelog-tag changelog-tag--fix">Fix</span></div>

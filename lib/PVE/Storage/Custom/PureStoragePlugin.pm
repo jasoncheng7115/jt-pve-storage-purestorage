@@ -35,6 +35,7 @@ use PVE::Storage::Custom::PureStorage::Naming qw(
 );
 use PVE::Storage::Custom::PureStorage::ISCSI qw(
     get_initiator_name
+    probe_portal
     discover_targets
     login_target
     logout_target
@@ -149,6 +150,16 @@ sub properties {
             maximum => 300,
             default => 60,
         },
+        'pure-portal-probe-timeout' => {
+            description => "Timeout in seconds for the TCP pre-check that skips"
+                . " unreachable iSCSI portals before iscsiadm discovery/login."
+                . " Set to 0 to disable the pre-check (legacy behaviour). Raise"
+                . " on high-latency or congested storage networks.",
+            type => 'integer',
+            minimum => 0,
+            maximum => 30,
+            default => 2,
+        },
         'pure-pod' => {
             description => "Pod name for ActiveCluster configurations. Required when File service is enabled.",
             type => 'string',
@@ -168,6 +179,7 @@ sub options {
         'pure-host-mode'     => { optional => 1 },
         'pure-cluster-name'  => { optional => 1 },
         'pure-device-timeout' => { optional => 1 },
+        'pure-portal-probe-timeout' => { optional => 1 },
         'pure-pod'           => { optional => 1 },
         nodes                => { optional => 1 },
         disable              => { optional => 1 },
@@ -1329,6 +1341,11 @@ sub activate_storage {
         # iSCSI: Get portals and login
         my $ports = $api->iscsi_get_ports();
         if (@$ports) {
+            my $probe_timeout = $scfg->{'pure-portal-probe-timeout'} // 2;
+            my @logged_in;
+            my @unreachable;
+            my @failed;
+
             for my $port (@$ports) {
                 next unless $port->{portal};
 
@@ -1345,6 +1362,19 @@ sub activate_storage {
                 # the storage (status polling, linked clones, etc.).
                 my $portal_addr = "$ip:$port_num";
                 if (eval { is_portal_logged_in($portal_addr, $target) }) {
+                    push @logged_in, $portal_addr;
+                    next;
+                }
+
+                # TCP pre-check: skip portals this host cannot reach so we do
+                # NOT eat 30s discovery + 60s login timeouts per dead portal.
+                # Pure exposes one iSCSI LIF per controller; with asymmetric
+                # cabling (only one controller reachable) the dead LIFs would
+                # otherwise stall every activate_storage() / status() call and
+                # cascade into pvestatd timeouts that wedge the web UI.
+                if ($probe_timeout > 0
+                    && !probe_portal($ip, $port_num, timeout => $probe_timeout)) {
+                    push @unreachable, $portal_addr;
                     next;
                 }
 
@@ -1352,8 +1382,37 @@ sub activate_storage {
                     discover_targets($ip, port => $port_num);
                     login_target($ip, $target, port => $port_num);
                 };
-                # Continue on error - some portals might not be reachable
-                warn "Failed to connect to portal $ip: $@" if $@;
+                if ($@) {
+                    my $err = $@;
+                    push @failed, "$portal_addr ($err)";
+                    warn "Failed to connect to portal $ip: $err";
+                } else {
+                    push @logged_in, $portal_addr;
+                }
+            }
+
+            if (@unreachable) {
+                warn "Skipped " . scalar(@unreachable)
+                    . " unreachable iSCSI portal(s) on Pure Storage array: "
+                    . join(", ", @unreachable)
+                    . " (no TCP response within ${probe_timeout}s).\n"
+                    . "  If this is unexpected, check network/switch zoning"
+                    . " between this node and the listed portals, or disable"
+                    . " unused iSCSI services on the array.\n";
+            }
+
+            # If no portal is logged in and none was reachable, surface the
+            # situation as a hard error rather than letting status() poll
+            # forever against a storage that has zero usable paths.
+            unless (@logged_in) {
+                my $msg = "No iSCSI portal on Pure Storage is reachable from"
+                    . " this node.";
+                $msg .= " Unreachable: " . join(", ", @unreachable) if @unreachable;
+                $msg .= " Failed: " . join("; ", @failed) if @failed;
+                $msg .= "\n  Verify network connectivity to the array's iSCSI"
+                    . " ports, or use 'pvesm set <storeid> --nodes <list>' to"
+                    . " bind this storage only to nodes that can reach it.";
+                die "$msg\n";
             }
 
             # Rescan for any existing LUNs after iSCSI login
@@ -1665,13 +1724,21 @@ sub alloc_image {
             my $sessions = eval { get_sessions(); };
             if (!$sessions || @$sessions == 0) {
                 warn "No active iSCSI sessions found! Attempting to re-establish...\n";
-                # Try to re-activate storage to establish sessions
+                # Try to re-activate storage to establish sessions. Use the
+                # same TCP pre-check as activate_storage() so unreachable
+                # portals are skipped fast instead of stalling alloc_image.
+                my $probe_timeout = $scfg->{'pure-portal-probe-timeout'} // 2;
                 eval {
                     my $ports = $api->iscsi_get_ports();
                     for my $port (@$ports) {
                         next unless $port->{portal} && $port->{iqn};
                         my ($ip, $port_num) = split(/:/, $port->{portal});
                         $port_num //= 3260;
+                        if ($probe_timeout > 0
+                            && !probe_portal($ip, $port_num, timeout => $probe_timeout)) {
+                            warn "Skipping unreachable portal $ip:$port_num\n";
+                            next;
+                        }
                         eval {
                             discover_targets($ip, port => $port_num);
                             login_target($ip, $port->{iqn}, port => $port_num);

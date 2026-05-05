@@ -8,6 +8,64 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.9] - 2026-05-05
+
+### CRITICAL — unreachable iSCSI portals stalled activate_storage() and wedged the web UI
+
+When a Pure FlashArray exposes more iSCSI LIFs than this PVE host can
+reach (asymmetric cabling, controller ports on a different network
+segment, partial fabric outage), `activate_storage()` enumerated every
+LIF returned by `iscsi_get_ports()` and called `iscsiadm -m discovery`
++ login on each one. Each unreachable LIF stalled for the full
+iscsiadm timeout — 30s for discovery, up to 60s for login — even
+though the eval kept the loop alive. With four LIFs and two
+unreachable, `pvesm add purestorage` blocked for 60s+ before
+returning, and every subsequent `pvestatd` poll repeated the same
+walk, leaving the web UI Status panel stuck on "Loading..." and
+starving every other storage on the node.
+
+Field reproducer: 4-LIF Pure (two LIFs per controller, two subnets)
+plus a 2-node PVE where only one controller's subnet was cabled.
+`pvesm add` returned with two `Failed to connect to portal ...:
+Command timed out after 30s` errors at
+`PureStoragePlugin.pm:1352 (discover_targets)`. Removing the storage
+was the only way to recover.
+
+#### Fixed
+- **[HIGH] `activate_storage()` now TCP-probes every iSCSI portal
+  before iscsiadm.** A new helper `ISCSI::probe_portal($ip, $port,
+  timeout => $t)` does a bounded `IO::Socket::INET` connect; if it
+  does not succeed within `pure-portal-probe-timeout` seconds the
+  portal is skipped with a single warning instead of stalling
+  iscsiadm. The same probe is applied to the secondary login site in
+  `alloc_image()` that re-establishes sessions for state/cloudinit
+  volumes.
+- **`activate_storage()` fails fast when zero portals are reachable.**
+  Instead of returning success and letting `status()` poll forever
+  against a storage with no usable paths, it now `die`s with an
+  actionable message pointing at network/zoning checks and the
+  `--nodes` option for binding the storage only to nodes that can
+  reach the array.
+
+#### Added
+- **New storage option `pure-portal-probe-timeout`** (integer, 0..30,
+  default 2). Set to 0 to disable the pre-check and restore 1.1.8
+  behaviour; raise on storage networks where TCP setup latency
+  legitimately exceeds the default. Tunable per-storage via
+  `pvesm set <storeid> --pure-portal-probe-timeout <n>`.
+
+#### Architectural note
+This is sibling-pattern audit territory: every other place in the
+plugin that talks to a path that could hang under network failure
+already has bounded protection (`_run_cmd` timeouts,
+`sysfs_read_with_timeout`, the v1.1.8 alarm-wrapped glob). The portal
+enumeration was the last unbounded path in `activate_storage()`; the
+plugin had been assuming that "every LIF the array reports is
+reachable from this host", which is true in lab and CI but not in
+production cabling reality.
+
+---
+
 ## [1.1.8] - 2026-04-26
 
 ### Sibling-pattern audit from author's related NetApp plugin v0.2.9

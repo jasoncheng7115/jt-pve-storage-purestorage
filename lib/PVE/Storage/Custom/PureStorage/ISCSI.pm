@@ -9,6 +9,7 @@ use warnings;
 
 use Carp qw(croak);
 use IO::Select;
+use IO::Socket::INET;
 use IPC::Open3;
 use Symbol qw(gensym);
 
@@ -17,6 +18,7 @@ use Exporter qw(import);
 our @EXPORT_OK = qw(
     get_initiator_name
     set_initiator_name
+    probe_portal
     discover_targets
     login_target
     logout_target
@@ -143,6 +145,42 @@ sub set_initiator_name {
     system('systemctl', 'restart', 'iscsid');
 
     return 1;
+}
+
+# Quick TCP connectivity probe to an iSCSI portal. Returns 1 if the host
+# can establish a TCP connection to ($ip, $port) within $timeout seconds,
+# 0 otherwise. Used to skip unreachable portals BEFORE invoking iscsiadm,
+# which has 30s discovery + 60s login timeouts that compound badly when
+# the array exposes more iSCSI ports than this host can physically reach
+# (asymmetric cabling, controller ports on a different network segment,
+# partial fabric outage).
+sub probe_portal {
+    my ($ip, $port, %opts) = @_;
+
+    croak "ip is required" unless $ip;
+    $port //= 3260;
+    my $timeout = $opts{timeout} // 2;
+
+    my $reachable = 0;
+    eval {
+        local $SIG{ALRM} = sub { die "timeout\n" };
+        alarm($timeout);
+
+        my $sock = IO::Socket::INET->new(
+            PeerAddr => $ip,
+            PeerPort => $port,
+            Proto    => 'tcp',
+            Timeout  => $timeout,
+        );
+        if ($sock) {
+            $reachable = 1;
+            $sock->close();
+        }
+        alarm(0);
+    };
+    alarm(0);
+
+    return $reachable;
 }
 
 # Discover iSCSI targets on a portal

@@ -8,6 +8,55 @@
 
 ---
 
+## [1.1.9] - 2026-05-05
+
+### 嚴重——無法連通的 iSCSI portal 會卡住 activate_storage() 並讓 Web UI 整個轉圈
+
+當 Pure FlashArray 對外提供的 iSCSI LIF 數量多於本機 PVE 實際能連通的
+數量（線路不對稱、控制器埠在另一網段、fabric 部分故障），
+`activate_storage()` 會把 `iscsi_get_ports()` 回傳的每一個 LIF 都丟給
+`iscsiadm -m discovery` 與 login。每一個無法連通的 LIF 都會吃完整的
+iscsiadm timeout——discovery 30 秒、login 最多 60 秒——即使外層 eval
+不會 die，整個迴圈仍會被卡住。實際案例為：陣列 4 個 LIF、其中 2 個
+不通，`pvesm add purestorage` 會阻塞 60 秒以上才回傳，且之後每一輪
+`pvestatd` 輪詢都會重新走一次同樣的列舉，導致 Web UI Status 面板永遠
+停在「Loading...」，連帶拖累節點上其他儲存。
+
+實際重現環境：4 個 LIF 的 Pure（每控制器 2 個 LIF，分兩個網段）搭配
+2 節點 PVE，但實體線路只走得到其中一個控制器所在的網段。`pvesm add`
+回傳時帶兩行 `Failed to connect to portal ...: Command timed out
+after 30s`，行號落在 `PureStoragePlugin.pm:1352 (discover_targets)`。
+唯一恢復方式是移除該 Storage。
+
+#### 修正
+- **[高] `activate_storage()` 現在會在 iscsiadm 之前先做 TCP 預探測。**
+  新增 helper `ISCSI::probe_portal($ip, $port, timeout => $t)`，
+  以有界的 `IO::Socket::INET` connect 試打 portal；若在
+  `pure-portal-probe-timeout` 秒內沒回應就跳過該 portal、只留一行
+  warning，不再讓 iscsiadm 自己 timeout。同樣的 probe 也套到
+  `alloc_image()` 為 state/cloudinit Volume 重建 session 的次要 login
+  區塊。
+- **`activate_storage()` 在「沒有任何 portal 可連通」時改為 fail-fast。**
+  過去會傳回成功讓 `status()` 對著一個沒有可用路徑的 Storage 永遠輪詢，
+  現在會直接 `die`，錯誤訊息明確指引使用者檢查網路/zoning，或使用
+  `--nodes` 把 Storage 綁到能連到陣列的節點。
+
+#### 新增
+- **新增 Storage 設定 `pure-portal-probe-timeout`**（整數，0..30，預設
+  2）。設為 0 可停用 pre-check，回到 1.1.8 行為；若儲存網路 TCP 建立
+  延遲合理超過預設值可調高。可透過
+  `pvesm set <storeid> --pure-portal-probe-timeout <n>` 逐個 Storage
+  調整。
+
+#### 架構備註
+這屬於 sibling-pattern 稽核範疇：plugin 中所有可能因網路故障而卡住的
+路徑早已有界保護（`_run_cmd` timeout、`sysfs_read_with_timeout`、
+1.1.8 為 glob 加的 alarm 包裝）。Portal 列舉是 `activate_storage()`
+最後一條無界路徑；過去 plugin 一直假設「陣列回報的 LIF 都連得到」，
+此假設在實驗室與 CI 成立，但在實務 cabling 不一定成立。
+
+---
+
 ## [1.1.8] - 2026-04-26
 
 ### 來自本作者相關專案 NetApp v0.2.9 的 sibling-pattern 稽核
