@@ -8,6 +8,61 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.11] - 2026-05-08
+
+### HIGH — Volume create/clone failed in a pod with any policy attached
+
+Direct follow-up to v1.1.10 in the same pod-quota field engagement: as
+soon as the operator added a quota policy to the pod (via Storage >
+Policies in the GUI) so that v1.1.10 could read the cap, every VM disk
+creation against that storage failed with:
+
+```
+Pure Storage API: Pod contains file systems or policies. (context: pvepod2)
+```
+
+at `PureStoragePlugin.pm:1660` inside `alloc_image`'s `volume_create`
+call. The error is misleading — the pod did not contain file systems,
+only the quota policy that the operator had just attached.
+
+Root cause, traced against the FA 2.26 OpenAPI spec for
+`POST /api/2.x/volumes`:
+
+- The `with_default_protection` query parameter defaults to `true`.
+- With the default, Pure applies the **container default protection**
+  to the newly created volume. The container is the pod (or the array
+  for non-pod volumes).
+- When the pod has any policy attached, Pure rejects the "apply
+  default protection" step on the new volume and surfaces the
+  generic "Pod contains file systems or policies." error.
+
+The plugin does not rely on Pure's default-protection mechanism — it
+manages PVE snapshots through `volume_snapshot` /
+`volume_overwrite` — so the right fix is to opt out:
+
+#### Fixed
+- **[HIGH] `volume_create` and `volume_clone` now pass
+  `with_default_protection=false` when the target volume name carries
+  a `pod::` prefix.** Implemented in
+  `lib/PVE/Storage/Custom/PureStorage/API.pm`:
+  - `volume_create()` — appends `&with_default_protection=false` to
+    the `POST /volumes?names=…` query string when the name matches
+    `/::/`
+  - `volume_clone()` — same treatment for clones into a pod
+- Non-pod volumes are deliberately left alone so that any
+  user-configured array-level `default_protections` continues to apply.
+- The `volume_overwrite` (rollback) and snapshot-create paths use
+  different endpoints that do not accept `with_default_protection`,
+  so no change is needed there.
+
+#### Field reproducer
+Purity//FA 6.5.9, pod `pvepod2` with a 2 TB quota policy
+`pvepodquota2` attached. `qm create 107 ... -scsi0 pure-storage:32`
+failed at the API layer; `dpkg -i 1.1.11-1` and re-running the same
+command succeeds.
+
+---
+
 ## [1.1.10] - 2026-05-08
 
 ### MEDIUM — Pod quota was ignored, full-array capacity reported instead

@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.9 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.11 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.10-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.11-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.10-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.11-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.11 <span class="changelog-tag changelog-tag--critical">High</span></div>
+        <div class="changelog-date">2026-05-08</div>
+        <div class="changelog-summary">
+            <span class="lang-en">Pod Volume Create With Policy Attached Fix. Direct follow-up to v1.1.10: as soon as the operator attached a quota policy to the pod (so v1.1.10 could read the cap), every VM disk creation failed with <code>Pure Storage API: Pod contains file systems or policies. (context: pvepod)</code>. Per the FA 2.26 spec, <code>POST /volumes</code> defaults <code>with_default_protection=true</code>, which makes Pure try to apply the pod's container default protection — and Pure rejects that step when the pod has any policy attached. Fixed by passing <code>with_default_protection=false</code> on <code>volume_create</code> and <code>volume_clone</code> when the volume name carries a <code>pod::</code> prefix. The plugin manages PVE snapshots itself, so it never relied on Pure's default-protection mechanism. Non-pod volumes are left alone to preserve any user-configured array-level default_protections.</span>
+            <span class="lang-zh">Pod 內掛 Policy 後 Volume Create 失敗修復。直接接續 v1.1.10：操作者一旦把 quota policy 掛到 pod 上（v1.1.10 才能讀到 cap），任何 VM 磁碟建立都會失敗並回傳 <code>Pure Storage API: Pod contains file systems or policies. (context: pvepod)</code>。對照 FA 2.26 spec，<code>POST /volumes</code> 預設 <code>with_default_protection=true</code>，會讓 Pure 嘗試把 pod 的 container default protection 套到新 Volume——但 pod 一旦有任何 policy 附掛，Pure 就會拒絕該步驟。修法是在 Volume 名稱帶 <code>pod::</code> 前綴時，於 <code>volume_create</code> 與 <code>volume_clone</code> 加上 <code>with_default_protection=false</code>。外掛端 PVE snapshot 由自身管理，本來就不依賴 Pure default-protection 機制。非 pod Volume 保持原行為，不影響使用者於 array-level 設定的 default_protections。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.10 <span class="changelog-tag changelog-tag--fix">Fix</span></div>

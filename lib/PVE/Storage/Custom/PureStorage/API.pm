@@ -801,7 +801,21 @@ sub volume_create {
         # Note: names parameter must be in query string, not body
         # URL-encode the name (e.g., pod::volname -> pod%3A%3Avolname)
         my $encoded_name = uri_escape($name);
-        return $self->post("volumes?names=$encoded_name", {
+        my $url = "volumes?names=$encoded_name";
+        # When the volume is created inside a pod (name has "pod::" prefix),
+        # disable Pure's automatic application of the pod's default
+        # protection. Pure rejects the call with "Pod contains file
+        # systems or policies." when a pod has any policy attached (e.g.
+        # a quota policy created via Storage > Policies). PVE manages its
+        # own protection policies via snapshots, so skipping the array-
+        # side default protection here matches what we already assume
+        # everywhere else and unblocks volume creation. Non-pod volumes
+        # are left alone to preserve any user-configured array-level
+        # default protection.
+        if ($name =~ /::/) {
+            $url .= "&with_default_protection=false";
+        }
+        return $self->post($url, {
             provisioned => $size,
         });
     } else {
@@ -1072,7 +1086,14 @@ sub volume_clone {
         # Note: names parameter must be in query string, not body
         # URL-encode the name (e.g., pod::volname -> pod%3A%3Avolname)
         my $encoded_name = uri_escape($name);
-        return $self->post("volumes?names=$encoded_name", {
+        my $url = "volumes?names=$encoded_name";
+        # See volume_create for the with_default_protection rationale —
+        # cloning into a pod with policies attached fails with the same
+        # "Pod contains file systems or policies." error otherwise.
+        if ($name =~ /::/) {
+            $url .= "&with_default_protection=false";
+        }
+        return $self->post($url, {
             source => { name => $source },
         });
     } else {

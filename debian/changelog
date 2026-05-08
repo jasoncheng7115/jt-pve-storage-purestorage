@@ -1,3 +1,27 @@
+jt-pve-storage-purestorage (1.1.11-1) stable; urgency=high
+
+  * [HIGH] Volume create/clone in a pod with any policy attached failed
+    with "Pod contains file systems or policies." (context: <podname>),
+    blocking VM disk creation entirely. Field reproducer: a Pure storage
+    configured with --pure-pod pvepod2 where the operator had attached a
+    quota policy 'pvepodquota2' via Storage > Policies in the GUI; every
+    'qm create' that needed a disk failed at PureStoragePlugin.pm:1660
+    inside alloc_image's volume_create call. Root cause: per the FA 2.26
+    OpenAPI spec, POST /volumes (and POST /volumes for clones) defaults
+    to with_default_protection=true, which causes Pure to apply the
+    pod's container default protection to the new volume. Pure rejects
+    that step when the pod has policies attached (the quota policy
+    counts), surfacing the misleading "Pod contains file systems or
+    policies." error. Fixed by passing with_default_protection=false on
+    the POST /volumes call when the volume name carries a "pod::"
+    prefix, both in volume_create and volume_clone. The PVE plugin does
+    not rely on Pure's default protection (it manages snapshots itself
+    via volume_snapshot/volume_overwrite), so this is the correct
+    semantic. Non-pod volumes are left untouched to preserve any
+    user-configured array-level default_protections.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 08 May 2026 12:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.10-1) stable; urgency=medium
 
   * [MEDIUM] Pod quota capacity reporting was broken: when the storage

@@ -8,6 +8,54 @@
 
 ---
 
+## [1.1.11] - 2026-05-08
+
+### 高——Pod 上掛了任何 Policy 後，建立／複製 Volume 全失敗
+
+接續 v1.1.10 同一個 pod 配額現場：v1.1.10 修好之後，操作者按需求在
+Storage > Policies 把 quota policy 掛到 pod 上，結果接下來建任何 VM
+磁碟都會失敗：
+
+```
+Pure Storage API: Pod contains file systems or policies. (context: pvepod2)
+```
+
+錯誤點落在 `PureStoragePlugin.pm:1660` `alloc_image` 內的
+`volume_create`。錯誤訊息誤導——實際上 pod 並沒有 file system，只有剛
+掛上的 quota policy。
+
+對照 FA 2.26 OpenAPI spec `POST /api/2.x/volumes` 的根因：
+
+- `with_default_protection` query 參數預設為 `true`。
+- 預設行為會把 **container default protection** 套用到剛建好的 Volume
+  （容器在這裡指 pod；非 pod 時則指 array）。
+- 一旦 pod 有任何 policy 附掛，Pure 就會拒絕對新 Volume 套用
+  default protection，並回傳這條誤導性的「Pod contains file systems
+  or policies.」錯誤。
+
+外掛本身不依賴 Pure 的 default-protection 機制——PVE 端的 snapshot 由
+`volume_snapshot` / `volume_overwrite` 自行管理——因此正確的修法是
+明確選擇關掉它：
+
+#### 修正
+- **[高] `volume_create` 與 `volume_clone` 在 Volume 名稱帶 `pod::`
+  前綴時，會在 `POST /volumes?names=…` query string 多加
+  `&with_default_protection=false`。** 改在
+  `lib/PVE/Storage/Custom/PureStorage/API.pm`：
+  - `volume_create()` —— 名稱含 `::` 時自動附上參數
+  - `volume_clone()` —— 同樣處理 pod 內 clone
+- 非 pod Volume 刻意保持原行為，以保留使用者於 array-level 設定的
+  `default_protections`。
+- `volume_overwrite`（rollback）與 snapshot create 走的是另一個端點，
+  不接受 `with_default_protection`，因此不需動。
+
+#### 實際重現環境
+Purity//FA 6.5.9，pod `pvepod2` 上掛了 2 TB 的 quota policy
+`pvepodquota2`。`qm create 107 ... -scsi0 pure-storage:32` 在 API 層
+失敗；`dpkg -i 1.1.11-1` 安裝後重跑同樣指令成功。
+
+---
+
 ## [1.1.10] - 2026-05-08
 
 ### 中——Pod 配額（Quota）被忽略，容量回報跑成整個 FlashArray
