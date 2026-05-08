@@ -1,3 +1,43 @@
+jt-pve-storage-purestorage (1.1.12-1) stable; urgency=medium
+
+  * [MEDIUM] pod_get_quota_limit() simplified: now reads ONLY the
+    Pod object's own quota_limit field. v1.1.10 also walked the
+    /policies/quota and /policies/quota/rules endpoints in an
+    attempt to honour quota policies attached to a pod (the path
+    the Pure GUI's Storage > Policies builds), but field experience
+    shows that mechanism is the WRONG mechanism for block volume
+    pod quotas — the entire /policies/* family in Pure (autodir,
+    nfs, smb, quota, snapshot) is FlashArray Files / managed-
+    directory only. Reading a file-system quota policy and
+    surfacing it as a block-level cap to PVE was misleading, even
+    though the API technically returned a value. v1.1.10's
+    "with_default_protection=false" mitigation in v1.1.11 also did
+    NOT fix the field-reported "Pod contains file systems or
+    policies." rejection because Pure refuses block volume create
+    for any pod that has a Storage > Policies policy attached,
+    regardless of default-protection handling. The cure is on the
+    Pure side: destroy the file-services policy and set
+    Pod.quota_limit instead. The plugin keeps reading
+    Pod.quota_limit, which IS the only block-level pod quota
+    mechanism Pure exposes (CLI: purepod --quota-limit; REST:
+    PATCH /pods body quota_limit; GUI: Purity 6.6+ Edit Pod).
+
+  * Documentation: README and README_zh-TW Option A "Pod with quota"
+    sections now spell out the three correct paths (CLI, REST, GUI
+    6.6+) for setting Pod.quota_limit, and warn explicitly that
+    Storage > Policies must NOT be used for pod block quota — with
+    the exact error message and the destroy + re-set recipe so
+    operators can self-recover.
+
+  * v1.1.11's with_default_protection=false on volume_create and
+    volume_clone is preserved. It does not fix the case it was
+    written for, but it remains a correct defensive change: the
+    plugin manages its own snapshot policy via volume_snapshot /
+    volume_overwrite and never relied on Pure's container default
+    protection. No regression risk.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 08 May 2026 18:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.11-1) stable; urgency=high
 
   * [HIGH] Volume create/clone in a pod with any policy attached failed

@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.11-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.12-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -317,7 +317,7 @@ QEMU block device               passed to qemu           (raw, no FS layer
 ### From .deb package (Recommended)
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.1.11-1_all.deb
+dpkg -i jt-pve-storage-purestorage_1.1.12-1_all.deb
 apt-get install -f  # Install dependencies if needed
 ```
 
@@ -366,13 +366,35 @@ by the plugin even without any of the isolation options below.
 #### Option A — Pod with quota (any Purity version)
 
 A Pod is a namespace on the array. Set a `quota_limit` on the Pod and
-point the plugin at it; the plugin then reports and enforces the
-Pod's quota instead of the array total. Volume names get a `pod::`
-prefix so they cannot collide with anything outside the Pod.
+point the plugin at it; the plugin then reports the Pod's quota
+instead of the array total. Volume names get a `pod::` prefix so they
+cannot collide with anything outside the Pod.
 
-On Pure:
-1. Storage > Pods > Create — name e.g. `pve-pod`
-2. Edit the Pod > set Quota Limit (e.g. `2T`)
+> ⚠ **Critical: how to set the Pod quota correctly**
+>
+> Pod block-level quota is the `Pod.quota_limit` field on the Pod
+> object itself. Set it through ONE of these:
+>
+> - **Pure CLI**: `purepod create --quota-limit 2T pve-pod` (or
+>   `purepod setattr --quota-limit 2T pve-pod` to modify later)
+> - **Pure REST API**: `PATCH /api/2.x/pods?names=pve-pod` body
+>   `{"quota_limit": 2199023255552}`
+> - **Pure GUI**: Storage > Pods > `<pod>` > Edit Quota Limit —
+>   **only available in Purity 6.6+**. Earlier versions (incl. 6.5.x)
+>   have no GUI path; use CLI or REST.
+>
+> **Do NOT use Storage > Policies → Quota** to set the Pod quota.
+> That panel is for FlashArray Files / managed-directory quotas
+> only — even though the GUI lets you pick a Pod when creating the
+> policy, it is the wrong mechanism for block volumes. Attaching
+> any policy from `Storage > Policies` to a Pod marks the Pod as
+> having file-services policies attached, which makes Pure reject
+> every block volume create with the misleading error
+> `Pod contains file systems or policies. (context: <podname>)`.
+> If you hit this error: destroy the policy with
+> `purepolicy quota destroy <policy-name>` (or via REST
+> `DELETE /api/2.x/policies/quota?names=<policy-name>`) and set
+> `Pod.quota_limit` instead.
 
 On Proxmox VE:
 ```bash

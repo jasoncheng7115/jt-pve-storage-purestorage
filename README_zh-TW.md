@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.11-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.12-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -304,7 +304,7 @@ QEMU block device               passed to qemu           (raw, no FS layer
 ### 從 .deb 套件安裝（建議）
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.1.11-1_all.deb
+dpkg -i jt-pve-storage-purestorage_1.1.12-1_all.deb
 apt-get install -f  # 如需安裝相依套件
 ```
 
@@ -352,12 +352,32 @@ Pure 提供兩種外掛能識別的機制。
 #### 方案 A——Pod 加配額（任何 Purity 版本）
 
 Pod 是陣列上的命名空間。在 Pod 設定 `quota_limit` 並讓外掛指向
-此 Pod，外掛便會以 Pod 配額取代陣列總容量進行回報與管理。Volume
-名稱會自動加上 `pod::` 前綴，與 Pod 外的物件不會撞名。
+此 Pod，外掛便會以 Pod 配額取代陣列總容量進行回報。Volume 名稱
+會自動加上 `pod::` 前綴，與 Pod 外的物件不會撞名。
 
-Pure 端：
-1. Storage > Pods > Create——名稱例如 `pve-pod`
-2. 編輯該 Pod，設定 Quota Limit（例如 `2T`）
+> ⚠ **重要：Pod 配額一定要用對的方式設定**
+>
+> Pod block-level 配額是 Pod 物件本身的 `Pod.quota_limit` 欄位。
+> 用以下任一方式設定：
+>
+> - **Pure CLI**：`purepod create --quota-limit 2T pve-pod`（或建好
+>   後 `purepod setattr --quota-limit 2T pve-pod`）
+> - **Pure REST API**：`PATCH /api/2.x/pods?names=pve-pod` body
+>   `{"quota_limit": 2199023255552}`
+> - **Pure GUI**：Storage > Pods > `<pod>` > 編輯 Quota Limit ——
+>   **只有 Purity 6.6+ 才有此 UI**。較早版本（含 6.5.x）GUI 完全
+>   沒有此欄位，必須走 CLI 或 REST。
+>
+> **絕對不要**用 Storage > Policies > Quota 來設定 Pod 配額。
+> 那個面板是 FlashArray Files／managed-directory 的配額機制——
+> 雖然 GUI 在建立 policy 時讓你選一個 Pod，但對 block volume
+> 來說那是錯的機制。任何 Storage > Policies 建出來的 policy 一旦
+> 掛到 Pod 上，Pod 就會被標記為「附掛了 file-services policy」，
+> 之後所有 block volume create 都會被 Pure 拒絕並回傳誤導性的
+> `Pod contains file systems or policies. (context: <podname>)`
+> 錯誤。如果遇到這個錯誤：用 `purepolicy quota destroy <policy-name>`
+> （或 REST `DELETE /api/2.x/policies/quota?names=<policy-name>`）
+> 把 policy 砍掉，再改用 `Pod.quota_limit`。
 
 Proxmox VE 端：
 ```bash

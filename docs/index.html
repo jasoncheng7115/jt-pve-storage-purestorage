@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.11 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.12 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.11-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.12-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.11-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.12-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.12 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-05-08</div>
+        <div class="changelog-summary">
+            <span class="lang-en">Stop misreading file-services quota policies as pod block quotas. Field follow-up to v1.1.10/v1.1.11 revealed that Pure's <code>Storage &gt; Policies</code> panel — including the quota policy that the v1.1.10 walk had been reading — is FlashArray Files / managed-directory only, even when the GUI lets you scope a policy to a Pod. Attaching ANY such policy to a Pod makes Pure reject every block volume create with the misleading <code>Pod contains file systems or policies. (context: &lt;podname&gt;)</code>. <code>pod_get_quota_limit()</code> simplified to read ONLY <code>Pod.quota_limit</code> — the genuine block-level pod quota field, set via <code>purepod --quota-limit</code> CLI / <code>PATCH /pods</code> REST / 6.6+ GUI. README updated to spell out the three correct setting paths and warn explicitly that <code>Storage &gt; Policies</code> must NOT be used for pod block quotas, with the destroy + re-set recipe so operators can self-recover. v1.1.11's <code>with_default_protection=false</code> kept as defensive change.</span>
+            <span class="lang-zh">不再把 file-services 性質的 quota Policy 誤讀為 Pod block 配額。接續 v1.1.10/v1.1.11 現場排查發現 Pure <code>Storage &gt; Policies</code> 整個面板（含 v1.1.10 在讀的 quota policy）都是 FlashArray Files／managed-directory 限定，即使 GUI 讓你在建 policy 時指定 Pod 也一樣。任何此類 policy 一旦掛到 Pod 上，Pure 就會把所有 block volume create 拒絕並回傳誤導性的 <code>Pod contains file systems or policies. (context: &lt;podname&gt;)</code>。<code>pod_get_quota_limit()</code> 簡化為**只讀 <code>Pod.quota_limit</code>**——這才是真正的 block-level Pod 配額欄位，由 <code>purepod --quota-limit</code> CLI／<code>PATCH /pods</code> REST／6.6+ GUI 設定。README 更新明確列出三種正確設定路徑並警告**不要**用 <code>Storage &gt; Policies</code> 設 Pod block 配額，附上「砍 policy + 改設 Pod.quota_limit」的恢復步驟。v1.1.11 的 <code>with_default_protection=false</code> 作為防禦性修改保留。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.11 <span class="changelog-tag changelog-tag--critical">High</span></div>

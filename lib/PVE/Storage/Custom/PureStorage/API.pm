@@ -645,144 +645,52 @@ sub pod_get {
     return $self->get("pods", { names => $name });
 }
 
-# Get effective quota_limit (in bytes) for a pod. Pure FlashArray exposes
-# pod quotas through TWO mechanisms in API 2.x and we honour both:
+# Get effective quota_limit (in bytes) for a pod, by reading the Pod
+# object's `quota_limit` field. This is the ONLY block-level quota
+# mechanism Pure exposes for pods.
 #
-#   (a) The Pod object itself carries a 'quota_limit' field, set via the
-#       'purepod create --quota-limit' / 'purepod setattr --quota-limit'
-#       CLI path (introduced in Purity 6.4.4). 0 means "no direct cap".
+# IMPORTANT: do NOT confuse this with the Storage > Policies → quota
+# Policy in the Pure GUI. That entire /policies/* family (autodir, nfs,
+# smb, quota, snapshot) is FlashArray Files / managed-directory only,
+# even when the policy's `pod` field points to a pod. Attaching such a
+# policy to a pod does not create a block-level quota — it only marks
+# the pod as having file-services policies attached, which causes Pure
+# to reject every block volume create with the misleading error
+# "Pod contains file systems or policies." (see CHANGELOG v1.1.12 and
+# the README "Pod block quota" section).
 #
-#   (b) Newer Purity also lets the operator create a Policy of
-#       policy_type='quota' that references the pod via its 'pod' field
-#       (NOT via /policies/quota/members — that membership table is for
-#       managed directories only, per the spec). Each policy has one or
-#       more rules in /policies/quota/rules carrying the actual
-#       quota_limit. The user-visible Storage > Policies UI builds quotas
-#       this way, and the resulting cap does NOT propagate back into the
-#       Pod's own quota_limit field.
+# Block-level pod quota is set via:
+#   - CLI: `purepod create --quota-limit` / `purepod setattr --quota-limit`
+#   - REST: `PATCH /api/2.x/pods?names=X` body `{"quota_limit": N}`
+#   - GUI: Storage > Pods > <pod> > Edit (Purity 6.6+ only; 6.5.x has no
+#     GUI path)
 #
-# We compute the smallest positive cap across (a) and (b) — the most
-# restrictive limit wins, matching what the array itself enforces on
-# allocation. Returns 0 if no cap is set, the endpoints are unavailable
-# (older Purity, API 1.x), the token lacks permissions, or the pod name
-# contains characters that cannot be safely embedded in a filter literal.
-# Never croaks — status() polling must not fail because of quota lookup.
+# Returns 0 when no cap is set, the pod does not exist, the array runs
+# API 1.x (pods are an API 2.x feature), or any error occurs. Never
+# croaks — status() polling must not fail because of quota lookup.
 sub pod_get_quota_limit {
     my ($self, $podname) = @_;
 
     return 0 unless defined $podname && length $podname;
     return 0 unless $self->is_api_v2();
 
-    # Defensive: pod names in Pure are alphanumerics + - _ . but if a name
-    # somehow contains a single quote or backslash it would break the
-    # filter string we build below. Skip rather than risk a malformed query.
-    if ($podname =~ /['\\]/) {
-        warn "Pure pod quota: pod name '$podname' contains unsafe characters for filter, skipping quota lookup\n";
-        return 0;
-    }
-
-    my $min_quota;
-    my $consider = sub {
-        my $v = shift;
-        return unless defined $v;
-        $v = $v + 0;
-        return unless $v > 0;
-        $min_quota = $v if !defined $min_quota || $v < $min_quota;
-    };
-
-    # (a) direct quota_limit on the Pod object
     my $pod_resp = eval { $self->pod_get($podname); };
-    if (!$@ && $pod_resp) {
-        my $pod;
-        if (ref($pod_resp) eq 'HASH' && ref($pod_resp->{items}) eq 'ARRAY') {
-            $pod = $pod_resp->{items}[0];
-        } elsif (ref($pod_resp) eq 'ARRAY') {
-            $pod = $pod_resp->[0];
-        } else {
-            $pod = $pod_resp;
-        }
-        if (ref($pod) eq 'HASH') {
-            $consider->($pod->{quota_limit});
-        }
+    return 0 if $@ || !$pod_resp;
+
+    my $pod;
+    if (ref($pod_resp) eq 'HASH' && ref($pod_resp->{items}) eq 'ARRAY') {
+        $pod = $pod_resp->{items}[0];
+    } elsif (ref($pod_resp) eq 'ARRAY') {
+        $pod = $pod_resp->[0];
+    } else {
+        $pod = $pod_resp;
     }
+    return 0 unless ref($pod) eq 'HASH';
 
-    # (b) quota policies that reference this pod via their 'pod' field.
-    # We do NOT use /policies/quota/members — that endpoint binds quota
-    # policies to managed directories, not pods.
-    my $policies = eval {
-        $self->get('policies/quota', { filter => "pod.name='$podname'" });
-    };
-    if ($@) {
-        # Older Purity may not support filter on this endpoint, or the
-        # endpoint may not exist at all. Fall back to listing without a
-        # filter and matching in Perl. If THAT also fails, give up
-        # silently and return whatever cap (a) found.
-        $policies = eval { $self->get('policies/quota'); };
-        if ($@) {
-            warn "Pure pod '$podname': cannot list quota policies: $@";
-            return $min_quota // 0;
-        }
-    }
-
-    my @active_policies;
-    if (ref($policies) eq 'HASH' && ref($policies->{items}) eq 'ARRAY') {
-        for my $p (@{$policies->{items}}) {
-            next unless ref($p) eq 'HASH';
-            my $pname = $p->{name} // next;
-            # When we fell back to no-filter listing, match the pod here.
-            my $ppod = ref($p->{pod}) eq 'HASH' ? $p->{pod}{name} : undef;
-            next unless defined $ppod && $ppod eq $podname;
-            next if $p->{destroyed};
-            # 'enabled' may be absent on older Purity — default to enabled
-            # rather than silently dropping the policy.
-            next if exists $p->{enabled} && !$p->{enabled};
-            push @active_policies, $pname;
-        }
-    }
-
-    if (@active_policies) {
-        # Spec confirms /policies/quota/rules GET takes a dedicated
-        # 'policy_names' array query parameter (comma-separated), which is
-        # cleaner than building "policy.name='X' or policy.name='Y'" filter
-        # strings. Pure serialises array params as comma-separated values,
-        # which URI->query_form already does for us when the Perl value is
-        # a plain string.
-        my $policy_names_csv = join(',', @active_policies);
-        my $rules = eval {
-            $self->get('policies/quota/rules', {
-                policy_names => $policy_names_csv,
-            });
-        };
-        if ($@) {
-            # Older Purity quirk fallback: list all rules and match in Perl.
-            $rules = eval { $self->get('policies/quota/rules'); };
-            if ($@) {
-                warn "Pure pod '$podname': cannot list quota rules: $@";
-                return $min_quota // 0;
-            }
-        }
-
-        my %wanted = map { $_ => 1 } @active_policies;
-        if (ref($rules) eq 'HASH' && ref($rules->{items}) eq 'ARRAY') {
-            for my $r (@{$rules->{items}}) {
-                next unless ref($r) eq 'HASH';
-                next if $r->{destroyed};
-                my $polname = ref($r->{policy}) eq 'HASH' ? $r->{policy}{name} : undef;
-                next unless defined $polname && $wanted{$polname};
-                # Both enforced=true and enforced=false rules count: the user
-                # explicitly created the quota and PVE allocation should
-                # respect that intent even when Pure won't reject writes.
-                $consider->($r->{quota_limit});
-            }
-        }
-    }
-    # Pagination note: Pure's default page size on these list endpoints is
-    # generous (typically 1000+ items) and a typical pod has <5 quota
-    # policies with a handful of rules. We do not chase continuation_token
-    # here — if the array genuinely has thousands of quota policies the
-    # operator should switch to per-pod scoped tokens anyway.
-
-    return $min_quota // 0;
+    my $limit = $pod->{quota_limit};
+    return 0 unless defined $limit;
+    $limit = $limit + 0;
+    return $limit > 0 ? $limit : 0;
 }
 
 #

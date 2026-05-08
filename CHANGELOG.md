@@ -8,6 +8,88 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.12] - 2026-05-08
+
+### MEDIUM — Stop reading file-services quota policies as if they were pod block quotas
+
+Field follow-up to v1.1.10 / v1.1.11. The same field engagement
+that surfaced the v1.1.10 pod-quota reporting bug also revealed
+that **the entire `Storage > Policies` panel in the Pure GUI is
+FlashArray Files / managed-directory only**, even when the GUI
+lets you scope a quota policy to a Pod when creating it. Pure
+recognises five policy types and ALL of them are file-services:
+`autodir`, `nfs`, `smb`, `quota`, `snapshot`. Attaching any of
+them to a Pod marks the Pod as "has file-services policies
+attached," which makes Pure reject every subsequent block volume
+create with the misleading error:
+
+```
+Pure Storage API: Pod contains file systems or policies. (context: <podname>)
+```
+
+#### Two consequences this release addresses
+
+1. **v1.1.10's `pod_get_quota_limit` walked
+   `/policies/quota` + `/policies/quota/rules` to surface that
+   policy's `quota_limit` as if it were the Pod's block quota.**
+   That value never enforced against block volumes — it only
+   enforces against managed-directory file usage. PVE was being
+   shown a cap that did not exist for the resource it cares about.
+   v1.1.12 strips that walk: `pod_get_quota_limit` now reads ONLY
+   `Pod.quota_limit`, which is the genuine block-level pod quota
+   field.
+
+2. **v1.1.11's `with_default_protection=false` on
+   `volume_create`/`volume_clone` did NOT cure the field-reported
+   "Pod contains file systems or policies." rejection.** The
+   rejection sits at a higher layer than container-default-
+   protection application; opting out of default protection
+   does not change Pure's mind. The right fix is on the Pure side:
+   destroy the file-services policy and set `Pod.quota_limit`
+   instead. v1.1.11's parameter is kept (it is a correct defensive
+   change — the plugin manages its own snapshot policy and never
+   relied on Pure's default protection — and removing it would be
+   gratuitous churn) but it is no longer claimed as the cure here.
+
+#### Fixed
+- **[MEDIUM] `pod_get_quota_limit()` now reads only
+  `Pod.quota_limit`.** The 80+ lines of policies/quota walk added
+  in v1.1.10 are gone. Simpler, faster (one fewer API call per
+  poll, two fewer in the multi-policy case), and no longer
+  reports misleading caps.
+- **README + README_zh-TW Option A "Pod with quota" sections now
+  spell out the three correct paths** for setting Pod block
+  quota — CLI (`purepod --quota-limit`), REST API (`PATCH /pods`
+  with `quota_limit` in body), GUI (6.6+ Edit Pod) — and warn
+  explicitly that `Storage > Policies` must NOT be used for pod
+  block quota. The exact "Pod contains file systems or policies."
+  error string and the destroy + re-set recipe are included so
+  operators can self-recover without contacting support.
+
+#### Field-side recovery (no plugin change needed)
+For any operator that previously created a quota policy via the
+Pure GUI and now sees `Pod contains file systems or policies.` on
+volume create:
+
+```
+# CLI on Pure
+purepolicy quota destroy <policy-name>
+purepod setattr <pod-name> --quota-limit 2T
+
+# OR REST (PVE Web UI Shell, uses storage's stored API token)
+DELETE /api/2.x/policies/quota?names=<policy-name>
+PATCH  /api/2.x/pods?names=<pod-name>  body  {"quota_limit": <bytes>}
+```
+
+#### Files changed
+- `lib/PVE/Storage/Custom/PureStorage/API.pm`:
+  - `pod_get_quota_limit()` rewritten to read only Pod.quota_limit
+- `README.md`, `README_zh-TW.md`:
+  - "Option A — Pod with quota" updated with explicit warning and
+    three correct setting paths
+
+---
+
 ## [1.1.11] - 2026-05-08
 
 ### HIGH — Volume create/clone failed in a pod with any policy attached

@@ -8,6 +8,79 @@
 
 ---
 
+## [1.1.12] - 2026-05-08
+
+### 中——不再把 file-services 配額 Policy 誤當成 Pod block 配額讀
+
+接續 v1.1.10 / v1.1.11 同一個現場：那次工單同時揭露了一個更根本的
+事實——**Pure GUI 的 `Storage > Policies` 整個面板都是 FlashArray
+Files／managed-directory 用的**，即使 GUI 讓你建 quota policy 時可
+以指定 Pod，那也不是 block volume 的配額機制。Pure 內建五種 policy
+類型全部都是 file-services：`autodir`、`nfs`、`smb`、`quota`、
+`snapshot`。任何一條從這個面板建出來的 policy 一旦掛到 Pod 上，
+Pure 就會把 Pod 標記成「附掛了 file-services policy」，之後所有
+block volume create 都會被拒絕並回傳誤導性的：
+
+```
+Pure Storage API: Pod contains file systems or policies. (context: <podname>)
+```
+
+#### 因此這版要修兩件事
+
+1. **v1.1.10 的 `pod_get_quota_limit` 會去走
+   `/policies/quota` + `/policies/quota/rules`，把那個 policy 的
+   `quota_limit` 當成 Pod block 配額回報。** 這個數值從來沒對
+   block volume 生效——它只對 managed directory 的檔案用量生效。
+   PVE 被告知的 cap 跟它實際關心的資源無關。v1.1.12 把這段走
+   policy 的邏輯整段拿掉，`pod_get_quota_limit` 只讀
+   `Pod.quota_limit`——那才是真正的 block-level Pod 配額欄位。
+
+2. **v1.1.11 在 `volume_create` / `volume_clone` 加的
+   `with_default_protection=false` 並沒有解掉現場的「Pod contains
+   file systems or policies.」拒絕。** 該拒絕點在 Pure 內部比
+   container default protection 還更上層；把這個參數設為 false
+   並不會改變 Pure 的判斷。真正的解法在 Pure 端：把那條
+   file-services policy 砍掉、改設 `Pod.quota_limit`。
+   v1.1.11 加的這個參數**保留**（它本身是正確的防禦性修改——
+   外掛由 `volume_snapshot` / `volume_overwrite` 自行管理 snapshot，
+   本來就不依賴 Pure 的 default protection——拿掉只會徒增 churn），
+   但不再宣稱它是這個情境的解。
+
+#### 修正
+- **[中] `pod_get_quota_limit()` 改為只讀 `Pod.quota_limit`。**
+  v1.1.10 加的 80+ 行 policies/quota 巡訪程式整段拿掉。更精簡、
+  更快（每次 poll 少 1 次 API call，多 policy 情境少 2 次），
+  也不再回報誤導性的 cap。
+- **README 與 README_zh-TW 的方案 A「Pod 加配額」區塊**現在明確
+  列出設定 Pod block 配額的三種正確路徑——CLI（`purepod
+  --quota-limit`）、REST API（`PATCH /pods` body `quota_limit`）、
+  GUI（6.6+ Edit Pod）——並明確警告**不要**用 `Storage > Policies`
+  設 Pod block 配額。錯誤訊息的字面與「砍 policy 並改設
+  Pod.quota_limit」的恢復步驟都寫進去，讓操作者不必聯絡支援就能
+  自行排除。
+
+#### 現場端排除（不用改外掛）
+任何之前用 Pure GUI 建過 quota policy、現在在建 Volume 時看到
+`Pod contains file systems or policies.` 的操作者：
+
+```
+# Pure 端 CLI
+purepolicy quota destroy <policy-name>
+purepod setattr <pod-name> --quota-limit 2T
+
+# 或走 REST（PVE Web UI Shell，使用 storage 已存的 API token）
+DELETE /api/2.x/policies/quota?names=<policy-name>
+PATCH  /api/2.x/pods?names=<pod-name>  body  {"quota_limit": <bytes>}
+```
+
+#### 變更檔案
+- `lib/PVE/Storage/Custom/PureStorage/API.pm`：
+  - `pod_get_quota_limit()` 重寫為只讀 `Pod.quota_limit`
+- `README.md`、`README_zh-TW.md`：
+  - 「方案 A——Pod 加配額」更新明確警告與三種正確設定路徑
+
+---
+
 ## [1.1.11] - 2026-05-08
 
 ### 高——Pod 上掛了任何 Policy 後，建立／複製 Volume 全失敗
