@@ -8,6 +8,82 @@
 
 ---
 
+## [1.1.13] - 2026-05-11
+
+### 高——Snapshot 倒回在 REST API 2.x 上沉默無作用
+
+**@tgdfama1**（[#1]）與 **@pulipulichen**（[#2]）獨立回報。建立快照後
+修改 Volume、再從 PVE UI 倒回，task 顯示成功但 Volume 內容**沒有**真的
+還原——倒回後重啟 VM 仍能看到 snapshot 之後寫入的檔案。
+
+**根因**：`volume_overwrite()` 使用 `PATCH /api/2.x/volumes` 並把
+`source` 放 body。對照 FA 2.x OpenAPI spec，`PATCH /volumes` 是
+**rename ／ destroy ／ modify** 端點，body 並不接受 `source` 欄位——
+Pure 回 `No attribute specified.` 但 HTTP 200 帶空 body 給上層，PVE
+task 層因此判定成功，實際 copy-over 從未發生。
+
+#### 修正
+- **[高] `volume_overwrite()` 從 `PATCH` 改為
+  `POST /volumes?names=<target>&overwrite=true`**，`source` 放 body——
+  與 `volume_clone()` 已經在用的同一個 POST 端點，加上 spec 定義給
+  object-copy 用的 `overwrite=true` query 參數。`add_to_protection_group_names`
+  與 `with_default_protection` 在 `overwrite=true` 時 spec 明確禁止，
+  故此 path 不傳。
+
+#### 重現步驟
+1. 在 Pure-backed storage 建一個 VM 磁碟
+2. 在 PVE 對 VM 建 snapshot
+3. 開機、寫一個檔案、關機
+4. PVE UI 右鍵 → 倒回該 snapshot
+5. **修正前**：task 顯示 OK，但開機後 snapshot 之後寫的檔案還在
+6. **修正後**：snapshot 之後寫的檔案已消失，Volume 內容正確回到
+   snapshot 當時的狀態
+
+---
+
+### 中——Pod-backed Storage 在 thin Volume 一建好就顯示 100% used
+
+**@pulipulichen** 回報（[#3]）。
+
+v1.1.12 修好 Pod 配額讀取（讀 `Pod.quota_limit`）後，下一個露出來的
+表面問題是：配額大小的 thin Volume 一建好（例如 2 TB pod 內建一個
+2 TB Volume），即使 host 端零寫入，PVE 立刻顯示 storage 100% used；
+但 Pure GUI 對同一個 pod 顯示「幾乎空的」。
+
+**根因**：`get_managed_capacity()` 在 `//` fallback chain 中優先取
+`space.total_provisioned`（所有 Volume size 加總）而非 `space.virtual`
+（host 端寫入的 logical bytes）。當時的理由是「Pod 配額對
+provisioned 強制」，但 operator 看到 PVE 100% / Pure GUI 0% 的落差
+比想像中的「PVE 允許 over-allocate」風險更傷信任——而且如果真的
+撞到配額，陣列在 allocate 階段會回明確錯誤，`translate_pure_error()`
+也會把訊息攤給操作者。status() 不需要先悲觀化容量上限。
+
+#### 修正
+- **[中] `get_managed_capacity()` 的 fallback 順序重排**：優先取
+  `virtual`（對齊 Pure UI 的 pod 用量顯示），再依序 `total_physical`
+  → `total_used` → `total_provisioned`。PVE 的容量條現在會跟 Pure
+  GUI 對 pod 的用量視圖一致。
+
+---
+
+### CI：手動觸發的 `.deb` build workflow
+
+**@pulipulichen** 貢獻（[#4]）。
+
+- **新檔 `.github/workflows/build-deb.yml`**——在 `ubuntu-24.04`
+  runner 跑 `make test` + `dpkg-buildpackage -us -uc -b`，將產出的
+  `.deb` 上傳成保留 30 天的 GitHub Actions artifact
+- 只透過 `workflow_dispatch` 手動觸發（不自動推、不會動到 `releases/`）
+- 對於想驗證 build 是否乾淨、又不想架 Debian 開發環境的貢獻者，
+  以及想針對任一 branch 快速產 artifact 的 release 工程師都有用
+
+[#1]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/1
+[#2]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/2
+[#3]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/3
+[#4]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/4
+
+---
+
 ## [1.1.12] - 2026-05-08
 
 ### 中——不再把 file-services 配額 Policy 誤當成 Pod block 配額讀

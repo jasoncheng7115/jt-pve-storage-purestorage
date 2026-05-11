@@ -8,6 +8,96 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.13] - 2026-05-11
+
+### HIGH — Snapshot rollback silently no-op'd on REST API 2.x
+
+Reported independently by **@tgdfama1** ([#1]) and **@pulipulichen**
+([#2]). After taking a snapshot, modifying the volume, and rolling
+back from the PVE UI, the rollback task appeared to complete but the
+volume contents were not restored — post-snapshot data was still
+visible to the guest.
+
+**Root cause:** `volume_overwrite()` used `PATCH /api/2.x/volumes`
+with a `source` body field. Per the FA 2.x OpenAPI spec, `PATCH
+/volumes` is the **rename / destroy / modify** endpoint and does
+**not** accept `source` in its body — Pure responded with
+`No attribute specified.` while still returning HTTP 200 with an
+empty body, so the PVE task layer reported success even though the
+volume was never copied over.
+
+#### Fixed
+- **[HIGH] `volume_overwrite()` switched from `PATCH` to
+  `POST /volumes?names=<target>&overwrite=true`** with `source` in
+  the body — the same POST endpoint `volume_clone()` already uses,
+  with the spec-defined `overwrite=true` query parameter for the
+  "object copy" case. `add_to_protection_group_names` and
+  `with_default_protection` are deliberately omitted on this path
+  because the spec forbids them when `overwrite=true`.
+
+#### Reproducer
+1. Create a VM disk on a Pure-backed storage.
+2. Take a snapshot of the VM in PVE.
+3. Boot the VM, write a file, shut down.
+4. Right-click → Revert / Rollback the snapshot in PVE UI.
+5. **Before this fix:** the task says "OK", but booting the VM
+   shows the post-snapshot file still present.
+6. **After this fix:** the post-snapshot file is gone, the volume
+   correctly reflects the snapshot's state.
+
+---
+
+### MEDIUM — Pod storage reported 100% used immediately after thin volume create
+
+Reported by **@pulipulichen** ([#3]).
+
+After v1.1.12 fixed pod quota reporting to read `Pod.quota_limit`,
+the next surface was wrong: a thin volume of the quota's size (e.g.
+2 TB volume in a 2 TB pod) made PVE report the storage as 100% used
+the moment the volume was created, even with zero host writes. The
+Pure GUI on the same pod correctly showed it as nearly empty.
+
+**Root cause:** `get_managed_capacity()` preferred
+`space.total_provisioned` (sum of all volume sizes) over
+`space.virtual` (host-visible logical writes) in the `//` fallback
+chain. The original reasoning was that pod quotas enforce against
+provisioned capacity, so reporting provisioned-as-used would
+correctly stop PVE from over-allocating. The enforcement theory is
+correct but the operator-visible mismatch against Pure's own UI was
+worse than the imagined over-allocation risk — if the array genuinely
+runs into the quota at allocate time it returns a clear quota error
+that `translate_pure_error()` already surfaces. `status()` does not
+need to pre-pessimise the cap.
+
+#### Fixed
+- **[MEDIUM] `get_managed_capacity()` fallback chain reordered** to
+  prefer `virtual` (matching Pure UI's pod usage display), with
+  fallbacks through `total_physical` → `total_used` →
+  `total_provisioned`. PVE's used-bar now tracks the Pure GUI's
+  view of the pod.
+
+---
+
+### CI: manual `.deb` build workflow
+
+Contributed by **@pulipulichen** ([#4]).
+
+- **New file: `.github/workflows/build-deb.yml`** — runs `make test`
+  + `dpkg-buildpackage -us -uc -b` on an `ubuntu-24.04` runner and
+  uploads the resulting `.deb` as a 30-day GitHub Actions artifact.
+- Triggered manually via `workflow_dispatch` only (no auto-push, no
+  side effects on `releases/`).
+- Useful for contributors who want to verify a build without
+  setting up a Debian dev environment, and for release engineers
+  who want a quick artifact off any branch.
+
+[#1]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/1
+[#2]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/2
+[#3]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/3
+[#4]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/4
+
+---
+
 ## [1.1.12] - 2026-05-08
 
 ### MEDIUM — Stop reading file-services quota policies as if they were pod block quotas

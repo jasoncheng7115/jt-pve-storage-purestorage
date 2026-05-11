@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.12 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.13 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.12-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.13-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.12-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.13-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.13 <span class="changelog-tag changelog-tag--critical">High</span></div>
+        <div class="changelog-date">2026-05-11</div>
+        <div class="changelog-summary">
+            <span class="lang-en">Snapshot rollback fix + pod capacity display alignment + CI build workflow. <strong>Snapshot rollback (HIGH):</strong> <code>volume_overwrite()</code> wrongly used <code>PATCH /volumes</code> with a <code>source</code> body field — per the FA 2.x spec, PATCH /volumes is the rename/modify endpoint and does not accept <code>source</code>; Pure returned <code>No attribute specified.</code> with HTTP 200 so the PVE task layer reported success while the volume contents were never restored. Switched to <code>POST /volumes?names=X&amp;overwrite=true</code> with <code>source</code> in body (the spec-defined object-copy path). Reported by @tgdfama1 (#1) and @pulipulichen (#2). <strong>Pod capacity (MEDIUM):</strong> <code>get_managed_capacity()</code> fallback chain now prefers <code>space.virtual</code> (matching Pure UI's pod usage display) over <code>total_provisioned</code> — earlier code reported 100% full the instant a thin volume of the quota's size was created, mismatching the Pure GUI. Reported by @pulipulichen (#3). <strong>CI:</strong> new manually-triggered <code>.github/workflows/build-deb.yml</code> that runs <code>make test</code> + <code>dpkg-buildpackage</code> and uploads the .deb as a 30-day artifact. Contributed by @pulipulichen (#4).</span>
+            <span class="lang-zh">Snapshot 倒回修復 + Pod 容量顯示對齊 + CI build workflow。<strong>Snapshot 倒回（高）：</strong><code>volume_overwrite()</code> 之前錯用 <code>PATCH /volumes</code> 並把 <code>source</code> 放 body——對照 FA 2.x spec，PATCH /volumes 是 rename ／ modify 端點不接受 <code>source</code>；Pure 回 <code>No attribute specified.</code> 但 HTTP 200 帶空 body，PVE task 層判定成功實際倒回沒發生。改為 <code>POST /volumes?names=X&amp;overwrite=true</code>、<code>source</code> 放 body（spec 定義給 object-copy 用的路徑）。@tgdfama1（#1）與 @pulipulichen（#2）獨立回報。<strong>Pod 容量（中）：</strong><code>get_managed_capacity()</code> fallback chain 改為優先取 <code>space.virtual</code>（對齊 Pure UI pod 用量顯示），取代之前優先取 <code>total_provisioned</code>——前者讓配額大小的 thin Volume 一建好就顯示 100% full，與 Pure GUI 落差大。@pulipulichen 回報（#3）。<strong>CI：</strong>新增手動觸發的 <code>.github/workflows/build-deb.yml</code>，跑 <code>make test</code> + <code>dpkg-buildpackage</code>、上傳 .deb 為 30 天 artifact。@pulipulichen 貢獻（#4）。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.12 <span class="changelog-tag changelog-tag--fix">Fix</span></div>

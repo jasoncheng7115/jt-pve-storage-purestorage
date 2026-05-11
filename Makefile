@@ -1,5 +1,5 @@
 PACKAGE = jt-pve-storage-purestorage
-VERSION = 1.1.12
+VERSION = 1.1.13
 
 DESTDIR =
 PREFIX = /usr

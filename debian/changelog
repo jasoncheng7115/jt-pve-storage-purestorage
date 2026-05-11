@@ -1,3 +1,52 @@
+jt-pve-storage-purestorage (1.1.13-1) stable; urgency=high
+
+  * [HIGH] Snapshot rollback silently no-op on REST API 2.x. The
+    volume_overwrite sub used PATCH /volumes with a `source` body
+    field, but per the FA 2.x OpenAPI spec PATCH /volumes is the
+    rename/destroy/modify endpoint and does not accept `source`.
+    Pure responded with "No attribute specified." while the API
+    returned 200 with empty body, so the PVE task appeared to
+    succeed even though the volume contents were never restored.
+    Operators saw post-snapshot data still present after rollback.
+    Fixed by switching to POST /volumes?names=X&overwrite=true with
+    `source` in body — the same endpoint volume_clone already uses,
+    with the spec-defined `overwrite=true` query parameter for the
+    object-copy case. add_to_protection_group_names and
+    with_default_protection are deliberately omitted on this path
+    because the spec forbids them when overwrite=true. Reported
+    independently by @tgdfama1 (issue #1) and @pulipulichen (#2)
+    with a reproducer that creates a snapshot, modifies the volume,
+    rolls back from PVE UI, and observes post-snapshot files still
+    present.
+
+  * [MEDIUM] Pod-backed storage reported 100% used in PVE the moment
+    a thin volume of the quota's size was provisioned, even with
+    zero host writes, while the Pure UI correctly showed the pod
+    as nearly empty. Root cause: get_managed_capacity preferred
+    `total_provisioned` (sum of volume sizes) over `virtual` (host-
+    visible logical writes) in the // fallback chain, on the theory
+    that pod quotas enforce against provisioned capacity. The
+    enforcement theory is correct but the resulting status display
+    visibly diverged from Pure's own UI and made operators think
+    the storage was full. Switched the fallback chain to prefer
+    `virtual` (matching Pure UI) → `total_physical` → `total_used`
+    → `total_provisioned`. If the array genuinely runs into the
+    quota at allocate time it returns a clear quota error to
+    volume_create which translate_pure_error already surfaces, so
+    status() does not need to pre-pessimise the cap. Reported by
+    @pulipulichen (#3).
+
+  * CI: new manually-triggered GitHub Actions workflow at
+    .github/workflows/build-deb.yml that runs `make test` and
+    `dpkg-buildpackage -us -uc -b` on an ubuntu-24.04 runner and
+    uploads the produced .deb as an artifact. Lets release
+    engineers and contributors grab a packaged build directly from
+    the GitHub Actions UI without setting up a Debian dev box.
+    Triggered via workflow_dispatch only (no auto-push). Adapted
+    from @pulipulichen's contribution in issue #4.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Mon, 11 May 2026 12:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.12-1) stable; urgency=medium
 
   * [MEDIUM] pod_get_quota_limit() simplified: now reads ONLY the

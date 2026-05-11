@@ -584,15 +584,24 @@ sub get_managed_capacity {
 
         my $used = 0;
         if (ref($space) eq 'HASH' && $space->{space}) {
-            # Pod quotas in Pure count against logical (provisioned) size,
-            # not post-reduction physical bytes. Prefer total_provisioned
-            # (the metric the quota actually enforces); fall back through
-            # virtual / total_used / total_physical for older Purity that
-            # may omit some of these.
-            $used = $space->{space}{total_provisioned}
-                 // $space->{space}{virtual}
-                 // $space->{space}{total_used}
+            # Match Pure UI's pod usage display: prefer 'virtual' (the
+            # host-visible logical writes — what the Pure GUI shows in the
+            # pod's usage bar). Earlier code preferred 'total_provisioned'
+            # on the theory that pod quotas enforce against provisioned
+            # capacity, which is technically true for the enforcement step
+            # but caused PVE to report 100% full the moment a thin volume
+            # of the quota's size was provisioned, even with zero writes —
+            # a visible mismatch against the Pure GUI that confused
+            # operators. If the array does run into the quota at allocate
+            # time, Pure returns a quota error directly to volume_create
+            # and translate_pure_error surfaces it; status() does not have
+            # to pre-pessimise the cap.
+            #
+            # Reported by @pulipulichen (#3).
+            $used = $space->{space}{virtual}
                  // $space->{space}{total_physical}
+                 // $space->{space}{total_used}
+                 // $space->{space}{total_provisioned}
                  // 0;
         }
 
@@ -1018,11 +1027,25 @@ sub volume_overwrite {
     croak "source is required" unless $source;
 
     if ($self->is_api_v2()) {
-        # API 2.x: PATCH /volumes with source and overwrite flag
-        return $self->patch("volumes", {
-            source    => { name => $source },
-            overwrite => JSON::true,
-        }, { names => $name });
+        # API 2.x: POST /volumes?names=<target>&overwrite=true with source
+        # in body. The original implementation used PATCH /volumes here,
+        # but per the FA 2.x OpenAPI spec PATCH /volumes is the
+        # rename/destroy/modify endpoint and does NOT accept `source` in
+        # its body — Pure responds with "No attribute specified." and the
+        # rollback silently no-ops on the volume contents (the PVE side
+        # task still reports success because the API returned 200 with an
+        # empty body). The copy-and-overwrite operation is the same POST
+        # endpoint as volume_clone, with the `overwrite=true` query
+        # parameter that the spec defines for the "object copy operation"
+        # case. Note: per spec, `add_to_protection_group_names` and
+        # `with_default_protection` MUST NOT be supplied when overwrite
+        # is true, so this path deliberately omits them.
+        #
+        # Reported by @tgdfama1 (#1) and @pulipulichen (#2).
+        my $encoded_name = uri_escape($name);
+        return $self->post("volumes?names=$encoded_name&overwrite=true", {
+            source => { name => $source },
+        });
     } else {
         # API 1.x
         return $self->post("volume/$name", { overwrite => $source });
