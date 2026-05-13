@@ -8,6 +8,74 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.16] - 2026-05-13
+
+### HIGH — `pve-pure-config-get` restore mode wasn't tombstone-aware after v1.1.15
+
+Discovered in code review immediately after v1.1.15 shipped.
+Plugin v1.1.15 changed `volume_delete` to pre-rename volumes to
+`<orig>-pve-tomb-<unix-ts>-<pid>` before destroy. The disaster-
+recovery tool `pve-pure-config-get` queries Pure's destroyed-volumes
+list in restore mode to recover both config-backup volumes and the
+VM's disk volumes. After v1.1.15, the destroyed volumes the tool
+finds all carry the tombstone suffix, which broke two things:
+
+#### What broke
+1. **Display (cosmetic but confusing).** `decode_config_volume_name`'s
+   greedy `(.+)$` snapname capture pulled the
+   `-pve-tomb-<ts>-<pid>` trailer into the displayed snapname.
+   The restore picker showed `snap1-pve-tomb-1747000000-12345`
+   instead of just `snap1`, making it hard to identify which
+   snapshot was which.
+
+2. **Functional (serious).** Recovered disk volumes lived on Pure
+   under their tombstone names (e.g.,
+   `pve-pure1-100-disk0-pve-tomb-1747000000-12345`), but the VM
+   config the tool wrote to `/etc/pve/qemu-server/<vmid>.conf`
+   referenced disks under their PVE volid (`vm-100-disk-0`), which
+   the plugin's `pve_volname_to_pure` maps to the original
+   non-tombstone name (`pve-pure1-100-disk0`). On VM start, PVE
+   looked up the disk by its expected name, didn't find it (it
+   sat under the tombstone name), and the restored VM failed to
+   start with "volume does not exist."
+
+#### Fixed
+- **`pve-pure-config-get` strips the `-pve-tomb-<ts>-<pid>` suffix
+  from volume names before passing them to
+  `decode_config_volume_name`** for display. Snapname listing
+  is clean again.
+- **After `volume_recover`, each tombstoned volume is renamed back
+  to its original name** so it lives on Pure under the name the
+  restored VM config expects. Applied to both the config-backup
+  volume and every recovered disk volume.
+- **Rename-back conflict handling.** If the original name is
+  already taken by another live volume (rare — happens only when
+  the operator already recreated the VM in question and is now
+  trying to recover the older deleted instance), the tool aborts
+  the restore with a clear error listing the conflicting tombstone
+  names and offering two recovery paths (manual rename + clean up
+  the conflicting volume, OR restore to a different VMID).
+- **Tool now also uses the v1.1.14 `storeid_to_pure_prefix` helper**
+  instead of duplicating the sanitize+underscore inline. Catches
+  the dotted-storage-ID issue (#6) end-to-end through the restore
+  workflow.
+
+#### Build/CI
+
+- **`make test` now syntax-checks `bin/pve-pure-config-get`** as
+  well as the library modules. A Perl typo in the tool now fails
+  the build (and the new
+  [GitHub Actions deb-build workflow](.github/workflows/build-deb.yml)
+  from v1.1.13) instead of being discovered only when an operator
+  runs the tool during a real disaster.
+
+#### Operator-visible difference
+Pre-1.1.16 disaster recovery from a v1.1.15-or-later destroy would
+silently leave the VM unbootable until manually fixed on Pure side.
+Post-1.1.16 it just works the same as recovering pre-1.1.15 disks.
+
+---
+
 ## [1.1.15] - 2026-05-13
 
 ### MEDIUM — Pure-side name reservation on destroy blocks same-name recreation for 24h; fix by pre-rename tombstone

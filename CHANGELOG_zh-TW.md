@@ -8,6 +8,63 @@
 
 ---
 
+## [1.1.16] - 2026-05-13
+
+### 高——`pve-pure-config-get` restore 模式沒跟上 v1.1.15 的 tombstone
+
+v1.1.15 推完隨即在 code review 發現的問題。Plugin v1.1.15 改了
+`volume_delete`，在 destroy 之前先 rename Volume 為
+`<orig>-pve-tomb-<unix-ts>-<pid>`。災難復原工具
+`pve-pure-config-get` 在 restore 模式（`--restore`）下會去查 Pure 的
+destroyed-volumes 列表、找到 config 備份 Volume 與 VM 的 disk
+Volumes、把它們 recover 並重建這台 PVE 上的 VM config。v1.1.15
+之後，工具找到的 destroyed Volume 全部帶 tombstone 字尾，導致兩個
+問題：
+
+#### 壞掉的部分
+1. **顯示（視覺問題但混淆）**：`decode_config_volume_name` 的
+   greedy `(.+)$` 把 `-pve-tomb-<ts>-<pid>` 字尾整段抓進
+   snapname。restore picker 顯示
+   `snap1-pve-tomb-1747000000-12345` 而非 `snap1`，難以辨認是哪
+   一個 snapshot。
+2. **功能（嚴重）**：recover 回來的 disk Volume 在 Pure 上仍叫
+   tombstone 名（例如
+   `pve-pure1-100-disk0-pve-tomb-1747000000-12345`），但工具寫到
+   `/etc/pve/qemu-server/<vmid>.conf` 的 VM config 引用的是 PVE
+   volid（`vm-100-disk-0`），plugin 的 `pve_volname_to_pure` 會
+   把它 map 回原名（`pve-pure1-100-disk0`）。VM 啟動時 PVE 用
+   原名找 disk → 找不到（disk 在 tombstone 名下）→ 還原好的 VM
+   啟動失敗 "volume does not exist."。
+
+#### 修正
+- **`pve-pure-config-get` 顯示前先剝掉
+  `-pve-tomb-<ts>-<pid>` 字尾**再丟給 `decode_config_volume_name`。
+  Snapname 顯示乾淨。
+- **`volume_recover` 之後立即把 tombstone Volume rename 回原名**，
+  讓 Volume 在 Pure 上的名稱就是還原後 VM config 期待的名字。
+  Config 備份 Volume 與每一個 recover 回來的 disk Volume 都套用。
+- **Rename-back 衝突處理**：原名已被另一個 alive Volume 佔走
+  （罕見——只在 operator 已經重建了該 VM、現在想復原舊版本時
+  發生），工具會 **abort restore** 並印出明確錯誤，列出衝突的
+  tombstone 名稱、給兩個復原方向（手動 rename + 清掉衝突 Volume，
+  或改用不同 VMID 復原）。
+- **工具也改用 v1.1.14 的 `storeid_to_pure_prefix` helper**，不再
+  自己 inline duplicate sanitize+底線轉換。讓帶 dot 的 storage ID
+  在整個 restore 流程也走得通（補齊 #6 漏網之魚）。
+
+#### Build / CI
+- **`make test` 現在也對 `bin/pve-pure-config-get` 做語法檢查**，
+  跟 library 模組一視同仁。工具 Perl 語法錯誤現在會讓 build
+  跟新的 [GitHub Actions deb-build workflow](.github/workflows/build-deb.yml)
+  （v1.1.13 加的）失敗，不會等到 operator 在真實災難下才發現。
+
+#### Operator 可見的差別
+1.1.16 之前如果遇到要用 v1.1.15+ destroy 過的 Volume 做災難復原，
+還原好的 VM 會悄悄啟動不了，要手動到 Pure 端 rename Volume。
+1.1.16 之後行為跟 v1.1.15 之前的 disk 復原一模一樣，直接動。
+
+---
+
 ## [1.1.15] - 2026-05-13
 
 ### 中——Pure destroy 後保留原名 24h 卡住同名重建，改用 pre-rename tombstone

@@ -1,5 +1,5 @@
 PACKAGE = jt-pve-storage-purestorage
-VERSION = 1.1.15
+VERSION = 1.1.16
 
 DESTDIR =
 PREFIX = /usr
@@ -35,6 +35,8 @@ test:
 		echo "Checking $$f..."; \
 		perl -Ilib -c $$f || exit 1; \
 	done
+	@echo "Checking bin/pve-pure-config-get..."
+	@perl -Ilib -c bin/pve-pure-config-get || exit 1
 	@echo "All syntax checks passed."
 
 clean:

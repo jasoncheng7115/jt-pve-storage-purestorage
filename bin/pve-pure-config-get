@@ -18,6 +18,7 @@ use PVE::Storage::Custom::PureStorage::Naming qw(
     encode_config_volume_name
     decode_config_volume_name
     sanitize_for_pure
+    storeid_to_pure_prefix
 );
 use PVE::Storage::Custom::PureStorage::Multipath qw(
     wait_for_multipath_device
@@ -29,7 +30,28 @@ use PVE::Storage::Custom::PureStorage::ISCSI qw(
     rescan_sessions
 );
 
-my $VERSION = '1.0.46';
+my $VERSION = '1.0.47';
+
+# Strip the tombstone suffix that volume_delete (plugin v1.1.15+) adds
+# before destroying a volume. Tombstone names look like
+# "<orig>-pve-tomb-<unix-ts>-<pid>" and turn up here in restore mode
+# when we list Pure's destroyed-volumes for the storage. We strip the
+# marker before decoding the volume name so snapname display stays
+# readable, and we rename the recovered volume back to its original
+# name after volume_recover so PVE can find it under the name it
+# expects from its own config.
+sub _strip_tombstone_suffix {
+    my ($name) = @_;
+    return $name unless defined $name;
+    $name =~ s/-pve-tomb-\d+-\d+$//;
+    return $name;
+}
+
+# Returns 1 if the given volume name carries the v1.1.15+ tombstone marker.
+sub _is_tombstone_name {
+    my ($name) = @_;
+    return defined $name && $name =~ /-pve-tomb-\d+-\d+$/ ? 1 : 0;
+}
 
 # Command line options
 my $storage_id;
@@ -193,9 +215,9 @@ if ($restore_mode) {
     print "Restore mode: Will recover destroyed volumes and place config in PVE\n\n";
 }
 
-# Build pattern to find config volumes
-my $san_storage = sanitize_for_pure($storage_id, 24);
-$san_storage =~ s/-/_/g;
+# Build pattern to find config volumes — same transform encode_volume_name
+# uses, so the pattern matches what the plugin actually writes (issue #6).
+my $san_storage = storeid_to_pure_prefix($storage_id);
 my $pattern = "pve-${san_storage}-${vmid}-vmconf-*";
 
 # Include pod prefix if configured
@@ -233,7 +255,11 @@ for my $vol (@$volumes) {
     # Remove pod prefix if present
     $volname =~ s/^[^:]+:://;
 
-    my $decoded = decode_config_volume_name($volname);
+    # Strip tombstone suffix (added by plugin v1.1.15+ on destroy) so
+    # decode_config_volume_name's greedy snapname capture doesn't pull
+    # the "-pve-tomb-<ts>-<pid>" trailer into the displayed snapname.
+    my $name_for_decode = _strip_tombstone_suffix($volname);
+    my $decoded = decode_config_volume_name($name_for_decode);
     next unless $decoded;
 
     push @configs, {
@@ -341,6 +367,26 @@ if ($restore_mode && $selected->{destroyed}) {
         die "Failed to recover config volume: $@\n";
     }
     print "Config volume recovered.\n";
+
+    # If this volume was tombstoned by plugin v1.1.15+ before destroy,
+    # rename it back to the original name so the rest of the tool's
+    # display and any future plugin operations recognise it. The config
+    # volume is only used internally by this tool (mount-copy-unmount)
+    # so a stuck tombstone name here is not strictly fatal, but the
+    # clean name keeps logs and Pure UI tidy and avoids accumulating
+    # tombstone-named live volumes when the same restore is run again.
+    if (_is_tombstone_name($config_vol)) {
+        my $orig_name = _strip_tombstone_suffix($config_vol);
+        print "Renaming back to original name: $orig_name\n";
+        eval { $api->volume_rename($config_vol, $orig_name); };
+        if ($@) {
+            warn "Could not rename back to '$orig_name' (will continue " .
+                 "with tombstone name '$config_vol'). Underlying error: $@\n";
+        } else {
+            $config_vol = $orig_name;
+            $selected->{name} = $orig_name;
+        }
+    }
 }
 
 # Connect volume to host
@@ -442,8 +488,21 @@ if ($restore_mode) {
         $disk_status{$d->{name}} = { destroyed => 1, vol => $d };
     }
 
-    # Recover destroyed disk volumes
+    # Recover destroyed disk volumes. For volumes that were tombstoned
+    # by plugin v1.1.15+ before destroy, we ALSO have to rename them
+    # back to their original name after recover — otherwise the
+    # recovered volume sits on Pure as "pve-...-disk0-pve-tomb-..."
+    # while the VM config file the tool writes refers to it as
+    # "vm-100-disk-0" (which the plugin maps to "pve-...-disk0"), and
+    # the VM won't start because PVE looks up the disk by its
+    # tombstone-stripped name. Rename failure on name conflict (e.g.,
+    # another live volume already owns the original name because the
+    # user recreated the VM after deletion) is reported clearly so the
+    # operator knows to either remove the conflicting live volume or
+    # restore to a different VMID.
     my $recovered_count = 0;
+    my @to_rename;  # [tombstone_name, original_name] pairs, applied after loop
+    my @rename_conflicts;
     for my $volname (sort keys %disk_status) {
         my $info = $disk_status{$volname};
         if ($info->{destroyed}) {
@@ -451,13 +510,73 @@ if ($restore_mode) {
             eval { $api->volume_recover($volname); };
             if ($@) {
                 print "FAILED: $@\n";
-            } else {
-                print "OK\n";
-                $recovered_count++;
+                next;
+            }
+            print "OK\n";
+            $recovered_count++;
+
+            if (_is_tombstone_name($volname)) {
+                my $orig_name = _strip_tombstone_suffix($volname);
+                print "  Renaming back: $orig_name ... ";
+                eval { $api->volume_rename($volname, $orig_name); };
+                if ($@) {
+                    my $err = $@;
+                    if ($err =~ /already exists|in use|duplicate|409/i) {
+                        print "CONFLICT (original name already taken by " .
+                              "another live volume)\n";
+                        push @rename_conflicts, {
+                            tomb => $volname,
+                            orig => $orig_name,
+                        };
+                    } else {
+                        print "FAILED: $err\n";
+                        warn "  Volume will remain under tombstone name " .
+                             "'$volname'; PVE will not find it under " .
+                             "expected name '$orig_name' when starting " .
+                             "the VM.\n";
+                    }
+                } else {
+                    print "OK\n";
+                    push @to_rename, [$volname, $orig_name];
+                }
             }
         } else {
             print "Volume OK: $volname\n";
         }
+    }
+
+    # Apply the rename results to %disk_status after iteration so we
+    # don't mutate the hash we're walking. Subsequent connect / scan
+    # steps then see the post-rename names.
+    for my $pair (@to_rename) {
+        my ($old, $new) = @$pair;
+        $disk_status{$new} = delete $disk_status{$old};
+    }
+
+    if (@rename_conflicts) {
+        print "\n=== Rename-back conflicts ===\n";
+        print "The following recovered volumes could not be renamed back " .
+              "to their original PVE-expected names because the original " .
+              "names are already taken by other live volumes on the array:\n";
+        for my $c (@rename_conflicts) {
+            print "  tombstone: $c->{tomb}\n";
+            print "  wanted:    $c->{orig}\n";
+        }
+        print "\nThe recovered data is intact under the tombstone names " .
+              "but PVE will not find these disks under their expected " .
+              "names. Options:\n" .
+              "  1. Remove the conflicting live volume(s) from Pure UI, " .
+              "then manually rename the tombstoned volume(s) to the " .
+              "original name(s).\n" .
+              "  2. Re-run the restore with a different VMID (use --vmid " .
+              "with a free ID).\n" .
+              "Aborting restore to avoid leaving the VM in a half-restored " .
+              "state.\n";
+        # Cleanup config volume connection before exiting
+        eval { system('umount', $mount_point); };
+        cleanup_lun_devices($wwid);
+        eval { $api->volume_disconnect_host($config_vol, $host); };
+        exit(1);
     }
 
     # Connect disk volumes to host

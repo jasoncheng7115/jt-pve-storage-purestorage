@@ -1,3 +1,49 @@
+jt-pve-storage-purestorage (1.1.16-1) stable; urgency=high
+
+  * [HIGH] pve-pure-config-get restore mode: tombstone-aware recovery.
+    v1.1.15 made volume_delete pre-rename volumes to
+    "<orig>-pve-tomb-<unix-ts>-<pid>" before destroy. The disaster-
+    recovery tool pve-pure-config-get queries Pure's destroyed-
+    volumes list when in restore mode (--restore) to find both
+    config-backup volumes and the VM's disk volumes, recover them,
+    and reconstruct the VM config on this PVE node. After v1.1.15,
+    the destroyed volumes the tool finds carry the tombstone suffix.
+    Two consequences:
+    (a) decode_config_volume_name's greedy snapname capture pulled
+        the "-pve-tomb-<ts>-<pid>" trailer into the displayed
+        snapname, making the restore picker show ugly nonsense
+        instead of just "snapname1".
+    (b) MORE SERIOUS: recovered disk volumes lived under their
+        tombstone names on Pure (e.g. pve-pure1-100-disk0-pve-tomb-
+        1747000000-12345), but the VM config the tool wrote to
+        /etc/pve/qemu-server/<vmid>.conf referenced the original
+        PVE volname (vm-100-disk-0), which the plugin maps to
+        pve-pure1-100-disk0. PVE looked up the disk by its
+        original name, did not find it (it was under the tombstone
+        name), and the restored VM failed to start.
+    Fixed by:
+    - Stripping the tombstone suffix before passing volume names to
+      decode_config_volume_name for display.
+    - Renaming each recovered volume BACK to its original name
+      immediately after volume_recover, so the restored VM's disks
+      live on Pure under the names PVE expects.
+    - Detecting rename-back conflicts (extremely unlikely, but
+      possible if the operator already recreated the VM with the
+      original name) and aborting the restore with a clear error
+      that lists the conflicting tombstone names and offers two
+      recovery paths (manual cleanup OR restore to a different
+      VMID).
+    Also picked up the still-broken inline storeid_to_pure_prefix
+    duplication that issue #6 missed in this tool (line 197-198),
+    so dotted storage IDs now work end-to-end through the restore
+    workflow as well.
+
+  * make test now also syntax-checks bin/pve-pure-config-get, so a
+    Perl typo in the tool fails CI / local test rather than being
+    discovered only when an operator runs it in a disaster.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 13 May 2026 21:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.15-1) stable; urgency=medium
 
   * [MEDIUM] Deleted PVE disks no longer hold their Pure volume name

@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.15 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.16 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.15-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.16-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.15-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.16-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.16 <span class="changelog-tag changelog-tag--critical">High</span></div>
+        <div class="changelog-date">2026-05-13</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>pve-pure-config-get tombstone-awareness (HIGH):</strong> v1.1.15 introduced tombstone rename in <code>volume_delete</code>, but the disaster-recovery tool <code>pve-pure-config-get --restore</code> wasn't updated to match. After a v1.1.15 destroy, the destroyed volumes had tombstone names, which (a) showed up as ugly snapnames in the restore picker because <code>decode_config_volume_name</code>'s greedy capture absorbed the suffix, and more seriously (b) <strong>recovered disk volumes lived under their tombstone names</strong> while the restored VM config referenced original names → PVE looked up disks by their expected names, didn't find them, and the restored VM failed to start with "volume does not exist." Fixed in 1.1.16: strip the tombstone suffix before decode for display, rename each recovered volume BACK to its original name immediately after <code>volume_recover</code>, abort with a clear error if rename-back conflicts with an already-existing live volume. Also picked up the inline storeid_to_pure_prefix duplication that #6 missed in this tool. <code>make test</code> now also syntax-checks <code>bin/pve-pure-config-get</code>.</span>
+            <span class="lang-zh"><strong>pve-pure-config-get 跟上 tombstone（高）：</strong>v1.1.15 在 <code>volume_delete</code> 加了 tombstone rename，但災難復原工具 <code>pve-pure-config-get --restore</code> 沒同步更新。v1.1.15 之後 destroy 的 Volume 都帶 tombstone 名，導致（a）restore picker 顯示的 snapname 把 tombstone 字尾整段吃進去、難以辨認，更嚴重的（b）<strong>recover 回來的 disk Volume 在 Pure 上仍叫 tombstone 名</strong>但還原好的 VM config 用的是原名 → PVE 找 disk 找不到 → 還原好的 VM 開不起來，「volume does not exist」。1.1.16 修法：decode 顯示前先剝 tombstone 字尾、`volume_recover` 之後立即 rename 回原名、rename-back 與既有 alive Volume 衝突時 abort 並印明確錯誤。也順便補齊 #6 在這個工具裡漏網的 inline storeid_to_pure_prefix 重複。<code>make test</code> 現在也對 <code>bin/pve-pure-config-get</code> 做語法檢查。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.15 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
