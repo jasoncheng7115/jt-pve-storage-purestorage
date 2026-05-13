@@ -1,3 +1,22 @@
+jt-pve-storage-purestorage (1.1.17-1) stable; urgency=medium
+
+  * [MEDIUM] get_managed_capacity() for pod-backed storage now
+    reports `used` based on space.total_provisioned (sum of all
+    volume sizes within the pod) instead of space.virtual
+    (host-written bytes). Pure pod quota is enforced against
+    total_provisioned at allocation time, so this is the metric
+    that matches what the array will actually refuse — and the
+    headline "Size" indicator Pure UI shows on the pod detail
+    page. Operators upgrading may observe their pod storage's
+    "used" reading change to reflect provisioned capacity rather
+    than written capacity; this is the correct semantic for
+    capacity planning against the pod's quota_limit. The fallback
+    chain remains in place (virtual → total_physical → total_used)
+    for older Purity that may omit total_provisioned. Tracked
+    in #7.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 13 May 2026 23:30:00 +0800
+
 jt-pve-storage-purestorage (1.1.16-1) stable; urgency=high
 
   * [HIGH] pve-pure-config-get restore mode: tombstone-aware recovery.

@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.16 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.17 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.16-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.17-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.16-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.17-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.17 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-05-13</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Pod capacity `used` aligned with Pure quota enforcement (MEDIUM):</strong> <code>get_managed_capacity()</code> for pod-backed storage now reports <code>used</code> based on <code>space.total_provisioned</code> (sum of all volume sizes within the pod) instead of <code>space.virtual</code> (host-written bytes). Pure pod quota is enforced against <code>total_provisioned</code> at allocation time, so this is the metric that matches what the array will actually refuse — and the headline "Size" indicator Pure UI shows on the pod detail page. A pod with quota 2 TB containing a 2 TB thin volume with zero writes correctly reports as full (the next allocation would be rejected by the array). Fallback chain unchanged (virtual → total_physical → total_used) for older Purity. Per-volume size in PVE disk list is unaffected — that has always used the volume's own <code>provisioned</code> field. Tracked in #7.</span>
+            <span class="lang-zh"><strong>Pod 容量 `used` 對齊 Pure 配額強制邏輯（中）：</strong><code>get_managed_capacity()</code> 對 pod-backed storage 的 <code>used</code> 改採 <code>space.total_provisioned</code>（pod 內所有 Volume size 加總），不再以 <code>space.virtual</code>（host 寫入 bytes）為主。Pure pod quota 在 allocate 階段對 <code>total_provisioned</code> 強制，這是陣列實際會拒絕分派的依據，也是 Pure UI 對 pod 顯眼的「Size」指標。2 TB 配額 pod 裡有 2 TB thin volume、即使零寫入，PVE 也會正確顯示為滿（下次 allocate 真的會被陣列拒絕）。Fallback chain 不變（virtual → total_physical → total_used）相容舊版 Purity。PVE disk 列表上每顆 Volume 顯示的大小不變——那邊一直讀 Volume 自己的 <code>provisioned</code> 欄位。Tracked in #7。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.16 <span class="changelog-tag changelog-tag--critical">High</span></div>

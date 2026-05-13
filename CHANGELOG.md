@@ -8,6 +8,49 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.17] - 2026-05-13
+
+### MEDIUM — Pod capacity `used` now reflects provisioned capacity (matches Pure quota enforcement)
+
+`get_managed_capacity()` for pod-backed storage now reports `used`
+based on `space.total_provisioned` (sum of all volume sizes within
+the pod) instead of `space.virtual` (host-written bytes).
+
+#### Why this metric
+Pure pod quota is enforced against `total_provisioned` at allocation
+time — it is the metric that matches what the array will actually
+refuse. The headline "Size" indicator on the Pure UI pod detail
+page is also driven by this figure, so the reported value lines up
+with what operators see on the array side.
+
+The `virtual` metric (host-written bytes) reflects what the guest
+has actually written to disk, which is a useful number but does not
+indicate the remaining allocation room. A pod with a 2 TB quota and
+a 2 TB thin volume that has had no writes will still refuse a new
+allocation; `used = total_provisioned` is the reading that surfaces
+this truth.
+
+#### Fallback chain (unchanged in shape)
+`total_provisioned` → `virtual` → `total_physical` → `total_used`.
+Order changed so total_provisioned wins; older Purity that may omit
+total_provisioned still falls through to the same secondary
+indicators as before.
+
+#### Operator-visible difference on upgrade
+Pod storage's `used` reading may jump up to reflect provisioned
+capacity rather than written capacity. PVE's capacity bar will now
+match what the Pure UI displays as the pod's "Size" usage, and what
+the array will allow at the next allocate.
+
+Per-volume size reporting in `list_images` / `volume_size_info` is
+unchanged — it has always used the volume's own `provisioned`
+field (Pure-side volume size), which is correct for per-disk
+display in the PVE GUI.
+
+[#7]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/7
+
+---
+
 ## [1.1.16] - 2026-05-13
 
 ### HIGH — `pve-pure-config-get` restore mode wasn't tombstone-aware after v1.1.15

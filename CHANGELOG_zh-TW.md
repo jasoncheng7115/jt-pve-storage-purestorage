@@ -8,6 +8,42 @@
 
 ---
 
+## [1.1.17] - 2026-05-13
+
+### 中——Pod 容量 `used` 改採 provisioned 配置量（對齊 Pure 配額強制邏輯）
+
+`get_managed_capacity()` 對 pod-backed storage 的 `used` 改為以
+`space.total_provisioned`（pod 內所有 Volume size 加總）為主，
+不再以 `space.virtual`（host 寫入 bytes）為主。
+
+#### 為何採用此指標
+Pure pod quota 在 allocate 階段是對 `total_provisioned` 強制——這
+是陣列實際會拒絕分派的依據。Pure UI pod 詳細頁面最顯眼的「Size」
+指標也是這個數字，所以回報值與操作者在陣列端看到的一致。
+
+`virtual` 指標反映 guest 實際寫入磁碟的量，是有用的數字但**無法
+表達剩餘可分派空間**。一個 2 TB 配額的 pod 裡放著一個 2 TB 的
+thin volume、即使 guest 完全沒寫任何資料，陣列仍會拒絕新的
+allocation；`used = total_provisioned` 才能在容量條上反映這個事實。
+
+#### Fallback chain（形狀不變）
+`total_provisioned` → `virtual` → `total_physical` → `total_used`。
+順序改成 total_provisioned 優先；舊版 Purity 若沒有 total_provisioned
+仍會依序回退到原本的次要指標。
+
+#### 升版後 operator 可見的差別
+Pod storage 的 `used` 數字可能會跳升、反映 provisioned 配置量而非
+寫入量。PVE 容量條會跟 Pure UI 對 pod 顯示的「Size」用量一致，也跟
+陣列下次 allocate 時會准許的剩餘空間一致。
+
+每顆 Volume 在 PVE GUI 上顯示的大小不變——`list_images` 與
+`volume_size_info` 一直以來都讀 Volume 自己的 `provisioned` 欄位
+（Pure 端的 Volume size），那邊本來就是對的。
+
+[#7]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/7
+
+---
+
 ## [1.1.16] - 2026-05-13
 
 ### 高——`pve-pure-config-get` restore 模式沒跟上 v1.1.15 的 tombstone

@@ -584,24 +584,26 @@ sub get_managed_capacity {
 
         my $used = 0;
         if (ref($space) eq 'HASH' && $space->{space}) {
-            # Match Pure UI's pod usage display: prefer 'virtual' (the
-            # host-visible logical writes — what the Pure GUI shows in the
-            # pod's usage bar). Earlier code preferred 'total_provisioned'
-            # on the theory that pod quotas enforce against provisioned
-            # capacity, which is technically true for the enforcement step
-            # but caused PVE to report 100% full the moment a thin volume
-            # of the quota's size was provisioned, even with zero writes —
-            # a visible mismatch against the Pure GUI that confused
-            # operators. If the array does run into the quota at allocate
-            # time, Pure returns a quota error directly to volume_create
-            # and translate_pure_error surfaces it; status() does not have
-            # to pre-pessimise the cap.
+            # Pod quota in Pure is enforced against `total_provisioned`
+            # (sum of all volume sizes within the pod), NOT against
+            # `virtual` (host-written bytes). To match what the array
+            # actually enforces at allocation time — and to align with
+            # the headline "Size" indicator Pure UI shows on the pod
+            # detail page — prefer total_provisioned first here.
             #
-            # Reported by @pulipulichen (#3).
-            $used = $space->{space}{virtual}
+            # History: a previous release briefly preferred `virtual`
+            # first after a report of unexpected 100% readings. Closer
+            # review showed those readings were semantically correct
+            # (the pod contained a thin volume of its quota's size, so
+            # total_provisioned == quota, and Pure would have refused
+            # the next allocation in that state) and that aligning
+            # with virtual was masking the legitimate allocation
+            # ceiling. The total_provisioned-first ordering is the
+            # correct match for what the array enforces.
+            $used = $space->{space}{total_provisioned}
+                 // $space->{space}{virtual}
                  // $space->{space}{total_physical}
                  // $space->{space}{total_used}
-                 // $space->{space}{total_provisioned}
                  // 0;
         }
 
