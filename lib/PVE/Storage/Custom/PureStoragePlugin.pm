@@ -161,6 +161,20 @@ sub properties {
             maximum => 30,
             default => 2,
         },
+        'pure-config-backup-timeout' => {
+            description => "Timeout in seconds for the auxiliary 1 MB config-"
+                . " backup volume's multipath device to appear during snapshot"
+                . " operations. The config backup is non-critical (used only"
+                . " by pve-pure-config-get for disaster recovery), so a"
+                . " separate short timeout avoids stalling every snapshot"
+                . " when the volume's device is slow to surface on degraded"
+                . " multipath. Defaults to 15 seconds; raise toward"
+                . " pure-device-timeout if your fabric is consistently slow.",
+            type => 'integer',
+            minimum => 5,
+            maximum => 60,
+            default => 15,
+        },
         'pure-pod' => {
             description => "Pod name for ActiveCluster configurations. Required when File service is enabled.",
             type => 'string',
@@ -181,6 +195,7 @@ sub options {
         'pure-cluster-name'  => { optional => 1 },
         'pure-device-timeout' => { optional => 1 },
         'pure-portal-probe-timeout' => { optional => 1 },
+        'pure-config-backup-timeout' => { optional => 1 },
         'pure-pod'           => { optional => 1 },
         nodes                => { optional => 1 },
         disable              => { optional => 1 },
@@ -644,7 +659,13 @@ sub _backup_vm_config {
     }
     multipath_reload();
 
-    my $timeout = $scfg->{'pure-device-timeout'} // 60;
+    # Use a shorter, separate timeout for the config-backup volume:
+    # it's a 1 MB auxiliary volume used only by pve-pure-config-get for
+    # disaster recovery — non-critical. Skipping it after a brief wait
+    # is preferable to stalling every snapshot operation by the full
+    # pure-device-timeout (default 60s) when multipath is slow to
+    # surface the new device (e.g., degraded paths).
+    my $timeout = $scfg->{'pure-config-backup-timeout'} // 15;
     my %wait_opts = (timeout => $timeout);
     if ($protocol eq 'fc') {
         $wait_opts{fc_rescan} = sub { rescan_fc_hosts(delay => 1); };
@@ -654,7 +675,12 @@ sub _backup_vm_config {
     my $device = wait_for_multipath_device($wwid, %wait_opts);
 
     unless ($device) {
-        warn "Config backup device not found, skipping config backup\n";
+        warn "Config backup volume's multipath device did not surface " .
+             "within ${timeout}s (WWID $wwid). Skipping the config " .
+             "backup for this snapshot — this is non-fatal; the config " .
+             "backup is only used by pve-pure-config-get for disaster " .
+             "recovery. Raise pure-config-backup-timeout if your fabric " .
+             "is consistently slow.\n";
         eval { cleanup_lun_devices($wwid); };
         eval { $api->volume_disconnect_host($config_vol, $host); };
         eval { $api->volume_delete($config_vol, skip_eradicate => 1); };

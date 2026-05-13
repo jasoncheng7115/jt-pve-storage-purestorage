@@ -8,6 +8,90 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.18] - 2026-05-14
+
+### MEDIUM — Snapshot pre-rename tombstone (mirrors v1.1.15's volume-side fix)
+
+Tracked in [#11]. Pure's destroyed-pending state reserves a snapshot's
+suffix for the array's eradication delay (default 24h). Without a
+rename before destroy, recreating a snapshot with the same name
+within that window fails:
+
+```
+TASK ERROR: Snapshot 't1' already exists for volume 'vm-101-disk-0'
+```
+
+Common PVE workflows that create-then-delete-then-recreate the same
+snapshot (e.g., naming a periodic snapshot "daily", "weekly") were
+forced to wait or manually `purevol eradicate` from Pure UI.
+
+#### Fixed
+- **`snapshot_delete()` pre-renames the snapshot to
+  `<orig-suffix>-pve-tomb-<unix-ts>-<pid>` before destroy**, so
+  the original suffix is freed immediately. The tombstoned
+  snapshot still goes into destroyed-pending under the new
+  suffix and eradicates per the array's normal schedule.
+- Uses Pure's `PATCH /volume-snapshots` rename API — verified
+  against the FA 2.x OpenAPI spec: the body `name` field is the
+  **new suffix only** (not the full name), with the source volume
+  association preserved.
+- Edge cases handled: 64-char suffix-length overflow falls back
+  to direct destroy + warning; already-tombstoned suffixes are
+  not re-renamed (idempotent retry on a previously-failed
+  destroy); rollback rename on destroy failure restores the
+  original suffix for a clean PVE-side retry.
+- API 1.x lacks snapshot rename in the REST surface, so the
+  tombstone path is API 2.x only. 1.x callers destroy straight
+  through under the original name (pre-1.1.18 behaviour).
+
+### LOW — Separate timeout for the config-backup volume's device wait
+
+Tracked in [#12]. The plugin creates a 1 MB auxiliary volume on each
+snapshot to archive the VM/CT config (used only by
+`pve-pure-config-get` for disaster recovery — non-critical). Previously
+this volume's multipath-device wait used `pure-device-timeout`
+(default 60s). On degraded multipath, every snapshot operation would
+visibly stall for the full timeout even though the
+"Config backup device not found, skipping config backup" warning is
+non-fatal.
+
+#### Fixed
+- **New storage option `pure-config-backup-timeout`** (integer
+  `5..60`, default `15`). Sets a separate, shorter wait specifically
+  for the auxiliary config-backup volume. Snapshot operations
+  return ~15s after a degraded-fabric stall instead of ~60s.
+- Warning text expanded to spell out that the skip is non-fatal,
+  identify the WWID, and point at the new option for operators
+  whose fabric is consistently slow.
+
+### LOW — postinst sanity-checks for required binaries
+
+Tracked in [#9]. The plugin's declared Depends
+(`multipath-tools`, `open-iscsi`, `sg3-utils`, `psmisc`) are correct,
+but `dpkg -i ...` does not enforce them — the package can land on a
+system that lacks `multipathd` / `iscsiadm` / `kpartx`, and the
+first storage operation fails with an internal-looking
+`open3: exec of /sbin/multipathd reconfigure failed: No such file
+or directory`.
+
+#### Fixed
+- **postinst now refuses to complete `configure` when required
+  binaries are missing.** Detected binaries: `multipathd`,
+  `multipath`, `kpartx`, `iscsiadm`, `sg_inq`, `blockdev`. The
+  package goes into configured-failed state with a clear
+  multi-line error directing the operator at
+  `apt --fix-broken install` (recover from a `dpkg -i`) or
+  `apt install ./*.deb` (install correctly from scratch).
+- **README + README_zh-TW Installation section** now lead with
+  `apt install ./*.deb` and carry an explicit warning against
+  bare `dpkg -i` for first-time installs.
+
+[#9]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/9
+[#11]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/11
+[#12]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/12
+
+---
+
 ## [1.1.17] - 2026-05-13
 
 ### MEDIUM — Pod capacity `used` now reflects provisioned capacity (matches Pure quota enforcement)

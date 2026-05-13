@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.17-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.18-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -317,9 +317,16 @@ QEMU block device               passed to qemu           (raw, no FS layer
 ### From .deb package (Recommended)
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.1.17-1_all.deb
-apt-get install -f  # Install dependencies if needed
+# Recommended — apt resolves and installs the iSCSI / multipath / SCSI
+# tooling dependencies automatically:
+apt install ./jt-pve-storage-purestorage_1.1.18-1_all.deb
 ```
+
+> ⚠ Avoid `dpkg -i` for the first install: it does **not** auto-install
+> the declared dependencies (`multipath-tools`, `open-iscsi`, `sg3-utils`).
+> If you do use it, the postinst will refuse to configure with a clear
+> "missing binaries" error and you'll need to run `apt --fix-broken install`
+> to recover.
 
 ### From source
 

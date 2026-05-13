@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.17-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.18-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -304,9 +304,15 @@ QEMU block device               passed to qemu           (raw, no FS layer
 ### 從 .deb 套件安裝（建議）
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.1.17-1_all.deb
-apt-get install -f  # 如需安裝相依套件
+# 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
+apt install ./jt-pve-storage-purestorage_1.1.18-1_all.deb
 ```
+
+> ⚠ 首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件
+> （`multipath-tools`、`open-iscsi`、`sg3-utils`）。若不慎用了
+> `dpkg -i`，postinst 會檢測缺少的執行檔並印明確錯誤拒絕完成
+> configure，需要再執行 `apt --fix-broken install` 才能補齊相依
+> 並恢復。
 
 ### 從原始碼安裝
 

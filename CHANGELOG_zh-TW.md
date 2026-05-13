@@ -8,6 +8,79 @@
 
 ---
 
+## [1.1.18] - 2026-05-14
+
+### 中——Snapshot 砍前先 tombstone rename（與 v1.1.15 Volume 端的修法相對應）
+
+Tracked in [#11]。Pure 的 destroyed-pending 狀態會保留 snapshot
+suffix 直到陣列的 eradication delay（預設 24 小時）。砍 snapshot
+之前若沒有先改名，這段期間建立同名 snapshot 會失敗：
+
+```
+TASK ERROR: Snapshot 't1' already exists for volume 'vm-101-disk-0'
+```
+
+常見的 PVE 工作流——例如建週期性 snapshot 名為 daily、weekly，要
+delete 後 recreate——會被卡住，必須等待或手動到 Pure UI 執行
+`purevol eradicate`。
+
+#### 修正
+- **`snapshot_delete()` 在 destroy 前先把 snapshot rename 為
+  `<orig-suffix>-pve-tomb-<unix-ts>-<pid>`**，原 suffix 立即釋放。
+  Tombstone snapshot 仍進入 destroyed-pending、依陣列正常時程
+  eradicate，只是用新 suffix。
+- 使用 Pure 的 `PATCH /volume-snapshots` rename API——已對照 FA 2.x
+  OpenAPI spec 驗證：body 的 `name` 欄位是**新的 suffix**（不是
+  完整新名），來源 Volume 關聯保留。
+- 處理的邊界情境：suffix 加上 tombstone 後超過 64 char 跳過 rename
+  並 warn、已有 tombstone 標記的 suffix 不會二次 rename（idempotent
+  retry）、destroy 失敗時 rollback rename 回原 suffix 讓 PVE 端
+  重試走得通。
+- API 1.x 的 REST 介面不支援 snapshot rename，所以 tombstone 路徑
+  僅限 API 2.x；1.x 走原本的直接 destroy 路徑。
+
+### 低——Config backup volume 等 device 改用獨立較短的 timeout
+
+Tracked in [#12]。Plugin 每次 snapshot 都建一個 1 MB 輔助 Volume
+存 VM/CT config（給 `pve-pure-config-get` 災難復原用——非必要）。
+之前等這個 Volume 的 multipath device 時用的是
+`pure-device-timeout`（預設 60 秒）。當 multipath 部分斷線時，
+每次 snapshot 都會明顯卡 60 秒才出現「Config backup device not
+found, skipping config backup」warning，雖然 warning 是非致命，
+但卡 60 秒體感很差。
+
+#### 修正
+- **新增 storage 參數 `pure-config-backup-timeout`**（整數 `5..60`，
+  預設 `15`）。專門給 config-backup Volume 用的較短 wait。multipath
+  降級時 snapshot 操作會在 ~15 秒返回而非 ~60 秒。
+- Warning 訊息改寫，明確說明 skip 是非致命、列出 WWID、指向新參數
+  方便長期 fabric 偏慢的客戶調整。
+
+### 低——postinst 加上必要外部執行檔的檢查
+
+Tracked in [#9]。Plugin 的 Depends 宣告
+（`multipath-tools`、`open-iscsi`、`sg3-utils`、`psmisc`）是正確的，
+但 `dpkg -i ...` 不會強制安裝相依——套件可能落在沒有 `multipathd`／
+`iscsiadm`／`kpartx` 的系統上，第一次儲存操作就會以
+`open3: exec of /sbin/multipathd reconfigure failed: No such file
+or directory` 這種看起來像內部錯誤的方式失敗。
+
+#### 修正
+- **postinst 在缺少必要執行檔時拒絕完成 `configure`。** 檢測的
+  binary：`multipathd`、`multipath`、`kpartx`、`iscsiadm`、`sg_inq`、
+  `blockdev`。套件會進入 configured-failed 狀態，並印出多行明確
+  錯誤訊息引導操作者執行 `apt --fix-broken install`（從 `dpkg -i`
+  恢復）或 `apt install ./*.deb`（從頭以正確方式安裝）。
+- **README 與 README_zh-TW 的 Installation 段落**改為以
+  `apt install ./*.deb` 為首選，並明確警告**首次安裝避免**用
+  `dpkg -i`。
+
+[#9]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/9
+[#11]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/11
+[#12]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/12
+
+---
+
 ## [1.1.17] - 2026-05-13
 
 ### 中——Pod 容量 `used` 改採 provisioned 配置量（對齊 Pure 配額強制邏輯）

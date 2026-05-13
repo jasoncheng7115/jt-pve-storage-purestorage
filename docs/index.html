@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.17 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.18 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.17-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.18-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.17-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.18-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.18 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-05-14</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Snapshot tombstone rename (MEDIUM, #11):</strong> Pure's destroyed-pending state reserves a snapshot's suffix for the array's eradication delay (default 24h), so recreating a snapshot with the same name within that window failed with <code>Snapshot 't1' already exists for volume</code>. <code>snapshot_delete()</code> now pre-renames the snapshot to <code>&lt;orig-suffix&gt;-pve-tomb-&lt;unix-ts&gt;-&lt;pid&gt;</code> before destroy — mirrors the volume-side fix from v1.1.15. Uses Pure's <code>PATCH /volume-snapshots</code> rename API (new <strong>suffix</strong> in body, not full name — verified against FA 2.x spec). Length overflow, idempotent re-destroy, rollback on destroy failure all handled. API 1.x falls through (lacks REST snapshot rename). <strong>Config-backup timeout (LOW, #12):</strong> new storage option <code>pure-config-backup-timeout</code> (5..60, default 15s) for the auxiliary 1 MB config-backup volume's device wait. Previously used <code>pure-device-timeout</code> (60s) and stalled every snapshot for the full timeout on degraded multipath. Non-fatal warning text expanded to spell out the skip is non-critical. <strong>Postinst sanity check (LOW, #9):</strong> postinst now refuses to complete <code>configure</code> when required binaries (multipathd, multipath, kpartx, iscsiadm, sg_inq, blockdev) are missing, with a clear "use <code>apt install ./*.deb</code> or <code>apt --fix-broken install</code>" error. Catches the "I installed with <code>dpkg -i</code> and got internal errors later" failure mode. README install instructions now lead with <code>apt install ./*.deb</code>.</span>
+            <span class="lang-zh"><strong>Snapshot tombstone rename（中，#11）：</strong>Pure destroyed-pending 狀態保留 snapshot suffix 直到 eradication delay（預設 24 小時），這段期間建同名 snapshot 會失敗回 <code>Snapshot 't1' already exists for volume</code>。<code>snapshot_delete()</code> 現在 destroy 前先把 snapshot rename 為 <code>&lt;orig-suffix&gt;-pve-tomb-&lt;unix-ts&gt;-&lt;pid&gt;</code>——對應 v1.1.15 在 Volume 端的修法。使用 Pure 的 <code>PATCH /volume-snapshots</code> rename API（body 是新 <strong>suffix</strong>、不是完整新名——已對照 FA 2.x spec 驗證）。長度超限、idempotent re-destroy、destroy 失敗時 rollback rename 全部處理。API 1.x fall through（REST 不支援 snapshot rename）。<strong>Config-backup timeout（低，#12）：</strong>新增 storage 參數 <code>pure-config-backup-timeout</code>（5..60，預設 15 秒），專門給 1 MB 輔助 config-backup Volume 等 device 用。原本用 <code>pure-device-timeout</code>（60 秒），multipath 降級時每次 snapshot 都卡完整 60 秒。非致命 warning 文字改寫，明說 skip 是非必要。<strong>Postinst 檢查（低，#9）：</strong>postinst 偵測到必要 binary（multipathd、multipath、kpartx、iscsiadm、sg_inq、blockdev）缺少時拒絕完成 configure，明確指示用 <code>apt install ./*.deb</code> 或 <code>apt --fix-broken install</code>。攔住「用 <code>dpkg -i</code> 裝完之後跑出內部錯誤」這類失敗。README 安裝指令改為以 <code>apt install ./*.deb</code> 為首選。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.17 <span class="changelog-tag changelog-tag--fix">Fix</span></div>

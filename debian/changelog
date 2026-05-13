@@ -1,3 +1,54 @@
+jt-pve-storage-purestorage (1.1.18-1) stable; urgency=medium
+
+  * [MEDIUM] snapshot_delete() now pre-renames the snapshot to a
+    tombstone suffix before destroy (issue #11), mirroring the
+    volume-side tombstone fix from v1.1.15. Pure's destroyed-pending
+    state reserves a snapshot's suffix for the array's eradication
+    delay (default 24h), so without the rename, creating a new
+    snapshot with the same name within that window fails with
+    "Snapshot 't1' already exists for volume". The pre-rename
+    moves the destroyed snapshot under a `<orig-suffix>-pve-tomb-
+    <unix-ts>-<pid>` suffix so the original suffix is freed
+    immediately. Implementation uses Pure's PATCH /volume-snapshots
+    rename API (which takes the new SUFFIX in the body, NOT the
+    full name — verified against the FA 2.x OpenAPI spec). Edge
+    cases handled: 64-char snapshot-suffix limit overflow falls
+    back to direct destroy + warning, already-tombstoned suffixes
+    are not re-renamed, rollback rename on destroy failure
+    restores the original suffix for a clean retry. API 1.x lacks
+    snapshot rename support in the REST surface, so the tombstone
+    path is API 2.x only — 1.x destroys go straight through under
+    the original name. Reported by @pulipulichen (#11).
+
+  * [LOW] Configurable shorter timeout for the auxiliary
+    config-backup volume's multipath device wait (issue #12). The
+    plugin creates a 1 MB auxiliary volume on every snapshot to
+    archive the VM/CT config (used only by pve-pure-config-get
+    for disaster recovery — non-critical). Previously this used
+    pure-device-timeout (default 60s), and on degraded multipath
+    the snapshot operation would visibly stall the full timeout
+    even though the resulting "skipping config backup" warning is
+    non-fatal. New storage option `pure-config-backup-timeout`
+    (integer 5..60, default 15) sets a separate, shorter wait.
+    Warning text expanded to make the non-fatal nature explicit
+    and point at the new option. Reported by @pulipulichen (#12).
+
+  * [LOW] postinst now sanity-checks that the required external
+    binaries (multipathd, multipath, kpartx, iscsiadm, sg_inq,
+    blockdev) are on PATH before proceeding (issue #9). Catches
+    the "I installed with dpkg -i and got 'No such file or
+    directory' for /sbin/multipathd later" failure mode and
+    redirects the operator at `apt --fix-broken install` or
+    `apt install ./*.deb`. README install instructions now lead
+    with `apt install ./*.deb`, with an explicit warning against
+    bare `dpkg -i`. Declared Depends were already correct
+    (multipath-tools, open-iscsi, sg3-utils, psmisc); the new
+    check just gives a clear error when dpkg is used in a way
+    that bypasses Depends enforcement. Reported by @pulipulichen
+    (#9).
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 14 May 2026 02:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.17-1) stable; urgency=medium
 
   * [MEDIUM] get_managed_capacity() for pod-backed storage now

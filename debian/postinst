@@ -227,8 +227,66 @@ reload_pve_services() {
     echo "PVE services reloaded to pick up new plugin code."
 }
 
+verify_required_binaries() {
+    # Issue #9: when a user installs the .deb via `dpkg -i` (rather than
+    # `apt install ./*.deb`), dpkg does NOT auto-install the declared
+    # dependencies. The plugin's Perl modules land on disk fine, but
+    # operations that shell out to multipathd / iscsiadm / kpartx fail
+    # later with "No such file or directory" — exposing internal Perl
+    # paths in the user-facing error. Catch this at install time
+    # instead and direct the operator at the canonical fix.
+    local missing=()
+    local needed_bin=(multipathd multipath kpartx iscsiadm sg_inq blockdev)
+    local b
+
+    for b in "${needed_bin[@]}"; do
+        command -v "$b" >/dev/null 2>&1 || missing+=("$b")
+    done
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        cat <<EOF >&2
+
+==============================================================================
+ ERROR: Required binaries are not installed on this system
+==============================================================================
+ The Pure Storage plugin needs the following binaries which are not on PATH:
+
+EOF
+        printf '   - %s\n' "${missing[@]}" >&2
+        cat <<'EOF' >&2
+
+ These come from packages declared as dependencies by this .deb:
+   - multipath-tools  (provides multipath, multipathd, kpartx)
+   - open-iscsi       (provides iscsiadm)
+   - sg3-utils        (provides sg_inq)
+   - util-linux       (provides blockdev)
+
+ If you installed with `dpkg -i ...`, dpkg does not auto-install
+ dependencies. Recover with:
+
+   apt --fix-broken install
+
+ Or re-install with apt instead (recommended), which resolves
+ dependencies automatically:
+
+   apt install ./jt-pve-storage-purestorage_*_all.deb
+
+ This package will remain in configured-failed state until the
+ missing binaries are installed.
+==============================================================================
+
+EOF
+        return 1
+    fi
+    return 0
+}
+
 case "$1" in
     configure)
+        if ! verify_required_binaries; then
+            exit 1
+        fi
+
         echo "Pure Storage FlashArray Plugin installed successfully."
         echo ""
         echo "To configure, add storage with:"

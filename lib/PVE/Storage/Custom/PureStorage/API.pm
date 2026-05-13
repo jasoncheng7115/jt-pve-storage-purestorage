@@ -1318,22 +1318,146 @@ sub snapshot_list {
     return $snapshots;
 }
 
-# Delete a snapshot
+# Rename a snapshot. Per the FA 2.x spec, the body `name` field on
+# PATCH /volume-snapshots is the new SUFFIX only (not the full name);
+# the source volume association is preserved. The full name on Pure
+# after rename is `<source_volume_name>.<new_suffix>`.
+sub snapshot_rename {
+    my ($self, $old_full_name, $new_suffix) = @_;
+
+    croak "old_full_name is required" unless defined $old_full_name && length $old_full_name;
+    croak "new_suffix is required" unless defined $new_suffix && length $new_suffix;
+
+    if ($self->is_api_v2()) {
+        return $self->patch("volume-snapshots", { name => $new_suffix }, { names => $old_full_name });
+    } else {
+        # API 1.x: snapshot rename not exposed via REST in older releases;
+        # caller must skip the tombstone path on API 1.x.
+        croak "snapshot_rename is not supported on API 1.x";
+    }
+}
+
+# Build the new (suffix-only) tombstone name for a snapshot pre-destroy
+# rename. Mirrors _make_tombstone_name for volumes but lives on the
+# snapshot suffix portion so the volume association stays clear in
+# Pure UI. Returns ($source_vol_name, $new_suffix) on success,
+# (undef, undef) when the rename would exceed Pure's 64-char suffix
+# limit and the caller should fall back to a direct destroy.
+sub _make_snapshot_tombstone {
+    my ($full_name) = @_;
+
+    # Plugin-managed snapshot full name format is "<volname>.<suffix>"
+    # (the volname portion may itself contain "pod::" prefix). Split on
+    # the FIRST "." since PVE-encoded volume names never contain a dot
+    # (sanitize_for_pure strips dots; storeid_to_pure_prefix is
+    # symmetric).
+    my $dot_idx = index($full_name, '.');
+    return (undef, undef) if $dot_idx < 0;
+    my $vol_part    = substr($full_name, 0, $dot_idx);
+    my $suffix_part = substr($full_name, $dot_idx + 1);
+    return (undef, undef) unless length $suffix_part;
+
+    my $tomb_addition = "-pve-tomb-" . time() . "-$$";
+    my $new_suffix = $suffix_part . $tomb_addition;
+
+    # Pure's snapshot suffix length cap is 64 chars (matches the
+    # plugin's MAX_SNAPSHOT_SUFFIX_LENGTH). If we'd overrun, return
+    # undef and let the caller destroy under the original name.
+    return (undef, undef) if length($new_suffix) > 64;
+
+    return ($vol_part, $new_suffix);
+}
+
+# Delete a snapshot.
+#
+# Pre-rename to tombstone before destroy (issue #11, mirrors the
+# volume-side fix in #8 / v1.1.15). Pure's destroyed-pending state
+# reserves the snapshot's name until the array's eradication delay
+# (default 24h). Without the rename, recreating a snapshot with the
+# same suffix within that window fails with "Snapshot already exists
+# for volume". The pre-rename moves the destroyed snapshot under a
+# different suffix so the original suffix is freed immediately.
+#
+# Skip tombstone when:
+#   - caller passes tombstone => 0
+#   - the suffix already carries the tombstone marker (idempotent
+#     re-destroy of a previously-failed delete)
+#   - the resulting suffix would exceed Pure's 64-char snapshot
+#     suffix limit
+#   - the array is on API 1.x (snapshot_rename not supported there)
 sub snapshot_delete {
     my ($self, $snapname, %opts) = @_;
 
-    if ($self->is_api_v2()) {
-        # API 2.x: PATCH to destroy, DELETE to eradicate
-        $self->patch("volume-snapshots", { destroyed => JSON::true }, { names => $snapname });
-        unless ($opts{skip_eradicate}) {
-            $self->delete("volume-snapshots", { names => $snapname });
+    croak "snapshot name is required" unless defined $snapname && length $snapname;
+
+    my $do_tombstone = $opts{tombstone} // 1;
+    my $renamed = 0;
+    my $orig_suffix;    # for rollback
+    my $target_name = $snapname;
+
+    if ($do_tombstone && $self->is_api_v2() && $snapname !~ /-pve-tomb-\d+/) {
+        my ($vol_part, $new_suffix) = _make_snapshot_tombstone($snapname);
+        if (defined $new_suffix) {
+            # Remember the original suffix so we can roll the rename
+            # back if the subsequent destroy fails.
+            my $dot_idx = index($snapname, '.');
+            $orig_suffix = substr($snapname, $dot_idx + 1);
+
+            my $rename_ok = eval { $self->snapshot_rename($snapname, $new_suffix); 1; };
+            if ($rename_ok) {
+                $target_name = "$vol_part.$new_suffix";
+                $renamed = 1;
+            } else {
+                my $err = $@;
+                $err =~ s/\s+$//;
+                warn "snapshot_delete: tombstone rename of '$snapname' " .
+                     "failed; destroying under original name (the snapshot " .
+                     "suffix will be reserved by Pure until eradication " .
+                     "delay expires). Underlying error: $err\n";
+            }
+        } else {
+            warn "snapshot_delete: tombstone suffix for '$snapname' would " .
+                 "exceed Pure's 64-char snapshot-suffix limit; destroying " .
+                 "under original name (the snapshot suffix will be reserved " .
+                 "by Pure until eradication delay expires)\n";
         }
-    } else {
-        # API 1.x
-        $self->put("volume/$snapname", { destroyed => JSON::true });
-        unless ($opts{skip_eradicate}) {
-            $self->delete("volume/$snapname");
+    }
+
+    my $destroy_ok = eval {
+        if ($self->is_api_v2()) {
+            $self->patch("volume-snapshots", { destroyed => JSON::true }, { names => $target_name });
+            unless ($opts{skip_eradicate}) {
+                $self->delete("volume-snapshots", { names => $target_name });
+            }
+        } else {
+            $self->put("volume/$target_name", { destroyed => JSON::true });
+            unless ($opts{skip_eradicate}) {
+                $self->delete("volume/$target_name");
+            }
         }
+        1;
+    };
+
+    if (!$destroy_ok) {
+        my $destroy_err = $@;
+
+        if ($renamed && defined $orig_suffix) {
+            # Best-effort rollback so a retry can find the snapshot
+            # under its original name.
+            my $rollback_ok = eval { $self->snapshot_rename($target_name, $orig_suffix); 1; };
+            unless ($rollback_ok) {
+                my $rollback_err = $@;
+                $rollback_err =~ s/\s+$//;
+                warn "snapshot_delete: destroy of '$target_name' failed " .
+                     "AND rollback rename to suffix '$orig_suffix' " .
+                     "failed; the tombstoned-but-alive snapshot must be " .
+                     "cleaned up manually from Pure (look for " .
+                     "'$target_name'). Rollback error: $rollback_err\n";
+            }
+        }
+
+        $destroy_err =~ s/\s+$//;
+        die "$destroy_err\n";
     }
 
     return 1;
