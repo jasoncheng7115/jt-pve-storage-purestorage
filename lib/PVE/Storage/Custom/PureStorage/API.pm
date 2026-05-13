@@ -915,24 +915,142 @@ sub volume_recover {
 # Volume destroy on Pure can be slow when the volume has many snapshots or
 # is part of a pod with replication; use an extended 60s per-call timeout
 # to avoid spurious "command timed out" warnings during normal operation.
+#
+# Pre-rename to tombstone before destroy (issue #8): Pure's destroyed-
+# pending state reserves the volume's name for the array's eradication
+# delay (default 24h). Without the rename, recreating a volume with the
+# same name within that window fails. We rename the volume to
+# "<orig>-pve-tomb-<unix-ts>-<pid>" first, so the original name is
+# freed as soon as the rename succeeds; the tombstoned volume still
+# goes into destroyed-pending (still recoverable from Pure UI, still
+# eradicates on the array's normal schedule), just under the suffixed
+# name. Operators can identify these tombstones in Pure's Destroyed
+# Volumes list by the "-pve-tomb-" marker.
+#
+# Skip the rename when:
+#   - caller explicitly passes tombstone => 0
+#   - name already carries the tombstone marker (idempotent re-destroy
+#     of a volume left tombstoned-but-alive by a previous failed call)
+#   - resulting tombstone name would exceed Pure's 63-char volume-name
+#     limit (truncating risks collision, better to accept the 24h
+#     name reservation for this one volume)
 sub volume_delete {
     my ($self, $name, %opts) = @_;
 
-    if ($self->is_api_v2()) {
-        # API 2.x: PATCH to destroy, then DELETE to eradicate
-        $self->patch("volumes", { destroyed => JSON::true }, { names => $name }, timeout => 60);
-        unless ($opts{skip_eradicate}) {
-            $self->delete("volumes", { names => $name }, timeout => 60);
-        }
-    } else {
-        # API 1.x
-        $self->put("volume/$name", { destroyed => JSON::true }, timeout => 60);
-        unless ($opts{skip_eradicate}) {
-            $self->delete("volume/$name", undef, timeout => 60);
+    croak "name is required" unless defined $name && length $name;
+
+    my $do_tombstone = $opts{tombstone} // 1;
+    my $renamed = 0;
+    my $target_name = $name;
+
+    if ($do_tombstone && $name !~ /-pve-tomb-\d+/) {
+        my $tomb_name = _make_tombstone_name($name);
+        if (defined $tomb_name) {
+            my $rename_ok = eval { $self->volume_rename($name, $tomb_name); 1; };
+            if ($rename_ok) {
+                $target_name = $tomb_name;
+                $renamed = 1;
+            } else {
+                # Rename failed (concurrent op, pod in reduced state,
+                # permission issue, transient API error, etc). Fall
+                # back to destroying with the original name — the
+                # delete still succeeds, only the same-name immediate-
+                # reuse benefit is lost for this one volume.
+                my $err = $@;
+                $err =~ s/\s+$//;
+                warn "volume_delete: tombstone rename of '$name' " .
+                     "failed; destroying under original name (Pure " .
+                     "will hold this name until eradication delay). " .
+                     "Underlying error: $err\n";
+            }
+        } else {
+            warn "volume_delete: tombstone name for '$name' would " .
+                 "exceed Pure's 63-char volume-name limit; destroying " .
+                 "under original name (Pure will hold this name until " .
+                 "eradication delay)\n";
         }
     }
 
+    # Wrap the destroy phase so a failure can roll back the tombstone
+    # rename. Without the rollback: a destroy failure after a successful
+    # rename leaves the volume tombstoned-but-alive on Pure while the
+    # PVE-side free_image throws — the operator's retry would look up
+    # the original name, not find it (the volume is now under the
+    # tombstone name), and fail again with a confusing "not found"
+    # error. Rolling the name back restores the pre-call state so a
+    # retry can run naturally. Rollback is best-effort: if it ALSO
+    # fails (rare — implies array-wide issue like a degraded pod),
+    # we log enough detail for the operator to clean up the
+    # tombstoned-but-alive volume manually from Pure UI.
+    my $destroy_ok = eval {
+        if ($self->is_api_v2()) {
+            # API 2.x: PATCH to destroy, then DELETE to eradicate
+            $self->patch("volumes", { destroyed => JSON::true }, { names => $target_name }, timeout => 60);
+            unless ($opts{skip_eradicate}) {
+                $self->delete("volumes", { names => $target_name }, timeout => 60);
+            }
+        } else {
+            # API 1.x
+            $self->put("volume/$target_name", { destroyed => JSON::true }, timeout => 60);
+            unless ($opts{skip_eradicate}) {
+                $self->delete("volume/$target_name", undef, timeout => 60);
+            }
+        }
+        1;
+    };
+
+    if (!$destroy_ok) {
+        my $destroy_err = $@;
+
+        if ($renamed) {
+            my $rollback_ok = eval { $self->volume_rename($target_name, $name); 1; };
+            unless ($rollback_ok) {
+                my $rollback_err = $@;
+                $rollback_err =~ s/\s+$//;
+                warn "volume_delete: destroy of '$target_name' failed " .
+                     "AND rollback rename to '$name' failed; the " .
+                     "tombstoned-but-alive volume must be cleaned up " .
+                     "manually from Pure (look for '$target_name' in " .
+                     "Storage > Volumes). Rollback error: $rollback_err\n";
+            }
+        }
+
+        $destroy_err =~ s/\s+$//;
+        die "$destroy_err\n";
+    }
+
     return 1;
+}
+
+# Build a tombstone name for pre-destroy rename. Returns undef if the
+# resulting name would exceed Pure's 63-char volume-name limit (caller
+# falls back to direct destroy in that case).
+#
+# Naming format: <orig>-pve-tomb-<unix-ts>-<pid>
+#   - "-pve-tomb-" marker: operators can identify plugin-managed
+#     tombstones in Pure's Destroyed Volumes list; plugin's regex
+#     `/-pve-tomb-\d+/` recognises them to avoid recursive rename on
+#     idempotent re-destroy.
+#   - Unix timestamp (seconds): primary uniqueness.
+#   - PID: secondary uniqueness — different PVE nodes deleting the
+#     same volume concurrently get different PIDs, so they cannot
+#     produce identical tombstone names in the same wall-clock second.
+#
+# Pod-prefixed volumes (e.g. "pod::pve-pure1-100-disk0") keep the
+# "pod::" prefix on rename — Pure does not allow cross-pod renames.
+# The 63-char limit applies to the post-"::" volume name portion.
+sub _make_tombstone_name {
+    my ($name) = @_;
+
+    my ($prefix, $vol) = ('', $name);
+    if ($name =~ /^([^:]+::)(.+)$/) {
+        ($prefix, $vol) = ($1, $2);
+    }
+
+    my $suffix = "-pve-tomb-" . time() . "-$$";
+
+    return undef if length($vol . $suffix) > 63;
+    return "${prefix}${vol}${suffix}";
 }
 
 # Resize a volume

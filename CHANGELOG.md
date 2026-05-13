@@ -8,6 +8,89 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.15] - 2026-05-13
+
+### MEDIUM — Pure-side name reservation on destroy blocks same-name recreation for 24h; fix by pre-rename tombstone
+
+Reported by **@pulipulichen** ([#8]).
+
+When a PVE VM disk was deleted, the underlying Pure volume went into
+Pure's standard "destroyed-pending" state, which **reserves the
+volume's name for the array's eradication delay (default 24h)**.
+During that window, creating a new volume with the same name fails.
+For PVE workflows that delete-and-recreate the same disk (e.g.,
+rebuilding a VM with the same id, snapshot/restore loops), this
+manifested as "cannot create" errors that could only be resolved by
+waiting 24h or manually eradicating from Pure UI.
+
+**Note**: this is by-design Pure behaviour — the destroyed-pending
+window exists so admins can `purevol recover` from an accidental
+delete. It is not a Pure bug. The plugin's responsibility is to use
+the array's API in a way that avoids holding the name longer than
+needed.
+
+#### Fixed
+- **[MEDIUM] `volume_delete()` now pre-renames the volume to
+  `<orig-name>-pve-tomb-<unix-ts>-<pid>` before issuing the
+  destroy.** The original name is freed as soon as the rename
+  succeeds; the tombstoned volume still goes into destroyed-pending
+  under the suffixed name and eradicates per the array's normal
+  schedule. Operators can identify these in Pure's Destroyed Volumes
+  list by the `-pve-tomb-` marker.
+
+#### Edge cases handled in the tombstone path
+- **Pod-prefixed volumes** (`pod::vol`) keep the `pod::` prefix on
+  rename — Pure does not allow cross-pod renames. The 63-char limit
+  is checked against the post-`::` portion only.
+- **Name too long**: if the suffix would push the volume name past
+  Pure's 63-char limit, we skip the rename and destroy under the
+  original name (accept the 24h reservation rather than risk a
+  truncated-name collision). A warning is logged so the operator
+  can see why this one volume's name is held.
+- **Already tombstoned**: if a volume's name already carries the
+  `-pve-tomb-<digits>` marker (e.g., re-destroying a tombstone left
+  alive by a previous failed destroy), we skip the rename to avoid
+  recursive double-tombstoning like `-pve-tomb-X-pve-tomb-Y`.
+- **Concurrent destroys from multiple PVE nodes**: the PID suffix
+  guarantees different processes produce different tombstone names
+  in the same wall-clock second, even if both nodes' wall clocks
+  agree to the second.
+- **WWID preservation**: Pure preserves a volume's WWID across
+  rename, and the plugin's WWID tracking JSON keys on WWID rather
+  than name, so no tracking update is required.
+- **Caller opt-out**: `volume_delete($name, tombstone => 0)`
+  bypasses the rename entirely. (Most callers should not need this;
+  the regex check above already prevents accidental double-
+  tombstoning.)
+
+#### Rollback on destroy failure
+If the rename succeeds but the subsequent destroy fails (e.g.,
+volume has unexpected protection group attachment, pod in degraded
+state, transient API error), `volume_delete()` now tries to rename
+the volume **back** to its original name before propagating the
+destroy error. This restores pre-call state so the operator's PVE
+retry runs naturally.
+
+Without the rollback, a destroy failure after a successful rename
+would leave the volume tombstoned-but-alive, the next PVE
+`free_image` attempt would look up the original name, fail with
+"not found" (volume now lives under the tombstone name), and
+require manual array-side cleanup.
+
+Rollback is **best-effort**: if it also fails (rare — implies
+array-wide issue), we log the tombstone name so the operator can
+clean up manually from Pure UI.
+
+#### Not affected by this change
+**PVE snapshot rollback** (revert to snapshot) uses
+`volume_overwrite()` which mutates an existing volume's contents
+in-place via `POST /volumes?names=X&overwrite=true` — no volume is
+destroyed, so the tombstone path is not entered.
+
+[#8]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/8
+
+---
+
 ## [1.1.14] - 2026-05-13
 
 ### HIGH — VM snapshot WITH memory could wedge the entire PVE management plane on a degraded-multipath host

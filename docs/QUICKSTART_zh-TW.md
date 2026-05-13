@@ -25,7 +25,7 @@
 ### 步驟 1：安裝外掛
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.1.14-1_all.deb
+dpkg -i jt-pve-storage-purestorage_1.1.15-1_all.deb
 ```
 
 請仔細閱讀 postinst 輸出。它會在你的 `/etc/multipath.conf` 含有危險設定

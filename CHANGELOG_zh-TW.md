@@ -8,6 +8,42 @@
 
 ---
 
+## [1.1.15] - 2026-05-13
+
+### 中——Pure destroy 後保留原名 24h 卡住同名重建，改用 pre-rename tombstone
+
+**@pulipulichen** 回報（[#8]）。
+
+PVE VM 磁碟刪除後，Pure 端 Volume 進入「destroyed-pending」狀態，**Pure 預設會保留該 Volume 名稱直到陣列的 eradication delay（預設 24 小時）**。這段期間建立同名 Volume 會失敗。對於需要 delete-and-recreate 同一個 disk 的 PVE 工作流（重建相同 VM ID、snapshot／restore 循環等），症狀是「無法建立」錯誤，只能等 24 小時或手動到 Pure UI eradicate。
+
+**注意**：這是 Pure **故意的設計**——destroyed-pending 視窗是讓 admin 可以用 `purevol recover` 撤銷誤刪。不是 Pure bug。Plugin 的責任是用對的方式呼叫 API 避免不必要的長時間佔用名稱。
+
+#### 修正
+- **[中] `volume_delete()` 在 destroy 之前先 rename Volume 為
+  `<orig-name>-pve-tomb-<unix-ts>-<pid>`**。原名 rename 成功後立即釋放；tombstone Volume 仍以 suffix 後的名稱進入 destroyed-pending、依陣列正常時程 eradicate。Operator 在 Pure 的 Destroyed Volumes 列表透過 `-pve-tomb-` 標記可一眼識別。
+
+#### Tombstone 路徑處理的邊界情境
+- **Pod 內 Volume**（`pod::vol`）：rename 時保留 `pod::` 前綴——Pure 不允許跨 pod rename。63 char 限制只算 `::` 後的部分。
+- **加 tombstone 後超過 63 char**：跳過 rename、走原名 destroy（接受 24h 名稱保留，比 truncation collision 安全）+ warn 解釋為什麼這個 Volume 名稱被保留。
+- **已是 tombstone 的名字**：偵測到名稱含 `-pve-tomb-<digits>` 標記（例如前次 destroy 失敗留下的 tombstone 重新 destroy）就跳過 rename，避免遞迴變成 `-pve-tomb-X-pve-tomb-Y`。
+- **跨節點併發 destroy 同個 Volume**：PID suffix 保證不同行程在同一個 wall-clock 秒內產生不同的 tombstone 名稱、不會撞名。
+- **WWID 保留**：Pure rename 不會改 Volume WWID，plugin 的 WWID tracking JSON 以 WWID 為 key、不以名稱為 key，所以**不需要更新追蹤檔**。
+- **caller opt-out**：`volume_delete($name, tombstone => 0)` 允許完全跳過 rename。（多數情況不需要：上面的 regex 已防 accidental double-tombstoning。）
+
+#### Destroy 失敗時的 rollback
+如果 rename 成功但後續 destroy 失敗（例如 Volume 上掛了未預期的 protection group、pod 處於 degraded 狀態、暫時性 API 錯誤），`volume_delete()` 會把 Volume **rename 回**原名後再把 destroy 錯誤往上拋。這樣回到了呼叫前的狀態，operator 重試走 PVE 正常流程就行。
+
+沒有這個 rollback 的話，rename 成功 + destroy 失敗會留下 tombstoned-but-alive Volume；下一次 `free_image` 重試會找原名但找不到（Volume 已經改名了）、回 "not found"、必須到陣列手動清理。
+
+Rollback 是 **best-effort**：如果連 rollback rename 也失敗（罕見，代表陣列層級故障），會 log tombstone 名稱讓 operator 可以到 Pure UI 手動清。
+
+#### 與此修法**無關**的路徑
+**PVE snapshot rollback**（倒回快照）走的是 `volume_overwrite()`，透過 `POST /volumes?names=X&overwrite=true` 原地覆寫現有 Volume 的內容——沒有任何 Volume 被 destroy，所以**不會進入 tombstone 路徑**。
+
+[#8]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/8
+
+---
+
 ## [1.1.14] - 2026-05-13
 
 ### 高——multipath 部分斷線下，VM 含記憶體快照會拖垮整個 PVE 管理層

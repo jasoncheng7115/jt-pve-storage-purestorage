@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.14 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.15 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.14-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.15-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.14-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.15-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.15 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-05-13</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Pre-rename tombstone on volume destroy (MEDIUM):</strong> Pure's destroyed-pending state reserves a volume's name for the array's eradication delay (default 24h). Without a rename, recreating a same-named disk in PVE within that window failed. <code>volume_delete()</code> now pre-renames the volume to <code>&lt;orig&gt;-pve-tomb-&lt;unix-ts&gt;-&lt;pid&gt;</code> before destroying it — the original name is freed as soon as the rename succeeds; the tombstoned volume still goes into destroyed-pending (still recoverable from Pure UI) under the suffixed name. Edge cases handled: pod-prefixed volumes (keep <code>pod::</code> prefix), name-length overflow (skip rename, warn), already-tombstoned names (no double-rename), concurrent destroys from different PVE nodes (PID suffix), WWID preservation (no tracking-JSON update needed). On destroy failure after a successful rename, the name is rolled back to the original to keep PVE retries natural. PVE snapshot rollback (<code>volume_overwrite</code>) is unaffected — that path overwrites contents in-place, no destroy involved. Reported by @pulipulichen (#8).</span>
+            <span class="lang-zh"><strong>Volume destroy 前先 rename tombstone（中）：</strong>Pure 的 destroyed-pending 狀態會保留 Volume 名稱直到陣列的 eradication delay（預設 24h）。沒有 rename 的話，這段期間 PVE 內重建同名 disk 會失敗。<code>volume_delete()</code> 現在在 destroy 前先把 Volume rename 為 <code>&lt;orig&gt;-pve-tomb-&lt;unix-ts&gt;-&lt;pid&gt;</code>——rename 成功後原名立即釋放，tombstone Volume 仍進入 destroyed-pending（仍可從 Pure UI recover），只是用 suffix 後的名稱。處理的邊界情境：pod 內 Volume 保留 <code>pod::</code> 前綴、加 suffix 後超過 63 char 跳過 rename 並 warn、已有 tombstone 標記的名稱不會二度 rename、跨 PVE 節點併發 destroy 同個 Volume（PID suffix 防撞名）、WWID 在 rename 後不變所以追蹤檔不用更新。Rename 成功但 destroy 失敗時，會 rollback rename 回原名讓 PVE 重試走得通。PVE snapshot 倒回（<code>volume_overwrite</code>）不受影響——那條路是原地覆寫，沒有 destroy。@pulipulichen 回報（#8）。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.14 <span class="changelog-tag changelog-tag--critical">High</span></div>

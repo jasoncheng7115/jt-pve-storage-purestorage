@@ -1,3 +1,58 @@
+jt-pve-storage-purestorage (1.1.15-1) stable; urgency=medium
+
+  * [MEDIUM] Deleted PVE disks no longer hold their Pure volume name
+    in destroyed-pending state for the array's eradication delay
+    (default 24h). volume_delete now renames the volume to
+    "<orig>-pve-tomb-<unix-ts>-<pid>" BEFORE destroying it. The
+    original name is freed as soon as the rename succeeds, so the
+    user can immediately recreate a same-named disk. The tombstoned
+    volume still goes into destroyed-pending (still recoverable
+    from Pure UI, still eradicates per Pure's normal schedule),
+    just under the suffixed name. Operators can identify these in
+    Pure's Destroyed Volumes list by the "-pve-tomb-" marker.
+    Reported by @pulipulichen (#8).
+
+  * Edge cases handled in tombstone path:
+    - Pod-prefixed volumes (pod::vol) keep the pod prefix on rename;
+      63-char length limit checked against the post-"::" portion only.
+    - Names that would exceed Pure's 63-char volume-name limit after
+      adding the tombstone suffix: skip rename, destroy with original
+      name (accept the 24h name reservation rather than risk a
+      truncated-name collision), warn so operator can see.
+    - Volumes that already carry the "-pve-tomb-" marker (e.g. a
+      re-destroy after a previous failed destroy): skip rename to
+      avoid recursive double-tombstoning.
+    - PID suffix on top of unix timestamp: different PVE nodes
+      deleting the same volume in the same wall-clock second get
+      different PIDs, cannot collide.
+    - WWID is preserved across Pure-side rename; the plugin's
+      WWID tracking JSON keys on WWID (not name), so no tracking
+      update is required.
+    - opt-out: caller can pass `tombstone => 0` to skip rename
+      entirely; the regex check already prevents accidental
+      double-tombstoning for callers that don't.
+
+  * Rollback on destroy failure: if rename succeeds but the
+    subsequent destroy fails (e.g., volume has unexpected
+    protection group attachment, pod in degraded state, transient
+    API error), volume_delete now tries to rename the volume BACK
+    to its original name before propagating the destroy error.
+    This restores pre-call state so the operator's retry runs
+    naturally — without the rollback, the next free_image attempt
+    would look up the original name, fail with "not found"
+    (volume now under tombstone name), and require manual array-
+    side cleanup. Rollback is best-effort: if it ALSO fails (rare,
+    implies array-wide issue), we log enough detail (tombstone
+    name) for manual cleanup from Pure UI.
+
+  * Note on snapshot rollback (PVE revert to snapshot): unrelated
+    to this change. PVE snapshot rollback uses volume_overwrite
+    (POST /volumes?names=X&overwrite=true) which mutates an
+    existing volume's contents in-place; no volume is destroyed,
+    so the tombstone path is not entered.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 13 May 2026 18:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.14-1) stable; urgency=high
 
   * [HIGH] VM snapshot WITH memory on a multipath-degraded host (e.g.
