@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.13-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.14-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -304,7 +304,7 @@ QEMU block device               passed to qemu           (raw, no FS layer
 ### 從 .deb 套件安裝（建議）
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.1.13-1_all.deb
+dpkg -i jt-pve-storage-purestorage_1.1.14-1_all.deb
 apt-get install -f  # 如需安裝相依套件
 ```
 

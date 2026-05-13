@@ -32,6 +32,7 @@ use PVE::Storage::Custom::PureStorage::Naming qw(
     pve_volname_to_pure
     pure_to_pve_volname
     is_pve_managed_volume
+    storeid_to_pure_prefix
 );
 use PVE::Storage::Custom::PureStorage::ISCSI qw(
     get_initiator_name
@@ -377,8 +378,7 @@ sub _untrack_wwid {
 sub _cleanup_orphaned_devices {
     my ($api, $storeid, $scfg) = @_;
 
-    my $san_storage = $storeid;
-    $san_storage =~ s/-/_/g;
+    my $san_storage = storeid_to_pure_prefix($storeid);
 
     my $pod = $scfg->{'pure-pod'};
     my $pattern = "pve-${san_storage}-*";
@@ -757,8 +757,7 @@ sub _cleanup_vm_config_volumes {
     my ($api, $scfg, $storeid, $vmid) = @_;
 
     # List all config volumes for this VM
-    my $san_storage = $storeid;
-    $san_storage =~ s/-/_/g;
+    my $san_storage = storeid_to_pure_prefix($storeid);
 
     my $pattern = "pve-${san_storage}-${vmid}-vmconf-*";
     my $pod = $scfg->{'pure-pod'};
@@ -1024,8 +1023,7 @@ sub _find_free_diskid {
     my ($scfg, $storeid, $vmid) = @_;
 
     my $api = _get_api($scfg);
-    my $san_storage = $storeid;
-    $san_storage =~ s/-/_/g;
+    my $san_storage = storeid_to_pure_prefix($storeid);
 
     # List existing volumes for this VM
     my $pattern = "pve-${san_storage}-${vmid}-*";
@@ -1059,8 +1057,7 @@ sub _find_free_diskid {
 sub _cleanup_orphaned_temp_clones {
     my ($scfg, $storeid, $api) = @_;
 
-    my $san_storage = $storeid;
-    $san_storage =~ s/-/_/g;
+    my $san_storage = storeid_to_pure_prefix($storeid);
 
     # Find all temp-snap-access volumes for this storage
     my $pattern = "pve-${san_storage}-*-temp-snap-access-*";
@@ -1443,8 +1440,7 @@ sub deactivate_storage {
     my $protocol = $scfg->{'pure-protocol'} // 'iscsi';
 
     # Get all volumes for this storage
-    my $san_storage = $storeid;
-    $san_storage =~ s/-/_/g;
+    my $san_storage = storeid_to_pure_prefix($storeid);
     my $pod = $scfg->{'pure-pod'};
     my $pattern = "pve-${san_storage}-*";
     if ($pod) {
@@ -1950,8 +1946,7 @@ sub free_image {
         my $vmid = $1;
 
         # Check if any other disks remain for this VM
-        my $san_storage = $storeid;
-        $san_storage =~ s/-/_/g;
+        my $san_storage = storeid_to_pure_prefix($storeid);
         my $disk_pattern = "pve-${san_storage}-${vmid}-disk*";
         my $pod = $scfg->{'pure-pod'};
 
@@ -1979,8 +1974,7 @@ sub list_images {
     my @res;
 
     # Build filter pattern
-    my $san_storage = $storeid;
-    $san_storage =~ s/-/_/g;
+    my $san_storage = storeid_to_pure_prefix($storeid);
 
     my $pod = $scfg->{'pure-pod'};
     my $pattern;

@@ -8,6 +8,95 @@
 
 ---
 
+## [1.1.14] - 2026-05-13
+
+### 高——multipath 部分斷線下，VM 含記憶體快照會拖垮整個 PVE 管理層
+
+**@pulipulichen** 回報（[#5]）並提供關鍵診斷線索：同一台節點 CT
+快照、VM 不含記憶體快照都正常，**只有 VM 含記憶體快照**會觸發，
+且只在 multipath 已經部分斷線時（4 個 portal、2 條 path 斷掉）才
+出事。一次 snapshot 之後，pvedaemon／pvestatd 漸進失能，最終 Web
+UI 對所有 storage 都顯示 `?`，只能強制重開機恢復。
+
+**根因**：VM 含記憶體快照會在陣列上**建一個 VMSTATE Volume** 儲存
+RAM dump，建好之後 host 端要做 iSCSI rescan + 等 multipath 看到
+這個新 device。原本的 `rescan_sessions()` 走的是
+`iscsiadm -m session --rescan`——**單一次 iscsiadm 呼叫嘗試 rescan
+所有 active session**，包括已斷線的那些。死掉的 session 會把 SCSI
+command 塞進 SCSI bus 等 kernel timeout（每條死 path 通常 30 秒以
+上），iscsiadm 父行程在我們設的 60 秒 wrapper timeout 被殺掉，但
+留下 **D-state 子行程**（無法 SIGKILL ——詳見 CLAUDE.md 教訓 #3）。
+每次 pvestatd 輪詢（10 秒）又 fire 一次同樣的 rescan，D-state 累
+積到管理層撐不住為止。
+
+CT 快照與「VM 不含記憶體」快照不會重現是因為**不需要建新 Volume、
+不會走 host 端 activation 路徑**——純儲存層操作。
+
+#### 修正
+- **[高] `rescan_sessions()` 重寫**：
+  1. 透過 `/sys/class/iscsi_session/` 列舉 session（kernel 維護
+     的 sysfs、不會被 iscsiadm hang 影響），readdir 有 alarm 上限
+  2. bounded sysfs read 讀每個 session 的 `state`，**state 不是
+     `LOGGED_IN`**（FREE、REOPEN、FAILED 等）就跳過
+  3. 對 LOGGED_IN session **個別 rescan**
+     （`iscsiadm -m session -r <sid> --rescan`），每個 session 給
+     10 秒 timeout（取代原本「所有 session 一次 60 秒」）
+- 最壞情況的 D-state 子行程數量從「每次輪詢、每條死 path 都來一
+  個、永遠累積」降為「每次呼叫、每個卡住的 LOGGED_IN session 最
+  多一個、有上限」。
+- 跳過 non-LOGGED_IN session 時會 warning 列出狀態（例如
+  `session1=FREE, session2=REOPEN`），讓 operator 知道底層 iSCSI
+  fabric 出狀況，而不只是看到管理層卡住的症狀。
+
+#### 套用後在同樣 reproducer 上的預期行為
+4 LIF Pure、2 條 path 斷、VM 含記憶體快照：
+- rescan_sessions 只 rescan 2 條健康的 session，各自 <1 秒
+- VMSTATE Volume 在 2 條健康 path 上出現、multipath 看到、snapshot
+  完成
+- pvestatd 輪詢不再累積 D-state 子行程
+- Web UI 保持回應
+
+---
+
+### 中——storage ID 含 `.` 時 PVE Web UI 的 disk 列表會空白
+
+**@pulipulichen** 回報（[#6]）。
+
+加入 ID 為 `pure-plugin-5.111-pvepod2` 的 storage 後，PVE Web UI 上
+這個 storage 的 disk 列表是空的，即使該 storage 上的 VM 仍在執行
+且陣列端 Volume 確實存在。把 storage 重新命名為
+`pure-plugin-5-pvepod2`（去掉點）就正常了。
+
+**根因**：寫入路徑與讀取路徑的 sanitize 不對稱。
+
+- `encode_volume_name()`（寫入）會先呼叫
+  `sanitize_for_pure($storage)` 去掉 `.` 與其他非
+  `[a-zA-Z0-9_-]` 字元，再 `s/-/_/g`。storage ID
+  `pure-plugin-5.111-pvepod2` 變成 Volume 前綴
+  `pure_plugin_5111_pvepod2`（點消失），實際存在陣列上的 Volume
+  名稱是 `pve-pure_plugin_5111_pvepod2-<vmid>-disk<N>`。
+- `list_images()`（讀取）以及 `PureStoragePlugin.pm` 內**六個別的
+  pattern 建構處**全部只做
+  `$san_storage = $storeid; $san_storage =~ s/-/_/g;` ——
+  點還在！filter pattern 變成
+  `pve-pure_plugin_5.111_pvepod2-*`，跟實際存在的 Volume 名稱永遠
+  match 不到，`list_images` 回空陣列。
+
+#### 修正
+- **[中] 新 helper `Naming::storeid_to_pure_prefix($storeid)`**：執
+  行與 `encode_volume_name` 一致的完整 transform（sanitize_for_pure
+  +`s/-/_/g`）。export 出來讓所有建構 pattern 的呼叫者共用同一份
+  正確邏輯。
+- `PureStoragePlugin.pm` 內 7 處 inline 重複全部換成呼叫 helper。
+- `Naming.pm` 內自己另外 3 處 inline 重複（encode_config_volume_name、
+  pve_volname_to_pure 的 cloudinit 與 state 分支）也一起收攏到
+  helper——日後 storage 名稱編碼規則若再改，只要動一處。
+
+[#5]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/5
+[#6]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/6
+
+---
+
 ## [1.1.13] - 2026-05-11
 
 ### 高——Snapshot 倒回在 REST API 2.x 上沉默無作用

@@ -19,6 +19,7 @@ our @EXPORT_OK = qw(
     decode_config_volume_name
     is_config_volume
     sanitize_for_pure
+    storeid_to_pure_prefix
     is_valid_pure_volume_name
     is_pve_managed_volume
     pve_volname_to_pure
@@ -72,6 +73,28 @@ sub sanitize_for_pure {
     return $sanitized;
 }
 
+# Translate a PVE storeid into the "storage prefix" string that appears
+# in Pure volume names built by encode_volume_name. This MUST stay
+# symmetric with encode_volume_name's storage-portion transformation, or
+# list_images / pattern queries / vmid scans will fail to match the
+# volumes actually stored on the array.
+#
+# Symmetry: encode_volume_name does sanitize_for_pure() + s/-/_/g. Callers
+# that build pattern strings used in Pure list queries must do the same,
+# or storeids containing characters that sanitize strips (e.g. '.') will
+# silently produce mismatched patterns. Issue #6 (@pulipulichen) was the
+# field reproducer: storeid `pure-plugin-5.111-pvepod2` ended up listed
+# as `pure_plugin_5.111_pvepod2` in patterns (dot left in) but volumes
+# were stored as `pve-pure_plugin_5111_pvepod2-...` (dot stripped),
+# producing an empty disk list in the PVE UI.
+sub storeid_to_pure_prefix {
+    my ($storeid) = @_;
+    die "storeid is required" unless defined $storeid;
+    my $san = sanitize_for_pure($storeid, MAX_STORAGE_NAME_LENGTH);
+    $san =~ s/-/_/g;
+    return $san;
+}
+
 # Encode PVE volume identifier to Pure Storage volume name
 # Input: storage ID, VM ID, disk ID
 # Output: Pure volume name like "pve-pure1-100-disk0"
@@ -82,10 +105,7 @@ sub encode_volume_name {
     die "vmid is required" unless defined $vmid;
     die "diskid is required" unless defined $diskid;
 
-    my $san_storage = sanitize_for_pure($storage, MAX_STORAGE_NAME_LENGTH);
-    # Replace hyphens with underscores in storage portion to avoid parsing
-    # ambiguity in decode_volume_name (hyphens are used as field separators)
-    $san_storage =~ s/-/_/g;
+    my $san_storage = storeid_to_pure_prefix($storage);
     return "pve-${san_storage}-${vmid}-disk${diskid}";
 }
 
@@ -214,8 +234,7 @@ sub encode_config_volume_name {
     die "vmid is required" unless defined $vmid;
     die "snapname is required" unless defined $snapname;
 
-    my $san_storage = sanitize_for_pure($storage, MAX_STORAGE_NAME_LENGTH);
-    $san_storage =~ s/-/_/g;
+    my $san_storage = storeid_to_pure_prefix($storage);
     my $san_snap = sanitize_for_pure($snapname, 30);
     my $result = "pve-${san_storage}-${vmid}-vmconf-${san_snap}";
 
@@ -307,16 +326,14 @@ sub pve_volname_to_pure {
     # Cloud-init: vm-{vmid}-cloudinit
     if ($pve_volname =~ /^vm-(\d+)-cloudinit$/) {
         my $vmid = $1;
-        my $san_storage = sanitize_for_pure($storage, MAX_STORAGE_NAME_LENGTH);
-        $san_storage =~ s/-/_/g;
+        my $san_storage = storeid_to_pure_prefix($storage);
         return "pve-${san_storage}-${vmid}-cloudinit";
     }
 
     # VM state: vm-{vmid}-state-{snapname}
     if ($pve_volname =~ /^vm-(\d+)-state-(.+)$/) {
         my ($vmid, $snapname) = ($1, $2);
-        my $san_storage = sanitize_for_pure($storage, MAX_STORAGE_NAME_LENGTH);
-        $san_storage =~ s/-/_/g;
+        my $san_storage = storeid_to_pure_prefix($storage);
         my $san_snap = sanitize_for_pure($snapname, 30);
         return "pve-${san_storage}-${vmid}-state-${san_snap}";
     }

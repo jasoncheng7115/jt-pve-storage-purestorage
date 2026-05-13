@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.13 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.14 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.13-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.14-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.13-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.14-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.14 <span class="changelog-tag changelog-tag--critical">High</span></div>
+        <div class="changelog-date">2026-05-13</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>VM-with-memory snapshot wedge on degraded multipath (HIGH):</strong> on a host with broken paths (e.g. 4-portal Pure with 2 paths down), VM snapshot WITH memory caused pvedaemon / pvestatd to progressively die and the entire PVE web UI to show <code>?</code> for every storage. CT snapshot and VM-without-memory snapshot were unaffected because they don't trigger host-side new-volume activation. Root cause: <code>rescan_sessions()</code> used <code>iscsiadm -m session --rescan</code> which rescans every active session in one shot, queueing SCSI commands on the dead sessions that wait for kernel-level timeouts (30s+ per dead path); iscsiadm parent gets killed at our 60s wrapper but leaves D-state children behind. Each pvestatd poll re-fires the same rescan and stacks more D-state children until management dies. Fixed by enumerating sessions via <code>/sys/class/iscsi_session/</code>, reading each session's <code>state</code>, and only issuing per-session rescan (10s timeout each) on <code>LOGGED_IN</code> sessions. Reported by @pulipulichen (#5) with the critical "CT works, VM-with-memory doesn't" reproducer.<br><strong>Storage ID with `.` empty disk list (MEDIUM):</strong> <code>encode_volume_name</code> stripped dots via <code>sanitize_for_pure</code> on write, but <code>list_images</code> and 6 sibling pattern-building sites only did <code>s/-/_/g</code> — leaving the dot in the filter pattern, which never matched volumes stored without it. Fixed by adding <code>Naming::storeid_to_pure_prefix</code> helper that performs the full transform symmetrically and replacing all 7+3 inline duplications. Reported by @pulipulichen (#6).</span>
+            <span class="lang-zh"><strong>multipath 部分斷線下、VM 含記憶體快照拖垮管理層（高）：</strong>有 path 斷掉的節點上（例如 4 portal Pure、2 條 path 斷），VM 含記憶體快照會讓 pvedaemon／pvestatd 漸進失能，PVE Web UI 對所有 storage 顯示 <code>?</code>。CT 快照與不含記憶體的 VM 快照不會中招——它們不會觸發 host 端的新 Volume activation。根因：<code>rescan_sessions()</code> 用 <code>iscsiadm -m session --rescan</code> 一次 rescan 所有 session，包括死的；死 session 上 queue 的 SCSI command 等 kernel timeout（每條 30 秒以上）；iscsiadm 父行程在 60 秒被殺，留下 D-state 子行程；每次 pvestatd 輪詢又 fire 一次、累積到管理層死。修法：改用 <code>/sys/class/iscsi_session/</code> 列舉 session、讀 <code>state</code>、只對 <code>LOGGED_IN</code> session 個別 rescan（每個 10 秒 timeout）。@pulipulichen 回報（#5），關鍵線索是「CT 快照沒事、VM 含記憶體快照才出事」。<br><strong>storage ID 含 `.` 時 disk 列表空白（中）：</strong>寫入路徑 <code>encode_volume_name</code> 透過 <code>sanitize_for_pure</code> 去點，但 <code>list_images</code> 與 6 處 sibling pattern 建構只做 <code>s/-/_/g</code>——點還在、永遠 match 不到。修法：新 helper <code>Naming::storeid_to_pure_prefix</code> 做對稱的完整 transform，所有 7+3 處 inline 重複改呼叫它。@pulipulichen 回報（#6）。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.13 <span class="changelog-tag changelog-tag--critical">High</span></div>

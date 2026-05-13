@@ -1,3 +1,55 @@
+jt-pve-storage-purestorage (1.1.14-1) stable; urgency=high
+
+  * [HIGH] VM snapshot WITH memory on a multipath-degraded host (e.g.
+    4-portal Pure with 2 paths broken) wedged pvedaemon / pvestatd
+    and eventually made the entire PVE management plane unresponsive
+    ("?" everywhere in the web UI). CT snapshot and VM snapshot
+    WITHOUT memory worked fine. Root cause: VM-with-memory snapshot
+    creates a VMSTATE volume on the array, which then has to be
+    activated host-side (iSCSI session rescan + multipath wait). The
+    rescan path used `iscsiadm -m session --rescan`, which in one
+    invocation tries to rescan every active session including the
+    dead ones. The dead sessions queue SCSI commands that wait for
+    kernel-level timeouts (30s+ per dead path), the iscsiadm
+    parent gets killed at our wrapper timeout, leaving D-state
+    children behind. Every pvestatd poll (10s) re-fired the same
+    rescan, stacking more D-state children until the management
+    plane died. Reproducer: 4-LIF Pure with 2 broken paths, take a
+    VM snapshot with memory; node degrades over time, often within
+    one snapshot operation. Fixed by rewriting rescan_sessions to
+    enumerate sessions via /sys/class/iscsi_session/ (kernel-
+    maintained, immune to iscsiadm hangs), check each session's
+    `state` attribute, and only issue per-session rescans
+    (`iscsiadm -m session -r <sid> --rescan`) on sessions in
+    LOGGED_IN state, each bounded by a 10s timeout. Sessions in
+    FREE / REOPEN / FAILED / etc. states are skipped silently;
+    worst-case orphan child count drops from "one per dead session
+    per poll forever" to "one per stuck LOGGED_IN session per call,
+    bounded". Reported by @pulipulichen (#5) with the critical
+    "CT works, VM-with-memory doesn't" reproducer that pinpointed
+    VMSTATE volume activation as the trigger.
+
+  * [MEDIUM] PVE Web UI disk list silently empty when the storage ID
+    contains a `.` (dot) character. encode_volume_name strips dots
+    via sanitize_for_pure when writing volumes to the array, but
+    list_images and six sibling pattern-building sites did only
+    `$storeid =~ s/-/_/g` — leaving the dot in the filter pattern.
+    Filter pattern `pve-pure_plugin_5.111_pvepod2-*` therefore never
+    matched volumes actually stored as `pve-pure_plugin_5111_pvepod2-...`,
+    so list_images returned empty and PVE displayed no disks. Field
+    reproducer: storage ID `pure-plugin-5.111-pvepod2` showed empty
+    disk list; renaming to `pure-plugin-5-pvepod2` (no dot) made it
+    work. Fixed by adding a `storeid_to_pure_prefix($storeid)` helper
+    in Naming.pm that does the full sanitize+underscore transform
+    that encode_volume_name uses, and replacing all 7 inline
+    duplications in PureStoragePlugin.pm with calls to it. The 4
+    inline duplications in Naming.pm itself (encode_config_volume_name,
+    pve_volname_to_pure for cloudinit/vmstate) also collapsed onto
+    the same helper to keep the transform single-source. Reported
+    by @pulipulichen (#6).
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 13 May 2026 12:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.13-1) stable; urgency=high
 
   * [HIGH] Snapshot rollback silently no-op on REST API 2.x. The

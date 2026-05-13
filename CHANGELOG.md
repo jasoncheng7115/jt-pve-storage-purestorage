@@ -8,6 +8,107 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.14] - 2026-05-13
+
+### HIGH — VM snapshot WITH memory could wedge the entire PVE management plane on a degraded-multipath host
+
+Reported by **@pulipulichen** ([#5]) with a critical diagnostic
+observation: CT snapshot and VM snapshot WITHOUT memory worked fine on
+the same node; only VM snapshot **WITH memory** triggered the wedge,
+and only when multipath was already degraded (4 portals, 2 paths
+broken). After one snapshot, pvedaemon / pvestatd progressively
+became unresponsive and the entire web UI eventually showed `?` for
+every storage; recovery required a forced reboot.
+
+**Root cause:** VM-with-memory snapshot creates a VMSTATE volume on
+the array, which then has to be host-side activated (iSCSI rescan +
+multipath wait for the new device). `rescan_sessions()` called
+`iscsiadm -m session --rescan`, which **rescans every active session
+in a single iscsiadm invocation**, including the dead ones. The dead
+sessions queue SCSI commands waiting for kernel-level timeouts
+(typically 30 s+ per dead path); the iscsiadm parent process gets
+killed at our 60 s wrapper timeout, leaving **D-state children
+behind** (immortal — see CLAUDE.md lesson #3). Every subsequent
+`pvestatd` poll (10 s) re-fired the same rescan and stacked more
+D-state children until the management plane died.
+
+CT snapshot and VM-without-memory snapshot do not reproduce because
+they don't create a new volume that needs host-side activation —
+they're pure storage-side operations.
+
+#### Fixed
+- **[HIGH] `rescan_sessions()` rewritten** to:
+  1. Enumerate sessions via `/sys/class/iscsi_session/`
+     (kernel-maintained sysfs, immune to iscsiadm hangs), with a
+     bounded readdir.
+  2. Read each session's `state` attribute via a bounded sysfs
+     read; skip sessions whose state is not `LOGGED_IN`
+     (FREE, REOPEN, FAILED, etc.).
+  3. Issue per-session rescan
+     (`iscsiadm -m session -r <sid> --rescan`) only on `LOGGED_IN`
+     sessions, each bounded by a 10 s timeout (vs. the previous
+     monolithic 60 s for all sessions in one shot).
+- Worst-case orphan child count drops from "one per dead session
+  per poll forever" to "one per stuck-LOGGED_IN session per call,
+  bounded by per-session timeout."
+- Warning is emitted when non-LOGGED_IN sessions are skipped, with
+  state labels (e.g. `session1=FREE, session2=REOPEN`) so the
+  operator can see the underlying iSCSI fabric problem instead of
+  just observing a wedge symptom.
+
+#### Field expected behaviour on the same reproducer post-fix
+4-LIF Pure, 2 paths broken, VM snapshot with memory:
+- rescan_sessions only rescans the 2 LOGGED_IN sessions, each
+  finishing in <1 s
+- VMSTATE volume appears on the 2 healthy paths, multipath sees it,
+  snapshot completes
+- pvestatd polls don't accumulate D-state children
+- web UI stays responsive
+
+---
+
+### MEDIUM — PVE Web UI disk list silently empty when storage ID contains `.`
+
+Reported by **@pulipulichen** ([#6]).
+
+Adding a storage with ID `pure-plugin-5.111-pvepod2` produced an empty
+disk list in the PVE web UI even though VMs on the storage were
+running and Pure-side volumes existed. Renaming the storage to
+`pure-plugin-5-pvepod2` (dot removed) resolved it.
+
+**Root cause:** asymmetric sanitisation.
+
+- `encode_volume_name()` (the write path) called
+  `sanitize_for_pure($storage)` which strips `.` (and other
+  non-`[a-zA-Z0-9_-]` chars), then `s/-/_/g`. So storage ID
+  `pure-plugin-5.111-pvepod2` became volume prefix
+  `pure_plugin_5111_pvepod2` (dot removed), and the volume on the
+  array is `pve-pure_plugin_5111_pvepod2-<vmid>-disk<N>`.
+- `list_images()` (the read path) and **six sibling pattern-building
+  sites** in `PureStoragePlugin.pm` did only
+  `$san_storage = $storeid; $san_storage =~ s/-/_/g;` — leaving the
+  dot in. The filter pattern became
+  `pve-pure_plugin_5.111_pvepod2-*`, which never matched the
+  actually-stored volume names. `list_images` returned empty.
+
+#### Fixed
+- **[MEDIUM] New helper `Naming::storeid_to_pure_prefix($storeid)`**
+  that performs the full transform (sanitize_for_pure + `s/-/_/g`)
+  used by `encode_volume_name`. Exported from `Naming.pm` so all
+  pattern-building callers share a single canonical implementation.
+- All 7 inline duplications in `PureStoragePlugin.pm` replaced with
+  calls to the new helper.
+- The 3 remaining inline duplications inside `Naming.pm` itself
+  (encode_config_volume_name, pve_volname_to_pure cloudinit branch,
+  pve_volname_to_pure state branch) also collapsed onto the helper
+  to keep the transform single-source — if storage-name encoding
+  rules ever change again, only one site needs editing.
+
+[#5]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/5
+[#6]: https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/6
+
+---
+
 ## [1.1.13] - 2026-05-11
 
 ### HIGH — Snapshot rollback silently no-op'd on REST API 2.x

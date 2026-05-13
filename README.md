@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.13-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.14-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -317,7 +317,7 @@ QEMU block device               passed to qemu           (raw, no FS layer
 ### From .deb package (Recommended)
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.1.13-1_all.deb
+dpkg -i jt-pve-storage-purestorage_1.1.14-1_all.deb
 apt-get install -f  # Install dependencies if needed
 ```
 

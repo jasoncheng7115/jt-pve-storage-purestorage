@@ -352,19 +352,121 @@ sub is_portal_logged_in {
 }
 
 # Rescan all iSCSI sessions for new LUNs
+# Rescan iSCSI sessions. Enumerates sessions via /sys/class/iscsi_session/
+# (kernel-maintained, immune to iscsiadm hangs), then issues a per-session
+# rescan only on sessions whose state is LOGGED_IN.
+#
+# Why not `iscsiadm -m session --rescan`: that command rescans ALL active
+# sessions in a single iscsiadm invocation. When some paths are dead
+# (typical field scenario: 4-portal Pure with 2 paths broken), the rescan
+# triggers SCSI bus commands on the dead sessions. The kernel waits for
+# the SCSI bus timeout per dead path (often 30s+ each, sometimes much
+# longer), which exceeds the iscsiadm parent timeout. The parent gets
+# killed, leaving D-state children behind (kernel-locked, immortal —
+# see CLAUDE.md lesson #3). Every subsequent pvestatd poll fires another
+# rescan and stacks more D-state children, eventually wedging pvestatd,
+# pvedaemon, and the entire node management plane (web UI shows "?" for
+# every storage).
+#
+# Field reproducer (issue #5, @pulipulichen): 4-LIF Pure with 2 paths
+# broken; VM snapshot WITH memory triggers VMSTATE volume creation;
+# alloc_image's wait-for-device loop calls rescan_sessions repeatedly;
+# node dies. CT snapshot and VM snapshot WITHOUT memory don't repro
+# because they don't create a new volume that needs host-side activation.
+#
+# Behaviour:
+#   - Sessions in FREE / REOPEN / FAILED / etc. states are SKIPPED.
+#   - Only LOGGED_IN sessions are rescanned, one at a time, each with
+#     a bounded timeout (default 10s vs old monolithic 60s for all).
+#   - Worst-case orphan child count is 1 per (LOGGED_IN-but-stuck) session
+#     per call, instead of accumulating against `--rescan` of all sessions.
+#   - Returns the number of sessions successfully rescanned. Never croaks
+#     on per-session failures; the wait-for-device loop above us handles
+#     "device didn't appear" with its own timeout.
 sub rescan_sessions {
     my (%opts) = @_;
+    my $per_session_timeout = $opts{per_session_timeout} // $opts{timeout} // 10;
 
-    my ($stdout, $stderr, $exit) = _run_cmd(
-        [ISCSIADM, '-m', 'session', '--rescan'],
-        allow_nonzero => 1,
-        timeout => $opts{timeout} // 60,
-    );
+    my @sessions;
+    eval {
+        local $SIG{ALRM} = sub { die "timeout\n" };
+        alarm(5);
+        opendir(my $dh, '/sys/class/iscsi_session') or die "opendir: $!\n";
+        @sessions = sort grep { /^session\d+$/ } readdir($dh);
+        closedir($dh);
+        alarm(0);
+    };
+    alarm(0);
+    if ($@) {
+        # No iSCSI configured at all is fine; bubble up real errors.
+        return 0 if $@ =~ /No such file or directory/;
+        warn "rescan_sessions: cannot enumerate iSCSI sessions: $@";
+        return 0;
+    }
+    return 0 unless @sessions;
 
-    # Exit code 21 means no active sessions
-    return 1 if $exit == 0 || $exit == 21;
+    my $rescanned = 0;
+    my $skipped_state = 0;
+    my $rescan_failed = 0;
+    my @skipped_states;
 
-    croak "Failed to rescan iSCSI sessions: $stderr";
+    for my $session (@sessions) {
+        my ($sid) = $session =~ /^session(\d+)$/ or next;
+
+        my $state = _read_sysfs_attr("/sys/class/iscsi_session/$session/state", 2);
+        if (!defined $state) {
+            # Cannot read state — be conservative and skip rather than
+            # rescan a session whose kernel state we don't know.
+            $skipped_state++;
+            next;
+        }
+        unless ($state eq 'LOGGED_IN') {
+            $skipped_state++;
+            push @skipped_states, "$session=$state";
+            next;
+        }
+
+        my ($stdout, $stderr, $exit) = _run_cmd(
+            [ISCSIADM, '-m', 'session', '-r', $sid, '--rescan'],
+            allow_nonzero => 1,
+            timeout => $per_session_timeout,
+        );
+        if ($exit == 0) {
+            $rescanned++;
+        } else {
+            $rescan_failed++;
+        }
+    }
+
+    if ($skipped_state > 0) {
+        warn "rescan_sessions: skipped $skipped_state non-LOGGED_IN iSCSI " .
+             "session(s) [" . join(', ', @skipped_states) . "], " .
+             "rescanned $rescanned, failed $rescan_failed\n";
+    }
+
+    return $rescanned;
+}
+
+# Bounded read of a single sysfs attribute. Returns the stripped value or
+# undef on timeout/error. Used by rescan_sessions to read session state
+# without risking a kernel-side hang on a stuck iSCSI host.
+sub _read_sysfs_attr {
+    my ($path, $timeout) = @_;
+    $timeout //= 2;
+    my $val;
+    eval {
+        local $SIG{ALRM} = sub { die "timeout\n" };
+        alarm($timeout);
+        open(my $fh, '<', $path) or die "open: $!\n";
+        $val = <$fh>;
+        close($fh);
+        alarm(0);
+    };
+    alarm(0);
+    return undef if $@;
+    return undef unless defined $val;
+    chomp $val;
+    return $val;
 }
 
 # Rescan a specific target

@@ -25,7 +25,7 @@ in `README.md`. The shortest summary:
 ### Step 1: Install the plugin
 
 ```bash
-dpkg -i jt-pve-storage-purestorage_1.1.13-1_all.deb
+dpkg -i jt-pve-storage-purestorage_1.1.14-1_all.deb
 ```
 
 Read the postinst output. It will warn if your `/etc/multipath.conf` has
