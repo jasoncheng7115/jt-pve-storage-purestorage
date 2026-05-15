@@ -465,6 +465,33 @@ panel reports the array's total capacity. The plugin only reads or
 writes Volumes whose name starts with `pve-<storeid>-`, so volumes
 named outside that pattern remain untouched in any configuration.
 
+### Restricting the storage to specific cluster nodes
+
+By default a Proxmox VE storage entry is offered to every node in
+the cluster. In environments where only some nodes have physical /
+fabric access to the Pure Storage backend (asymmetric cabling,
+partial iSCSI zoning, intentionally limited per-tenant access), use
+PVE's standard `--nodes` option at `pvesm add` time to restrict
+visibility:
+
+```bash
+pvesm add purestorage pure1 \
+    --pure-portal 192.168.1.100 \
+    --pure-api-token xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+    --pure-protocol iscsi \
+    --nodes pve01,pve02 \
+    --content images,rootdir
+```
+
+The `nodes` field is a standard PVE Storage attribute — the plugin
+just declares that it accepts it. Nodes not in the list will treat
+this storage as not-applicable: the Web UI hides / greys it out,
+`pvestatd` does not poll it, and operations against it from those
+nodes are refused at the PVE layer.
+
+Add or remove nodes later by editing `/etc/pve/storage.cfg` and
+amending the `nodes` line, or by re-creating the entry.
+
 ### Configuration Options
 
 | Option | Required | Default | Description |
@@ -479,8 +506,10 @@ named outside that pattern remain untouched in any configuration.
 | `pure-cluster-name` | No | pve | Cluster name for host naming |
 | `pure-device-timeout` | No | 60 | Device discovery timeout in seconds |
 | `pure-portal-probe-timeout` | No | 2 | TCP pre-check timeout per portal before iscsiadm. Set to 0 to disable. |
+| `pure-config-backup-timeout` | No | 15 | Timeout (s, 5..60) for the auxiliary config-backup volume's multipath device wait. Non-critical; lower values exit faster on degraded fabric. |
 | `pure-pod` | No | - | Pod name (see Capacity and Permission Isolation). Sets capacity reporting to the Pod's quota and namespaces all Volume names. |
 | `content` | Yes | - | Content types: `images`, `rootdir` |
+| `nodes` | No | (all) | Comma-separated list of cluster nodes where this storage is offered. Omit to make it available everywhere. Standard PVE storage attribute. |
 
 \* Either `pure-api-token` or both `pure-username` and `pure-password` are required.
 

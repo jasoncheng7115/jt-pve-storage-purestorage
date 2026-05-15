@@ -444,6 +444,30 @@ Pod 的 `quota_limit` 仍會給你硬上限，雖然 API Token 本身仍是
 外掛只會讀寫名稱以 `pve-<storeid>-` 開頭的 Volume，因此不符合此
 命名規則的既有 Volume 在任何設定下都不會被動到。
 
+### 限定 Storage 只在特定節點生效
+
+預設情況下，Proxmox VE 的 storage 條目對叢集內所有節點開放。如果只有
+部分節點實體／fabric 上能存取 Pure Storage 後端（線路不對稱、iSCSI
+zoning 只到部分節點、刻意限制每個 tenant 能用的節點），可以在
+`pvesm add` 時加上 PVE 標準的 `--nodes` 參數限定可見範圍：
+
+```bash
+pvesm add purestorage pure1 \
+    --pure-portal 192.168.1.100 \
+    --pure-api-token xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
+    --pure-protocol iscsi \
+    --nodes pve01,pve02 \
+    --content images,rootdir
+```
+
+`nodes` 是 PVE Storage 的通用屬性——外掛只是宣告接受該欄位、其餘
+由 PVE 自行處理。不在列表上的節點會把這個 storage 視為不適用：
+Web UI 隱藏／灰化、`pvestatd` 不會去輪詢、從這些節點下的操作會被
+PVE 本身擋下。
+
+事後要加減節點，編輯 `/etc/pve/storage.cfg` 的 `nodes` 那行即可，
+或直接刪掉重建 entry。
+
 ### 設定選項
 
 | 選項 | 必填 | 預設值 | 說明 |
@@ -458,8 +482,10 @@ Pod 的 `quota_limit` 仍會給你硬上限，雖然 API Token 本身仍是
 | `pure-cluster-name` | 否 | pve | 用於 Host 命名的叢集名稱 |
 | `pure-device-timeout` | 否 | 60 | 裝置探索逾時秒數 |
 | `pure-portal-probe-timeout` | 否 | 2 | iscsiadm 之前對每個 portal 的 TCP 預探測逾時秒數，設為 0 停用 |
+| `pure-config-backup-timeout` | 否 | 15 | 輔助 config-backup Volume 等 multipath device 的逾時秒數（5..60）。非必要功能；降級 fabric 下調低能更快返回 |
 | `pure-pod` | 否 | - | Pod 名稱（見「容量與權限隔離」一節）。設定後容量回報以 Pod 配額為準，所有 Volume 名稱進入 Pod 命名空間 |
 | `content` | 是 | - | 內容類型：`images`、`rootdir` |
+| `nodes` | 否 | （全部） | 此 storage 開放給哪些叢集節點，逗號分隔。省略代表全部節點。PVE 通用 Storage 屬性 |
 
 \* 需提供 `pure-api-token` 或同時提供 `pure-username` 和 `pure-password`。
 
