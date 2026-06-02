@@ -14,64 +14,63 @@ Proxmox VE 9.2 相容性釋出。
 
 ### 中——覆寫 `get_identity()` 以相容 PVE 9.2
 
-PVE 9.2 在 base `PVE::Storage::Plugin` 新增了 `get_identity()`,其預設
-實作會 `die` 並回報「get_identity not implemented for this plugin」。它
-透過新的 `GET /nodes/<node>/storage/<storage>/identity` 端點被呼叫(主要
-供 Proxmox Backup Server 比對實例;Web UI 也可能對任一 storage 輪詢),
-因此在 PVE 9.2 上,base 的 `die` 會在 Web UI 浮現為錯誤。外掛現在覆寫此
-方法,回傳具決定性的 `purestorage:<portal>:<pod>`——管理 portal 加上選用
-的 ActiveCluster pod,兩者一起把 storage 綁定到單一陣列。簽章已對照
-pve-storage 原始碼驗證(`my ($class, $scfg, $storeid)`)。不需變更
-`APIVERSION`:外掛仍宣告 13,落在 PVE 9.2 接受的 9..14 範圍內。
+PVE 9.2 在 base `PVE::Storage::Plugin` 新增了 `get_identity()`，其預設實作會
+`die` 並回報「get_identity not implemented for this plugin」。它透過新的
+`GET /nodes/<node>/storage/<storage>/identity` 端點被呼叫（主要供 Proxmox
+Backup Server 比對實例；Web UI 也可能對任一 storage 輪詢），因此在 PVE 9.2
+上，base 的 `die` 會在 Web UI 浮現為錯誤。外掛現在覆寫此方法，回傳具決定性的
+`purestorage:<portal>:<pod>`——管理 portal 加上選用的 ActiveCluster pod，兩者
+一起把 storage 綁定到單一陣列。簽章已對照 pve-storage 原始碼驗證
+（`my ($class, $scfg, $storeid)`）。不需變更 `APIVERSION`：外掛仍宣告 13，落在
+PVE 9.2 接受的 9..14 範圍內。
 
 ---
 
 ## [1.1.19] - 2026-05-29
 
-規模化與孤兒清理安全性釋出。處理大量 Volume（超過 1000）情境下的行為,
-並強化背景孤兒清理,避免誤清正在使用中的 LUN；另外移植數項來自姊妹
-NetApp 外掛的監控功能。
+規模化與殘留清理安全性釋出。處理大量 Volume（超過 1000）情境下的行為，並強化
+背景殘留清理，避免誤清正在使用中的 LUN；另外移植數項來自相關 NetApp 外掛的
+監控功能。
 
 ### 高——Volume／Snapshot 列舉不再只取第一頁
 
-`volume_list()`、`volume_list_destroyed()` 與 `snapshot_list()` 現在會
-依 API 2.x 的 `continuation_token` 逐頁抓取。Pure FlashArray REST 2.x 對
-每次集合 GET 都有單頁上限（預設約 1000 筆）,並以 `more_items_remaining`
-加 `continuation_token` 表示尚有後續頁。先前的程式只讀第一頁,因此當某
-storage 的 Volume 或 Snapshot 超過一頁時會被靜默截斷:`list_images()`
-會讓 Proxmox VE Web UI 看不到部分磁碟,孤兒清理也看不到後段 Volume
-(進而可能被誤判為殘留)。API 1.x 不受影響。新增 `API::_get_v2_collection()`
-協助函式負責逐頁走訪。
+`volume_list()`、`volume_list_destroyed()` 與 `snapshot_list()` 現在會依
+API 2.x 的 `continuation_token` 逐頁抓取。Pure FlashArray REST 2.x 對每次集合
+GET 都有單頁上限（預設約 1000 筆），並以 `more_items_remaining` 加
+`continuation_token` 表示尚有後續頁。先前的程式只讀第一頁，因此當某 storage 的
+Volume 或 Snapshot 超過一頁時會被靜默截斷：`list_images()` 會讓 Proxmox VE
+Web UI 看不到部分磁碟，殘留清理也看不到後段 Volume（進而可能被誤判為殘留）。
+API 1.x 不受影響。新增 `API::_get_v2_collection()` 協助函式負責逐頁走訪。
 
-### 高——孤兒清理強化（絕不清掉使用中的 LUN）
+### 高——殘留清理強化（絕不清掉使用中的 LUN）
 
-- **移除每次輪詢的 API 負載。**`_cleanup_orphaned_devices()` 的 Phase 1
-  現在直接從 `volume_list()` 回應中已帶有的 `serial` 推導 WWID,不再對每
-  顆 Volume 於每次 `pvestatd` 輪詢（約 10 秒）多打一次 `volume_get_wwid()`
-  REST 呼叫。在大型 storage 上,這消除了會隨 Volume 數量線性成長、且可能
-  觸發陣列 API 速率限制的每輪呼叫爆量。
-- **背景清理序列化。**以 per-storeid 的非阻塞 `flock`,避免單次清理在大型
-  陣列上超過 10 秒輪詢間隔時、多個清理行程互相堆疊。
-- **寬限期加缺席遲滯。**首次追蹤未滿 600 秒的 WWID 一律不清（保護剛加入、
-  qemu 尚未開啟的 LUN——此時使用中檢查理應回報為閒置）,且 WWID 必須連續
-  3 次清理輪詢都不在陣列上才會拆除。這可吸收單次短暫或不完整的陣列回應。
-  此為跨專案強化,源自 NetApp 端「剛加入、使用中的 LUN 被清掉」的事故。
-- **修正跨 storage 誤判。**當一台主機上有多個 purestorage storage(多個
-  pod 或多個陣列)時,Phase 3 以往會把另一個 storage 的使用中裝置當成殘
-  留孤兒、並建議對它執行 `multipath -f`。Phase 3 現在會聯集本節點上其他
-  purestorage storage 已追蹤的 WWID 並略過它們。(對應 NetApp v0.2.15。)
+- **移除每次輪詢的 API 負載**：`_cleanup_orphaned_devices()` 的 Phase 1 現在
+  直接從 `volume_list()` 回應中已帶有的 `serial` 推導 WWID，不再對每顆 Volume
+  於每次 `pvestatd` 輪詢（約 10 秒）多打一次 `volume_get_wwid()` REST 呼叫。在
+  大型 storage 上，這消除了會隨 Volume 數量線性成長、且可能觸發陣列 API 速率
+  限制的每輪呼叫爆量。
+- **背景清理序列化**：以 per-storeid 的非阻塞 `flock`，避免單次清理在大型陣列
+  上超過 10 秒輪詢間隔時、多個清理行程互相堆疊。
+- **寬限期加缺席遲滯**：首次追蹤未滿 600 秒的 WWID 一律不清（保護剛加入、qemu
+  尚未開啟的 LUN——此時使用中檢查理應回報為閒置），且 WWID 必須連續 3 次清理
+  輪詢都不在陣列上才會拆除。這可吸收單次短暫或不完整的陣列回應。此為跨專案
+  強化，源自 NetApp 端「剛加入、使用中的 LUN 被清掉」的事故。
+- **修正跨 storage 誤判**：當一台主機上有多個 purestorage storage（多個 pod 或
+  多個陣列）時，Phase 3 以往會把另一個 storage 的使用中裝置當成殘留、並建議對它
+  執行 `multipath -f`。Phase 3 現在會聯集本節點上其他 purestorage storage 已
+  追蹤的 WWID 並略過它們。（對應 NetApp v0.2.15。）
 
-### 中——監控功能新增(對應 NetApp v0.2.10／v0.2.11)
+### 中——監控功能新增（對應 NetApp v0.2.10／v0.2.11）
 
-- **停機偵測:**`status()` 在連續 3 次輪詢失敗後記錄一筆 ERROR(停機期間
-  最多每 30 秒重發一次),恢復時記錄 INFO,於 journal 以 `pure-storage:`
-  標記供監控擷取。
-- **容量健康:**使用率達 90%（WARNING）與 95%（ERROR）時警告,每小時一次。
-- **控制器冗餘:**`activate_storage()` 在所有可達的 iSCSI portal 都落在
-  單一 Pure 控制器時(無控制器層級的路徑冗餘),每 24 小時警告一次。
-- **postinst 進行中操作寬限:**偵測進行中的 `qmrestore`／`vzdump`／`qm
-  move-disk`／`clone`／`migrate`／`pvesm` 操作,於重新載入服務(優雅
-  SIGHUP)前印出 NOTICE 並提供 5 秒寬限。
+- **停機偵測**：`status()` 在連續 3 次輪詢失敗後記錄一筆 ERROR（停機期間最多每
+  30 秒重發一次），恢復時記錄 INFO，於 journal 以 `pure-storage:` 標記供監控
+  擷取。
+- **容量健康**：使用率達 90%（WARNING）與 95%（ERROR）時警告，每小時一次。
+- **控制器冗餘**：`activate_storage()` 在所有可達的 iSCSI portal 都落在單一
+  Pure 控制器時（無控制器層級的路徑冗餘），每 24 小時警告一次。
+- **postinst 進行中操作寬限**：偵測進行中的 `qmrestore`／`vzdump`／`qm
+  move-disk`／`clone`／`migrate`／`pvesm` 操作，於重新載入服務（優雅 SIGHUP）前
+  印出 NOTICE 並提供 5 秒寬限。
 
 ---
 
@@ -865,7 +864,7 @@ API 1.x normalisation 問題對使用 Pure REST API 1.x 的用戶屬 HIGH 等級
   上拿到的是**Volume 名**。後續的 `volume_disconnect_host($vol,
   $conn->{name})` 把 Volume 名當作 host 引數傳入，在 eval 內 silent
   失敗。**結果：在 API 1.x 上每個 disconnect 呼叫都是 no-op,
-  孤兒 host 連線永遠留著，而每個 `volume_delete` 清理都走 Bug E
+  殘留 host 連線永遠留著，而每個 `volume_delete` 清理都走 Bug E
   ghost-LUN 失敗模式。** 修法：在
   `volume_get_connections()` 的 API 1.x 分支正規化為相同的
   `[{ name => "<host>" }]` 形狀，並 fallback 至 `host_name` 與
@@ -879,7 +878,7 @@ API 1.x normalisation 問題對使用 Pure REST API 1.x 的用戶屬 HIGH 等級
   保存的 error die。
 - **[HIGH] `_backup_vm_config()` 的 connect 失敗有相同的 Bug E
   模式**:`volume_connect_host` 失敗 → `volume_delete` 沒 disconnect
-  → 陣列上孤兒 host 連線。修法：在 connect-fail 分支與
+  → 陣列上殘留 host 連線。修法：在 connect-fail 分支與
   「Cannot get WWID」分支的 `volume_delete` 之前都呼叫
   `_disconnect_from_all_hosts`。
 - **[MEDIUM] `clone_image()` 缺 disk-id collision retry** —
@@ -914,7 +913,7 @@ API 1.x normalisation 問題對使用 Pure REST API 1.x 的用戶屬 HIGH 等級
   在呼叫 `volume_delete()` 前沒有先 disconnect Volume 的所有 host 連線。**
   `_connect_to_all_hosts()` 在 per-node 模式下會迭代每一台叢集 host;
   若它在 host 1..K 成功、在 K+1 失敗，清理執行時 Volume 仍然連著 K 個 host。
-  Pure （與 ONTAP 不同） 會直接銷毀仍在連線中的 Volume，但**孤兒 host 連線
+  Pure （與 ONTAP 不同） 會直接銷毀仍在連線中的 Volume，但**殘留 host 連線
   紀錄**會讓其他叢集節點上的 iSCSI rescan 發現幽靈 LUN，進而變成
   殘留 multipath 裝置。配上 `defaults` 區塊中的 `no_path_retry queue`
   — 與 1.1.0 起源的正式環境掛起事故同一根本原因。修法：新增
