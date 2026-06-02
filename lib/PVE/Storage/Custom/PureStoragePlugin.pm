@@ -89,6 +89,20 @@ sub type {
     return 'purestorage';
 }
 
+# Return a stable, unique identifier for this storage instance. Added to the
+# base PVE::Storage::Plugin in PVE 9.2 (the base default die()s) and invoked via
+# the new GET /nodes/<node>/storage/<storage>/identity endpoint (primarily for
+# PBS instance matching; the Web UI may poll it for any storage). Without this
+# override the base die() surfaces as an error in the Web UI. The identity is
+# the management portal plus the optional pod, which together pin a storage to
+# one array (and one ActiveCluster pod) deterministically.
+sub get_identity {
+    my ($class, $scfg, $storeid) = @_;
+    my $portal = $scfg->{'pure-portal'} // '';
+    my $pod    = $scfg->{'pure-pod'}    // '';
+    return "purestorage:${portal}:${pod}";
+}
+
 sub plugindata {
     return {
         content => [

@@ -8,6 +8,27 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.20] - 2026-05-29
+
+Proxmox VE 9.2 compatibility release.
+
+### MEDIUM — Override `get_identity()` for PVE 9.2
+
+PVE 9.2 added `get_identity()` to the base `PVE::Storage::Plugin`, whose
+default implementation `die`s with "get_identity not implemented for this
+plugin". It is invoked via the new
+`GET /nodes/<node>/storage/<storage>/identity` endpoint (primarily for
+Proxmox Backup Server instance matching; the Web UI may poll it for any
+storage), so on PVE 9.2 the base `die` would surface as a Web UI error.
+The plugin now overrides it to return a deterministic
+`purestorage:<portal>:<pod>` — the management portal plus the optional
+ActiveCluster pod, which together pin the storage to one array. Signature
+verified against the pve-storage source (`my ($class, $scfg, $storeid)`).
+No `APIVERSION` change is required: the plugin still claims 13, within PVE
+9.2's accepted 9..14 range.
+
+---
+
 ## [1.1.19] - 2026-05-29
 
 Scale and orphan-reaper safety release. Addresses behaviour on storages

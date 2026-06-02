@@ -8,6 +8,24 @@
 
 ---
 
+## [1.1.20] - 2026-05-29
+
+Proxmox VE 9.2 相容性釋出。
+
+### 中——覆寫 `get_identity()` 以相容 PVE 9.2
+
+PVE 9.2 在 base `PVE::Storage::Plugin` 新增了 `get_identity()`,其預設
+實作會 `die` 並回報「get_identity not implemented for this plugin」。它
+透過新的 `GET /nodes/<node>/storage/<storage>/identity` 端點被呼叫(主要
+供 Proxmox Backup Server 比對實例;Web UI 也可能對任一 storage 輪詢),
+因此在 PVE 9.2 上,base 的 `die` 會在 Web UI 浮現為錯誤。外掛現在覆寫此
+方法,回傳具決定性的 `purestorage:<portal>:<pod>`——管理 portal 加上選用
+的 ActiveCluster pod,兩者一起把 storage 綁定到單一陣列。簽章已對照
+pve-storage 原始碼驗證(`my ($class, $scfg, $storeid)`)。不需變更
+`APIVERSION`:外掛仍宣告 13,落在 PVE 9.2 接受的 9..14 範圍內。
+
+---
+
 ## [1.1.19] - 2026-05-29
 
 規模化與孤兒清理安全性釋出。處理大量 Volume（超過 1000）情境下的行為,

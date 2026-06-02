@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.19 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.20 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.19-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.20-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.19-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.20-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.20 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-05-29</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Proxmox VE 9.2 compatibility — override `get_identity()` (MEDIUM):</strong> PVE 9.2 added <code>get_identity()</code> to the base <code>PVE::Storage::Plugin</code>, whose default implementation <code>die</code>s with "get_identity not implemented for this plugin". It is invoked via the new <code>GET /nodes/&lt;node&gt;/storage/&lt;storage&gt;/identity</code> endpoint (primarily for Proxmox Backup Server instance matching; the Web UI may poll it for any storage), so on PVE 9.2 the base <code>die</code> would surface as a Web UI error. The plugin now returns a deterministic <code>purestorage:&lt;portal&gt;:&lt;pod&gt;</code> — the management portal plus the optional ActiveCluster pod, which together pin the storage to one array. Signature verified against the pve-storage source (<code>my ($class, $scfg, $storeid)</code>). No <code>APIVERSION</code> change required (still 13, within PVE 9.2's accepted 9..14).</span>
+            <span class="lang-zh"><strong>Proxmox VE 9.2 相容性——覆寫 `get_identity()`（中）：</strong>PVE 9.2 在 base <code>PVE::Storage::Plugin</code> 新增了 <code>get_identity()</code>，預設實作會 <code>die</code> 並回報「get_identity not implemented for this plugin」。它透過新的 <code>GET /nodes/&lt;node&gt;/storage/&lt;storage&gt;/identity</code> 端點被呼叫（主要供 Proxmox Backup Server 比對實例；Web UI 也可能對任一 storage 輪詢），因此在 PVE 9.2 上 base 的 <code>die</code> 會在 Web UI 浮現為錯誤。外掛現在回傳具決定性的 <code>purestorage:&lt;portal&gt;:&lt;pod&gt;</code>——管理 portal 加上選用的 ActiveCluster pod，兩者一起把 storage 綁定到單一陣列。簽章已對照 pve-storage 原始碼驗證（<code>my ($class, $scfg, $storeid)</code>）。不需變更 <code>APIVERSION</code>（仍為 13，落在 PVE 9.2 接受的 9..14 範圍內）。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.19 <span class="changelog-tag changelog-tag--critical">High</span></div>

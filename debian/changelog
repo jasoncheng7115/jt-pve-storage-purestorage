@@ -1,3 +1,20 @@
+jt-pve-storage-purestorage (1.1.20-1) stable; urgency=medium
+
+  * [MEDIUM] Override get_identity(), added to the base
+    PVE::Storage::Plugin in Proxmox VE 9.2 (base default die()s with
+    "get_identity not implemented for this plugin"). It is invoked via
+    the new GET /nodes/<node>/storage/<storage>/identity endpoint
+    (primarily for Proxmox Backup Server instance matching; the Web UI
+    may poll it for any storage), so without the override the base
+    die() surfaces as a Web UI error on PVE 9.2. Returns a
+    deterministic "purestorage:<portal>:<pod>" — the management portal
+    plus optional ActiveCluster pod, which together pin the storage to
+    one array. Signature verified against the pve-storage source
+    (my ($class, $scfg, $storeid)). No APIVERSION change required;
+    we still claim 13, within PVE 9.2's accepted 9..14 range.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 29 May 2026 14:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.19-1) stable; urgency=medium
 
   * [HIGH] volume_list(), volume_list_destroyed() and snapshot_list()
