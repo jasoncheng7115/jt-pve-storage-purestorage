@@ -8,6 +8,64 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.19] - 2026-05-29
+
+Scale and orphan-reaper safety release. Addresses behaviour on storages
+with large volume counts (>1000) and hardens the background orphan
+cleanup against reaping live LUNs, with several monitoring additions
+carried over from the sibling NetApp plugin.
+
+### HIGH — Volume/snapshot listing no longer truncates past one page
+
+`volume_list()`, `volume_list_destroyed()` and `snapshot_list()` now
+follow the API 2.x `continuation_token` across all pages. Pure FlashArray
+REST 2.x caps each collection GET at a server page (default ~1000 items)
+and signals further pages via `more_items_remaining` + `continuation_token`.
+The previous code read only the first page, so a storage with more than one
+page of volumes or snapshots silently truncated: `list_images()` hid disks
+from the Proxmox VE web UI, and the orphan reaper never saw the tail
+volumes (which then risked being mis-classified as residual). API 1.x is
+unaffected. A new `API::_get_v2_collection()` helper walks all pages.
+
+### HIGH — Orphan reaper hardening (never reap a live LUN)
+
+- **Per-poll API load removed.** `_cleanup_orphaned_devices()` Phase 1 now
+  derives each WWID from the `serial` already present in the `volume_list()`
+  response instead of issuing one extra `volume_get_wwid()` REST call per
+  volume on every `pvestatd` poll (~10s). On large storages this removes a
+  per-poll burst of N REST calls that scaled with volume count and could hit
+  the array's API rate limit.
+- **Background cleanup serialised.** A non-blocking `flock` per storeid stops
+  overlapping cleanup passes from stacking when a single pass exceeds the
+  10s poll interval on a large array.
+- **Grace period + absence hysteresis.** A WWID first seen less than 600s ago
+  is never reaped (protects a just-added LUN before qemu opens it, when the
+  in-use check legitimately reports idle), and a WWID must be absent from the
+  array for 3 consecutive passes before teardown. This absorbs a single
+  transient/incomplete array response. Cross-project hardening from a NetApp
+  reaper incident where a freshly-added, in-use LUN was reaped.
+- **Cross-storage false positive fixed.** With more than one purestorage
+  storage on a host (multiple pods or arrays), Phase 3 used to warn about a
+  sibling storage's live device as a stale orphan and recommend
+  `multipath -f` on it. Phase 3 now skips WWIDs tracked by any other
+  purestorage storage on the node. (Parity with NetApp v0.2.15.)
+
+### MEDIUM — Monitoring additions (NetApp v0.2.10 / v0.2.11 parity)
+
+- **Outage detection:** `status()` logs an ERROR after 3 consecutive failed
+  polls (re-emitted at most every 30s while down) and an INFO on recovery,
+  tagged `pure-storage:` in the journal for monitoring pickup.
+- **Capacity health:** warns at >=90% (WARNING) and >=95% (ERROR) used, once
+  per hour.
+- **Controller redundancy:** `activate_storage()` warns once per 24h when all
+  reachable iSCSI portals resolve to a single Pure controller (no
+  controller-level path redundancy).
+- **postinst in-flight grace:** detects running `qmrestore`/`vzdump`/`qm
+  move-disk`/`clone`/`migrate`/`pvesm` operations and prints a NOTICE with a
+  5s grace window before the (graceful SIGHUP) service reload.
+
+---
+
 ## [1.1.18] - 2026-05-14
 
 ### MEDIUM — Snapshot pre-rename tombstone (mirrors v1.1.15's volume-side fix)

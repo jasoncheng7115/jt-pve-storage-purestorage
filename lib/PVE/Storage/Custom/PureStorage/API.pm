@@ -772,6 +772,47 @@ sub volume_get {
     return $resp;
 }
 
+# Fetch a full API 2.x collection, following continuation_token across pages.
+#
+# Pure FlashArray REST 2.x caps each GET on a collection endpoint at a server
+# page size (default ~1000 items) and signals further pages via the top-level
+# `more_items_remaining` (boolean) + `continuation_token` (opaque string). A
+# single GET therefore returns at most one page. Without this loop an array
+# with more than one page of matching volumes silently truncates to the first
+# page: list_images() would hide disks from the PVE web UI and orphan cleanup
+# would never see the tail volumes. This is exactly the failure that appears
+# once a storage crosses ~1000 volumes.
+#
+# API 1.x has no continuation_token and returns the full array in one shot, so
+# callers use this helper only on the 2.x path.
+sub _get_v2_collection {
+    my ($self, $endpoint, $params, %opts) = @_;
+
+    my @items;
+    my %p = %{ $params // {} };
+    my $page = 0;
+
+    while (1) {
+        my $resp = $self->get($endpoint, \%p, %opts);
+        last unless ref($resp) eq 'HASH';
+
+        push @items, @{ $resp->{items} // [] };
+
+        my $more  = $resp->{more_items_remaining};
+        my $token = $resp->{continuation_token};
+        last unless $more && defined $token && $token ne '';
+
+        # Safety bound: never spin forever if the array keeps echoing a token
+        # with more_items_remaining set. 100k pages is far beyond any real
+        # FlashArray volume count and bounds a misbehaving/looping response.
+        last if ++$page > 100_000;
+
+        $p{continuation_token} = $token;
+    }
+
+    return \@items;
+}
+
 # List volumes matching pattern
 sub volume_list {
     my ($self, $pattern) = @_;
@@ -800,7 +841,8 @@ sub volume_list {
                 $params->{names} = $pattern;
             }
         }
-        $resp = $self->get('volumes', $params);
+        # Follow continuation_token so >1 page of volumes is not truncated.
+        $resp = { items => $self->_get_v2_collection('volumes', $params) };
     } else {
         # API 1.x: use names parameter
         if ($pattern) {
@@ -860,7 +902,8 @@ sub volume_list_destroyed {
                 $params->{names} = $pattern;
             }
         }
-        $resp = $self->get('volumes', $params);
+        # Follow continuation_token so >1 page of volumes is not truncated.
+        $resp = { items => $self->_get_v2_collection('volumes', $params) };
     } else {
         # API 1.x: use names parameter with pending=true
         if ($pattern) {
@@ -1272,7 +1315,9 @@ sub snapshot_list {
         if (@filters) {
             $params->{filter} = join(' and ', @filters);
         }
-        $resp = $self->get('volume-snapshots', $params);
+        # Follow continuation_token: snapshots commonly outnumber volumes and
+        # a single page would truncate list_images()'s snapshot enumeration.
+        $resp = { items => $self->_get_v2_collection('volume-snapshots', $params) };
     } else {
         # API 1.x
         $params->{snap} = 'true';

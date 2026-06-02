@@ -198,6 +198,26 @@ EOF
     printf "${RST}"
 }
 
+warn_inflight_operations() {
+    # Detect storage-affecting operations that may be in flight before we
+    # reload the PVE services (NetApp v0.2.10 parity). `systemctl reload` is a
+    # graceful SIGHUP re-exec and does NOT abort running workers, so this is a
+    # courtesy heads-up rather than a hard block: it gives the operator a brief
+    # window to defer the reload if a long migration/backup is running.
+    local hits
+    hits=$(pgrep -af 'qmrestore|vzdump|qm +(move-disk|move_disk|clone|migrate|importdisk)|pvesm +(alloc|free|import|export|extractconfig)' 2>/dev/null \
+        | grep -Ev 'pgrep|warn_inflight_operations' || true)
+    if [ -n "$hits" ]; then
+        echo ""
+        echo "  [NOTICE] Storage-affecting operations appear to be in flight:"
+        echo "$hits" | sed 's/^/      /'
+        echo "  Reloading PVE services now (graceful SIGHUP — these operations are NOT aborted)."
+        echo "  Press Ctrl-C within 5 seconds to skip and reload later with:"
+        echo "      systemctl reload pvedaemon pvestatd pveproxy"
+        sleep 5
+    fi
+}
+
 reload_pve_services() {
     # PVE services load Perl plugin modules at startup and keep them in
     # memory (shared via COW in forked workers). Installing new .pm files
@@ -330,6 +350,7 @@ case "$1" in
         detect_dangerous_multipath_settings
         detect_stale_pure_devices
         detect_missing_lvm_global_filter
+        warn_inflight_operations
         reload_pve_services
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)

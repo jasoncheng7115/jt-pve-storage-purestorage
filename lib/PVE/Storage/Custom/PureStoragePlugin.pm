@@ -272,6 +272,110 @@ sub _wwid_lock_file {
     return _wwid_lock_dir() . '/' . _safe_storeid($storeid) . '-wwids.lock';
 }
 
+sub _cleanup_lock_file {
+    my ($storeid) = @_;
+    return _wwid_lock_dir() . '/' . _safe_storeid($storeid) . '-cleanup.lock';
+}
+
+# Storage health/monitoring tunables (NetApp v0.2.10 parity). Events are logged
+# via warn() so pvestatd routes them to the journal; filter with
+# `journalctl -t pvestatd | grep pure-storage`. Severity is carried in the
+# message text ([ERROR]/[WARNING]/[INFO]) for monitoring pickup.
+use constant STATUS_FAIL_THRESHOLD => 3;     # consecutive failed polls => outage
+use constant OUTAGE_REEMIT_SECONDS => 30;    # re-emit outage ERROR at most this often
+use constant CAPACITY_WARN_PCT     => 90;
+use constant CAPACITY_CRIT_PCT     => 95;
+use constant CAPACITY_COOLDOWN_SEC => 3600;  # 1h between capacity warnings
+
+sub _health_state_file {
+    my ($storeid) = @_;
+    return _wwid_lock_dir() . '/' . _safe_storeid($storeid) . '-health.json';
+}
+
+sub _read_health_state {
+    my ($storeid) = @_;
+    my $file = _health_state_file($storeid);
+    return {} unless -f $file;
+    open(my $fh, '<', $file) or return {};
+    local $/;
+    my $json = <$fh>;
+    close($fh);
+    my $data = eval { decode_json($json) } // {};
+    return ref($data) eq 'HASH' ? $data : {};
+}
+
+sub _write_health_state {
+    my ($storeid, $state) = @_;
+    my $dir = _wwid_lock_dir();
+    return unless -d $dir;
+    my $file = _health_state_file($storeid);
+    my $tmp = "$file.tmp.$$";
+    open(my $fh, '>', $tmp) or return;
+    print $fh encode_json($state // {});
+    close($fh);
+    rename($tmp, $file) or unlink($tmp);
+}
+
+# Outage detection: count consecutive status() failures and emit an ERROR once
+# the array has missed STATUS_FAIL_THRESHOLD polls in a row, re-emitting at most
+# every OUTAGE_REEMIT_SECONDS while still down. A single transient failure does
+# not alarm.
+sub _record_status_failure {
+    my ($storeid, $reason) = @_;
+    $reason //= 'unknown error';
+    chomp $reason;
+    my $h = _read_health_state($storeid);
+    $h->{fail_count} = ($h->{fail_count} // 0) + 1;
+    my $now = time();
+    if ($h->{fail_count} >= STATUS_FAIL_THRESHOLD) {
+        if (!$h->{down} || ($now - ($h->{last_outage_emit} // 0)) >= OUTAGE_REEMIT_SECONDS) {
+            warn "pure-storage: [ERROR] storage '$storeid' OUTAGE — Pure FlashArray API " .
+                 "unreachable for $h->{fail_count} consecutive status polls. Last error: $reason\n";
+            $h->{last_outage_emit} = $now;
+        }
+        $h->{down} = 1;
+    }
+    _write_health_state($storeid, $h);
+}
+
+# Success path: log recovery if we were down, reset the failure counter, and
+# emit capacity-health warnings at >=90% (WARNING) / >=95% (ERROR) used, each
+# rate-limited to once per CAPACITY_COOLDOWN_SEC.
+sub _record_status_ok {
+    my ($storeid, $total, $used, $is_pod) = @_;
+    my $h = _read_health_state($storeid);
+    if ($h->{down}) {
+        warn "pure-storage: [INFO] storage '$storeid' RECOVERED — Pure FlashArray API reachable again.\n";
+    }
+    $h->{fail_count} = 0;
+    $h->{down}       = 0;
+
+    my $now = time();
+    if ($total && $total > 0) {
+        my $pct   = ($used // 0) / $total * 100;
+        my $scope = $is_pod ? 'pod quota' : 'array';
+        if ($pct >= CAPACITY_CRIT_PCT) {
+            if (($now - ($h->{cap_crit_emit} // 0)) >= CAPACITY_COOLDOWN_SEC) {
+                warn sprintf("pure-storage: [ERROR] storage '%s' capacity CRITICAL — %.1f%% used " .
+                    "(>= %d%%). New allocations may fail; free space or expand the %s.\n",
+                    $storeid, $pct, CAPACITY_CRIT_PCT, $scope);
+                $h->{cap_crit_emit} = $now;
+            }
+        } elsif ($pct >= CAPACITY_WARN_PCT) {
+            if (($now - ($h->{cap_warn_emit} // 0)) >= CAPACITY_COOLDOWN_SEC) {
+                warn sprintf("pure-storage: [WARNING] storage '%s' capacity high — %.1f%% used " .
+                    "(>= %d%% of %s).\n", $storeid, $pct, CAPACITY_WARN_PCT, $scope);
+                $h->{cap_warn_emit} = $now;
+            }
+        } else {
+            # Back below thresholds — clear cooldowns so a future breach warns promptly.
+            delete $h->{cap_crit_emit};
+            delete $h->{cap_warn_emit};
+        }
+    }
+    _write_health_state($storeid, $h);
+}
+
 sub _ensure_wwid_state_dir {
     my $state_dir = _wwid_state_dir();
     my $lock_dir  = _wwid_lock_dir();
@@ -350,13 +454,41 @@ sub _write_wwid_state {
     return 1;
 }
 
+# Orphan reaper safety tunables. The background reaper acts on a point-in-time
+# array snapshot; a single incomplete or racy snapshot must NOT be enough to
+# tear down a live device. Two independent guards (cross-project hardening from
+# the NetApp reaper incident where a freshly-added, in-use LUN was reaped):
+#   - GRACE: never reap a WWID first seen less than this many seconds ago. This
+#     protects a just-added LUN during the window after map/connect but before
+#     qemu opens it, when is_device_in_use() legitimately reports "idle"
+#     (no mount, no holder, no open fd yet).
+#   - MISS THRESHOLD: only reap after the WWID has been observed absent from the
+#     array for this many consecutive cleanup passes (hysteresis), so one
+#     transient/incomplete array response cannot trigger teardown.
+use constant ORPHAN_GRACE_SECONDS  => 600;
+use constant ORPHAN_MISS_THRESHOLD => 3;
+
+# Normalise a tracking-file entry to { first_seen => epoch, miss => N }.
+# Backward compatible: older state files stored a bare epoch timestamp as the
+# value, so a plain scalar is read as first_seen with miss=0.
+sub _wwid_entry {
+    my ($val) = @_;
+    if (ref($val) eq 'HASH') {
+        return {
+            first_seen => $val->{first_seen} // time(),
+            miss       => $val->{miss}       // 0,
+        };
+    }
+    return { first_seen => (defined($val) && $val ? $val + 0 : time()), miss => 0 };
+}
+
 sub _track_wwid {
     my ($storeid, $wwid) = @_;
     return unless $wwid;
     _with_wwid_lock($storeid, sub {
         my $state = _read_wwid_state($storeid);
         return if $state->{lc($wwid)};
-        $state->{lc($wwid)} = time();
+        $state->{lc($wwid)} = { first_seen => time(), miss => 0 };
         _write_wwid_state($storeid, $state);
     });
 }
@@ -370,6 +502,36 @@ sub _untrack_wwid {
             _write_wwid_state($storeid, $state);
         }
     });
+}
+
+# Build the set of WWIDs tracked by OTHER purestorage storages on this node.
+# Phase 3 warns about Pure multipath devices that are neither on THIS storage's
+# array nor in THIS storage's tracking file. On a host with more than one
+# purestorage storage (multiple pods, or multiple arrays) a sibling storage's
+# live device satisfies both "not ours" conditions and would be mis-flagged as
+# a stale orphan, telling the operator to run `multipath -f` on an in-use disk
+# that belongs to a different storage. Our state directory is private to this
+# plugin, so every *-wwids.json in it belongs to a purestorage storage; union
+# the siblings' tracked WWIDs and skip them. (Cross-project parity with
+# jt-pve-storage-netapp v0.2.15.)
+sub _sibling_tracked_wwids {
+    my ($storeid) = @_;
+    my %sib;
+    my $dir = _wwid_state_dir();
+    my $self_file = _wwid_state_file($storeid);
+    for my $file (glob("$dir/*-wwids.json")) {
+        next if $file eq $self_file;
+        my $data = eval {
+            open(my $fh, '<', $file) or return undef;
+            local $/;
+            my $json = <$fh>;
+            close($fh);
+            decode_json($json);
+        };
+        next unless ref($data) eq 'HASH';
+        $sib{lc($_)} = 1 for keys %$data;
+    }
+    return \%sib;
 }
 
 # Cleanup orphaned/stale Pure multipath devices on this node.
@@ -411,20 +573,63 @@ sub _cleanup_orphaned_devices {
     for my $vol (@$volumes) {
         next unless $vol->{name};
         next if $vol->{destroyed};  # already destroyed on the array
-        my $wwid = eval { $api->volume_get_wwid($vol->{name}); };
+        # Derive the WWID from the serial already present in the volume_list
+        # response instead of issuing a per-volume volume_get_wwid() call.
+        # That call was an extra REST round-trip per volume on EVERY pvestatd
+        # poll (~10s); on a storage with hundreds/thousands of volumes it
+        # multiplied background API load and risked hitting Pure's rate limit.
+        # Fall back to the per-volume lookup only when serial is absent.
+        my $wwid = $vol->{serial}
+            ? eval { $api->serial_to_wwid($vol->{serial}); }
+            : undef;
+        $wwid = eval { $api->volume_get_wwid($vol->{name}); } unless $wwid;
         next unless $wwid;
         $alive{lc($wwid)} = 1;
-        eval { _track_wwid($storeid, $wwid); };
     }
 
-    # Phase 2: for each tracked WWID not on the array, clean its local stale
-    # device if any.
-    my $tracked = _read_wwid_state($storeid);
+    # Reconcile the tracking file against this array snapshot in a single
+    # locked read-modify-write: reset the absence counter for every WWID the
+    # array still reports, register newly-seen WWIDs, and increment the
+    # absence counter for tracked WWIDs the array no longer reports. Phase 2
+    # decides what to tear down from this reconciled snapshot. Doing it in one
+    # locked pass also replaces the old per-WWID _track_wwid() loop (one lock
+    # acquisition instead of N).
+    my $tracked = {};
+    _with_wwid_lock($storeid, sub {
+        my $state = _read_wwid_state($storeid);
+        for my $w (keys %$state) {
+            my $e = _wwid_entry($state->{$w});
+            $e->{miss} = $alive{$w} ? 0 : $e->{miss} + 1;
+            $state->{$w} = $e;
+        }
+        for my $w (keys %alive) {
+            $state->{$w} //= { first_seen => time(), miss => 0 };
+        }
+        _write_wwid_state($storeid, $state);
+        %$tracked = %$state;
+    });
+
+    # Phase 2: for each tracked WWID the array no longer has, clean its local
+    # stale device — but only once two independent safety guards agree it is
+    # genuinely orphaned, never on a single absent observation:
+    #   - grace period: skip WWIDs first seen within ORPHAN_GRACE_SECONDS
+    #     (protects a just-added LUN before qemu opens it), and
+    #   - hysteresis: skip until the WWID has been absent from the array for
+    #     ORPHAN_MISS_THRESHOLD consecutive passes (absorbs a transient or
+    #     incomplete array response, e.g. a paginated list returning short).
+    # is_device_in_use() below remains the final gate; these two guards exist
+    # because is_device_in_use() cannot see a LUN that is mapped but not yet
+    # opened by qemu — exactly the just-added case from the NetApp incident.
     for my $wwid (keys %$tracked) {
         next if $alive{$wwid};
+
+        my $entry = _wwid_entry($tracked->{$wwid});
+        next if (time() - $entry->{first_seen}) < ORPHAN_GRACE_SECONDS;
+        next if $entry->{miss} < ORPHAN_MISS_THRESHOLD;
+
         my $mpath = eval { get_multipath_device($wwid); };
         if ($mpath && -b $mpath) {
-            warn "orphan cleanup: stale Pure device $mpath (wwid $wwid) — array no longer has this volume, cleaning up\n";
+            warn "orphan cleanup: stale Pure device $mpath (wwid $wwid) — array no longer has this volume (absent $entry->{miss} consecutive passes), cleaning up\n";
             # Refuse to clean if the stale device is somehow in use — better
             # to leave it for the operator than to disrupt running I/O.
             if (eval { is_device_in_use($mpath) }) {
@@ -456,10 +661,13 @@ sub _cleanup_orphaned_devices {
     # is warned about at most once per hour.
     my $local = eval { list_pure_multipath_devices(); } // [];
     my $cooldown_dir = _wwid_lock_dir();
+    my $sibling = _sibling_tracked_wwids($storeid);
     for my $dev (@$local) {
-        my $w = $dev->{wwid};
+        my $w = lc($dev->{wwid} // '');
+        next unless $w;
         next if $alive{$w};
         next if $tracked->{$w};
+        next if $sibling->{$w};   # owned by another purestorage storage on this host
 
         # Cooldown: skip if warned about this WWID within the last hour.
         my $flag = "$cooldown_dir/orphan-warned-$w";
@@ -1366,6 +1574,7 @@ sub activate_storage {
         if (@$ports) {
             my $probe_timeout = $scfg->{'pure-portal-probe-timeout'} // 2;
             my @logged_in;
+            my @reach_ports;   # port objects we have a usable path to (for HA advisory)
             my @unreachable;
             my @failed;
 
@@ -1386,6 +1595,7 @@ sub activate_storage {
                 my $portal_addr = "$ip:$port_num";
                 if (eval { is_portal_logged_in($portal_addr, $target) }) {
                     push @logged_in, $portal_addr;
+                    push @reach_ports, $port;
                     next;
                 }
 
@@ -1411,6 +1621,7 @@ sub activate_storage {
                     warn "Failed to connect to portal $ip: $err";
                 } else {
                     push @logged_in, $portal_addr;
+                    push @reach_ports, $port;
                 }
             }
 
@@ -1436,6 +1647,40 @@ sub activate_storage {
                     . " ports, or use 'pvesm set <storeid> --nodes <list>' to"
                     . " bind this storage only to nodes that can reach it.";
                 die "$msg\n";
+            }
+
+            # Controller-redundancy advisory (NetApp v0.2.11 parity): if every
+            # reachable iSCSI portal resolves to a SINGLE Pure controller, this
+            # node has no controller-level path redundancy — a controller
+            # failover or reboot drops all paths at once. Pure port names are
+            # "CT0.*" / "CT1.*"; only advise when every reachable portal parsed
+            # to a controller (avoids false positives on unexpected name forms).
+            # Rate-limited to once per 24h via a flag file in /var/run.
+            {
+                my %ctrl;
+                my $parsed = 0;
+                for my $p (@reach_ports) {
+                    if (($p->{name} // '') =~ /^(ct\d+)/i) {
+                        $ctrl{lc($1)} = 1;
+                        $parsed++;
+                    }
+                }
+                if (@reach_ports && $parsed == scalar(@reach_ports) && keys(%ctrl) == 1) {
+                    my ($only) = keys %ctrl;
+                    my $flag = _wwid_lock_dir() . '/single-controller-warned-' . _safe_storeid($storeid);
+                    my $emit = 1;
+                    if (-f $flag) {
+                        $emit = 0 if (time() - (stat($flag))[9]) < 86400;
+                    }
+                    if ($emit) {
+                        warn "pure-storage: [WARNING] storage '$storeid' has reachable iSCSI paths on "
+                            . "only ONE Pure controller (" . uc($only) . ") from this node. There is no "
+                            . "controller-level path redundancy: a controller failover or reboot will "
+                            . "drop all paths at once. Verify cabling/zoning so this node reaches a LIF "
+                            . "on BOTH controllers (CT0 and CT1).\n";
+                        eval { open(my $fh, '>', $flag); close($fh); };
+                    }
+                }
             }
 
             # Rescan for any existing LUNs after iSCSI login
@@ -1564,7 +1809,9 @@ sub status {
     # web UI keeps responding instead of hanging on the API timeout.
     my $api = eval { _get_api($scfg); };
     if (!$api) {
-        warn "Failed to connect to Pure Storage: $@";
+        my $err = $@ || 'API client init failed';
+        warn "Failed to connect to Pure Storage: $err";
+        _record_status_failure($storeid, $err);
         return (0, 0, 0, 0);
     }
 
@@ -1578,9 +1825,14 @@ sub status {
         $cache->{avail}     = $capacity->{available};
     };
     if ($@) {
-        warn "Failed to get storage status: $@";
+        my $err = $@;
+        warn "Failed to get storage status: $err";
+        _record_status_failure($storeid, $err);
         return (0, 0, 0, 0);
     }
+
+    # Outage recovery + capacity-health monitoring (NetApp v0.2.10 parity).
+    _record_status_ok($storeid, $cache->{total}, $cache->{used}, $pod ? 1 : 0);
 
     # Run periodic background cleanup using the double-fork pattern: the
     # intermediate child forks the actual worker (grandchild) and exits
@@ -1590,9 +1842,25 @@ sub status {
     if (defined $intermediate_pid && $intermediate_pid == 0) {
         my $grandchild_pid = fork();
         if (defined $grandchild_pid && $grandchild_pid == 0) {
-            # Grandchild — do the actual cleanup work.
-            eval { _cleanup_orphaned_temp_clones($scfg, $storeid, $api); };
-            eval { _cleanup_orphaned_devices($api, $storeid, $scfg); };
+            # Grandchild — do the actual cleanup work, but only one pass per
+            # storeid at a time. status() forks a cleanup pass on every
+            # pvestatd poll (~10s). On a large array a single pass can exceed
+            # that interval (it walks every tracked WWID and every Pure
+            # multipath device), so without this guard passes would stack:
+            # several concurrent grandchildren all hitting the REST API and
+            # the local block layer, multiplying load and risking API rate
+            # limiting. A non-blocking flock makes overlapping polls skip the
+            # work instead of piling on. The lock auto-releases when this
+            # process exits (even on crash), so it can never wedge.
+            my $got_lock = 0;
+            my $lock_fh;
+            if (open($lock_fh, '>', _cleanup_lock_file($storeid))) {
+                $got_lock = flock($lock_fh, LOCK_EX | LOCK_NB);
+            }
+            if ($got_lock) {
+                eval { _cleanup_orphaned_temp_clones($scfg, $storeid, $api); };
+                eval { _cleanup_orphaned_devices($api, $storeid, $scfg); };
+            }
             POSIX::_exit(0);
         }
         # Intermediate exits immediately, leaving grandchild orphaned.

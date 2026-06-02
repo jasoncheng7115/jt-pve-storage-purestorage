@@ -8,6 +8,55 @@
 
 ---
 
+## [1.1.19] - 2026-05-29
+
+規模化與孤兒清理安全性釋出。處理大量 Volume（超過 1000）情境下的行為,
+並強化背景孤兒清理,避免誤清正在使用中的 LUN；另外移植數項來自姊妹
+NetApp 外掛的監控功能。
+
+### 高——Volume／Snapshot 列舉不再只取第一頁
+
+`volume_list()`、`volume_list_destroyed()` 與 `snapshot_list()` 現在會
+依 API 2.x 的 `continuation_token` 逐頁抓取。Pure FlashArray REST 2.x 對
+每次集合 GET 都有單頁上限（預設約 1000 筆）,並以 `more_items_remaining`
+加 `continuation_token` 表示尚有後續頁。先前的程式只讀第一頁,因此當某
+storage 的 Volume 或 Snapshot 超過一頁時會被靜默截斷:`list_images()`
+會讓 Proxmox VE Web UI 看不到部分磁碟,孤兒清理也看不到後段 Volume
+(進而可能被誤判為殘留)。API 1.x 不受影響。新增 `API::_get_v2_collection()`
+協助函式負責逐頁走訪。
+
+### 高——孤兒清理強化（絕不清掉使用中的 LUN）
+
+- **移除每次輪詢的 API 負載。**`_cleanup_orphaned_devices()` 的 Phase 1
+  現在直接從 `volume_list()` 回應中已帶有的 `serial` 推導 WWID,不再對每
+  顆 Volume 於每次 `pvestatd` 輪詢（約 10 秒）多打一次 `volume_get_wwid()`
+  REST 呼叫。在大型 storage 上,這消除了會隨 Volume 數量線性成長、且可能
+  觸發陣列 API 速率限制的每輪呼叫爆量。
+- **背景清理序列化。**以 per-storeid 的非阻塞 `flock`,避免單次清理在大型
+  陣列上超過 10 秒輪詢間隔時、多個清理行程互相堆疊。
+- **寬限期加缺席遲滯。**首次追蹤未滿 600 秒的 WWID 一律不清（保護剛加入、
+  qemu 尚未開啟的 LUN——此時使用中檢查理應回報為閒置）,且 WWID 必須連續
+  3 次清理輪詢都不在陣列上才會拆除。這可吸收單次短暫或不完整的陣列回應。
+  此為跨專案強化,源自 NetApp 端「剛加入、使用中的 LUN 被清掉」的事故。
+- **修正跨 storage 誤判。**當一台主機上有多個 purestorage storage(多個
+  pod 或多個陣列)時,Phase 3 以往會把另一個 storage 的使用中裝置當成殘
+  留孤兒、並建議對它執行 `multipath -f`。Phase 3 現在會聯集本節點上其他
+  purestorage storage 已追蹤的 WWID 並略過它們。(對應 NetApp v0.2.15。)
+
+### 中——監控功能新增(對應 NetApp v0.2.10／v0.2.11)
+
+- **停機偵測:**`status()` 在連續 3 次輪詢失敗後記錄一筆 ERROR(停機期間
+  最多每 30 秒重發一次),恢復時記錄 INFO,於 journal 以 `pure-storage:`
+  標記供監控擷取。
+- **容量健康:**使用率達 90%（WARNING）與 95%（ERROR）時警告,每小時一次。
+- **控制器冗餘:**`activate_storage()` 在所有可達的 iSCSI portal 都落在
+  單一 Pure 控制器時(無控制器層級的路徑冗餘),每 24 小時警告一次。
+- **postinst 進行中操作寬限:**偵測進行中的 `qmrestore`／`vzdump`／`qm
+  move-disk`／`clone`／`migrate`／`pvesm` 操作,於重新載入服務(優雅
+  SIGHUP)前印出 NOTICE 並提供 5 秒寬限。
+
+---
+
 ## [1.1.18] - 2026-05-14
 
 ### 中——Snapshot 砍前先 tombstone rename（與 v1.1.15 Volume 端的修法相對應）

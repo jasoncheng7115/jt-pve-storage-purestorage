@@ -1,3 +1,77 @@
+jt-pve-storage-purestorage (1.1.19-1) stable; urgency=medium
+
+  * [HIGH] volume_list(), volume_list_destroyed() and snapshot_list()
+    now follow the API 2.x continuation_token across pages. Pure
+    FlashArray REST 2.x caps each GET on a collection endpoint at a
+    server page (default ~1000 items) and signals further pages via
+    more_items_remaining + continuation_token. The previous code read
+    only the first page, so a storage with more than one page of
+    volumes or snapshots silently truncated: list_images() hid disks
+    from the Proxmox VE web UI and orphan cleanup never saw the tail
+    volumes. New API::_get_v2_collection() helper walks all pages
+    (bounded by a 100k-page safety stop). API 1.x is unaffected
+    (it returns the full set in one response). host_get_volumes()
+    is intentionally left single-page: it backs an emptiness gate
+    (logout iSCSI sessions only when no volumes remain), where a
+    truncated-but-non-empty page yields the same decision.
+  * [MEDIUM] Background orphan cleanup no longer issues one extra
+    volume_get_wwid() REST call per volume on every pvestatd poll
+    (~10s). _cleanup_orphaned_devices() Phase 1 now derives the WWID
+    from the serial already present in the volume_list() response
+    (API::serial_to_wwid), falling back to the per-volume lookup only
+    when serial is absent. On a storage with hundreds/thousands of
+    volumes this removes a per-poll burst of N REST calls that scaled
+    with volume count and could hit Pure's API rate limit.
+  * [MEDIUM] Background cleanup is now serialised per storeid with a
+    non-blocking flock. status() forks a cleanup pass on every
+    pvestatd poll; on a large array a single pass can exceed the 10s
+    poll interval, so passes would stack into multiple concurrent
+    grandchildren all hitting the REST API and local block layer.
+    Overlapping polls now skip the work instead of piling on. The
+    lock auto-releases on process exit, so it cannot wedge.
+  * [HIGH] Orphan reaper no longer reaps a device on a single
+    absent observation. Two independent guards were added to
+    _cleanup_orphaned_devices(): a grace period (a WWID first seen
+    less than 600s ago is never reaped, protecting a just-added LUN
+    during the window after map/connect but before qemu opens it,
+    when is_device_in_use() legitimately reports idle), and absence
+    hysteresis (a WWID must be reported absent from the array for 3
+    consecutive cleanup passes before teardown). The tracking-file
+    entry schema gained a per-WWID absence counter; older files
+    storing a bare timestamp are read transparently. Cross-project
+    hardening from a jt-pve-storage-netapp incident where a
+    freshly-added, in-use LUN was reaped.
+  * [HIGH] Orphan reaper no longer mis-flags a second purestorage
+    storage's live device as a stale orphan. Phase 3's warning
+    compared host-wide Pure multipath devices against ONE storage's
+    tracking; on a host with multiple purestorage storages (multiple
+    pods or arrays) a sibling storage's in-use device satisfied
+    "not on this array and not tracked here" and prompted the
+    operator to run `multipath -f` on a different storage's disk.
+    Phase 3 now unions the WWIDs tracked by every other purestorage
+    storage on the node and skips them. (Parity with
+    jt-pve-storage-netapp v0.2.15.)
+  * [MEDIUM] status() now performs outage detection and capacity
+    health monitoring. After STATUS_FAIL_THRESHOLD (3) consecutive
+    failed polls it logs a single outage ERROR (re-emitted at most
+    every 30s while down) and an INFO on recovery; it warns at
+    >=90% (WARNING) and >=95% (ERROR) capacity used, rate-limited to
+    once per hour. Events are logged via the journal with a
+    `pure-storage:` tag for monitoring pickup. (Parity with
+    jt-pve-storage-netapp v0.2.10.)
+  * [MEDIUM] activate_storage() warns (once per 24h) when every
+    reachable iSCSI portal resolves to a single Pure controller
+    (CT0/CT1), i.e. this node has no controller-level path
+    redundancy. (Parity with jt-pve-storage-netapp v0.2.11.)
+  * [LOW] postinst now detects storage-affecting operations in
+    flight (qmrestore, vzdump, qm move-disk/clone/migrate,
+    pvesm alloc/free/import/export) before reloading PVE services
+    and prints a NOTICE with a 5s grace window. The reload is a
+    graceful SIGHUP and does not abort the operations. (Parity with
+    jt-pve-storage-netapp v0.2.10.)
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 29 May 2026 10:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.18-1) stable; urgency=medium
 
   * [MEDIUM] snapshot_delete() now pre-renames the snapshot to a

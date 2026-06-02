@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.18 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.19 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.18-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.19-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.18-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.19-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.19 <span class="changelog-tag changelog-tag--critical">High</span></div>
+        <div class="changelog-date">2026-05-29</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Listing past 1000 volumes (HIGH):</strong> <code>volume_list()</code>, <code>volume_list_destroyed()</code> and <code>snapshot_list()</code> now follow the API 2.x <code>continuation_token</code> across all pages. Pure REST 2.x caps each collection GET at a server page (~1000 items); the old code read only the first page, so a storage with more than one page of volumes/snapshots silently truncated — <code>list_images()</code> hid disks from the web UI and the orphan reaper missed tail volumes. New <code>API::_get_v2_collection()</code> helper. <strong>Orphan reaper hardening (HIGH):</strong> Phase 1 now derives each WWID from the <code>serial</code> already in the <code>volume_list()</code> response instead of one extra REST call per volume on every poll; background cleanup is serialised with a per-storeid <code>flock</code>; and a device is only reaped after a 600s grace period AND 3 consecutive absent passes, so a freshly-added, in-use LUN can never be torn down on a single bad array snapshot (cross-project fix from a NetApp incident). Phase 3 no longer mis-flags a second purestorage storage's live device as orphaned. <strong>Monitoring (MEDIUM):</strong> <code>status()</code> outage detection (ERROR after 3 failed polls, INFO on recovery) and capacity health warnings at 90%/95%; single-controller iSCSI redundancy advisory; postinst in-flight-operation grace before service reload.</span>
+            <span class="lang-zh"><strong>超過 1000 顆 Volume 的列舉（高）：</strong><code>volume_list()</code>、<code>volume_list_destroyed()</code> 與 <code>snapshot_list()</code> 現在會依 API 2.x 的 <code>continuation_token</code> 逐頁抓取。Pure REST 2.x 每次集合 GET 都有單頁上限（約 1000 筆）；舊程式只讀第一頁，因此 Volume／Snapshot 超過一頁的 storage 會被靜默截斷——<code>list_images()</code> 讓 Web UI 看不到部分磁碟，孤兒清理也漏看後段 Volume。新增 <code>API::_get_v2_collection()</code> 協助函式。<strong>孤兒清理強化（高）：</strong>Phase 1 改用 <code>volume_list()</code> 回應已帶的 <code>serial</code> 推導 WWID，不再每次輪詢對每顆 Volume 多打一次 REST；背景清理以 per-storeid <code>flock</code> 序列化；裝置必須通過 600 秒寬限期「且」連續 3 次缺席才會被清，因此剛加入、使用中的 LUN 絕不會因單次錯誤的陣列快照被拆除（源自 NetApp 事故的跨專案修正）。Phase 3 也不再把另一個 purestorage storage 的使用中裝置誤判為孤兒。<strong>監控（中）：</strong><code>status()</code> 停機偵測（連 3 次失敗記 ERROR、恢復記 INFO）與 90%／95% 容量健康警告；單一控制器 iSCSI 冗餘提醒；postinst 在重新載入服務前對進行中操作給予寬限。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.18 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
