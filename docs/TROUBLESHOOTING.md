@@ -222,9 +222,11 @@ a kernel D-state hang in the cleanup background fork.
 1. Check `ps -eo state,pid,cmd | grep '^D'`. If you see processes in D
    state, you have a wedged device — see "Stale multipath devices" above.
 2. Check API reachability with `curl` (see issue #1).
-3. The plugin's worst-case `pvesm status` time is ~35 seconds (15s × 2
-   API retries). If it takes longer, something is hanging in the
-   background fork that should not block the parent.
+3. On the health path (`activate_storage` + foreground of `status`) the
+   plugin uses a short-timeout, single-attempt client, so a healthy poll
+   is bounded by `pure-status-timeout` (default 5s). If `pvesm status`
+   takes much longer, something is hanging in the background fork that
+   should not block the parent.
 
 ### 10. Plugin warns about "DANGEROUS MULTIPATH SETTINGS"
 
@@ -261,6 +263,56 @@ from the safety rules above for each listed device.
 
 After cleanup, the next `pvesm status pure1` orphan-cleanup pass will
 keep them gone automatically.
+
+### 12. Storage flaps to `inactive` on a busy but healthy array
+
+**Symptom:** A storage intermittently shows `inactive` in the Web UI and
+recovers on the next poll, with no array outage. Often appears after a
+firmware upgrade that makes the array's management gateway more
+load-sensitive, or as the cluster grows.
+
+**Cause:** The management REST endpoint is slow under the cluster's steady
+polling load, so a health-path call exceeds `pure-status-timeout`. This is
+load, not an outage — disabling the storage cluster-wide makes the array's
+management REST get fast again (a backlog draining, e.g. `curl` time_total
+falling 19s → 14s → ... → 0.4s).
+
+**Solutions:**
+
+1. Running VMs are unaffected — devices stay mapped; only the status poll
+   failed. The storage recovers on the next poll.
+2. If it is frequent, raise `pure-status-timeout` (e.g. to 10s) so a slow
+   poll succeeds instead of failing — but first reduce the load: confirm
+   you are on this version (HTTP keep-alive + no per-poll N+1 REST calls).
+3. Count the steady-state REST calls per poll. A storage plugin's
+   steady-state management-plane load should be a handful of calls per
+   poll; tens of calls/second (objects × nodes × 1/10s) is a design bug.
+
+### 13. New plugin code is not active after an upgrade
+
+**Symptom:** You installed a new `.deb`, postinst reported success, but the
+behaviour is unchanged — a fix appears to have no effect.
+
+**Cause:** The package uses `systemctl reload` (SIGHUP) to avoid the
+stop-phase hang on D-state children, but on many PVE versions reload does
+NOT reload the plugin's Perl modules. `pvestatd` keeps running the OLD code
+from memory even though the new files are on disk.
+
+**Solution:** After any plugin upgrade, restart `pvestatd` on **every**
+cluster node:
+
+```
+systemctl restart pvestatd
+```
+
+Verify the restart took effect — the MainPID must change:
+
+```
+systemctl show -p MainPID pvestatd     # run before and after; PID MUST change
+```
+
+`pvedaemon` and `pveproxy` similarly load plugin code; restart them too if a
+Web UI / API path still shows stale behaviour.
 
 ## Diagnostic Commands
 

@@ -208,8 +208,10 @@ multipath 裝置造成 kernel D-state hang。
 1. 檢查 `ps -eo state,pid,cmd | grep '^D'`。若看到 D state 行程，
    代表你有 wedged 裝置 — 參考上方「殘留 multipath 裝置」。
 2. 用 `curl` 檢查 API 可達性 （參考問題 1）。
-3. 外掛的 `pvesm status` 最差情況是約 35 秒 (15s × 2 API retries）。
-   若超過，代表 background fork 中有東西 hang 住，而它不應該擋住父行程。
+3. 健康路徑（`activate_storage` 與 `status` 前景）採用短逾時、單次嘗試的
+   用戶端，因此健康輪詢受 `pure-status-timeout`（預設 5 秒）所限。若
+   `pvesm status` 遠超過此值，代表 background fork 中有東西 hang 住，而它
+   不應該擋住父行程。
 
 ### 10. 外掛警告 "DANGEROUS MULTIPATH SETTINGS"
 
@@ -244,6 +246,48 @@ defaults {
 
 清理之後，下次 `pvesm status pure1` 的 orphan 清理會自動防止它們再次
 出現。
+
+### 12. 繁忙但健康的陣列上 storage 閃爍為 `inactive`
+
+**症狀：** storage 在 Web UI 中間歇顯示 `inactive`，下次輪詢又恢復，且陣列
+並無故障。常見於讓陣列管理閘道更敏感於負載的韌體升級之後，或叢集規模變大時。
+
+**原因：** 管理 REST 端點在叢集穩態輪詢負載下變慢，導致健康路徑呼叫超過
+`pure-status-timeout`。這是負載問題而非故障——把該 storage 在整個叢集停用後，
+陣列的管理 REST 會重新變快（積壓正在排空，例如 `curl` 的 time_total 由
+19 秒 → 14 秒 → … → 0.4 秒）。
+
+**解法：**
+
+1. 執行中的 VM 不受影響——裝置維持對應，只是該次狀態輪詢失敗，下次輪詢即恢復。
+2. 若頻繁發生，可調高 `pure-status-timeout`（例如 10 秒），讓緩慢的輪詢成功
+   而非失敗——但請先降低負載：確認已升級到本版本（HTTP keep-alive 與移除
+   每次輪詢的 N+1 REST 呼叫）。
+3. 計算每次輪詢的 REST 呼叫數。storage 外掛的穩態管理平面負載應為每次輪詢
+   數個呼叫；若達每秒數十次（物件數 × 節點數 × 1/10 秒）即為設計問題。
+
+### 13. 升級後新的外掛程式碼未生效
+
+**症狀：** 你安裝了新的 `.deb`，postinst 回報成功，但行為未變——修正彷彿沒有作用。
+
+**原因：** 本套件使用 `systemctl reload`（SIGHUP）以避免 stop 階段卡在 D-state
+子行程，但在許多 PVE 版本上 reload 並不會重新載入外掛的 Perl 模組。`pvestatd`
+仍從記憶體執行舊程式碼，即使磁碟上已是新檔案。
+
+**解法：** 任何外掛升級後，請在叢集的每個節點重新啟動 `pvestatd`：
+
+```
+systemctl restart pvestatd
+```
+
+驗證重新啟動已生效——MainPID 必須變更：
+
+```
+systemctl show -p MainPID pvestatd     # 前後各執行一次；PID 必須改變
+```
+
+`pvedaemon` 與 `pveproxy` 同樣會載入外掛程式碼；若 Web UI／API 路徑仍出現舊行為，
+也一併重新啟動。
 
 ## 診斷指令
 

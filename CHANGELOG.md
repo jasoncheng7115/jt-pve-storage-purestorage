@@ -8,6 +8,67 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.21] - 2026-06-16
+
+Management-plane load and pvestatd-isolation release. Reduces the steady-state
+REST load the plugin places on the FlashArray management gateway and prevents a
+single slow or degraded array from starving sibling storages on the same node.
+Ported from sibling-pattern fixes in the related NetApp plugin.
+
+### HIGH — Isolate the pvestatd health path from a slow array
+
+`activate_storage()` and the foreground of `status()` now use a short-timeout,
+single-attempt REST client instead of the resilient data-path client (15s x 2
+retries, ~34s worst case). PVE processes storages sequentially every ~10s, so a
+slow or degraded array previously backed up the whole pvestatd cycle and starved
+sibling storages on the same node into `inactive`. New option
+`pure-status-timeout` (default 5s, range 2-60). Dropping per-call retries on
+this path costs nothing — the next poll is the retry. The data path
+(alloc/free/clone) and the background orphan reaper keep the resilient client.
+On a heavily-loaded-but-healthy array, status may briefly show `inactive` and
+recover on the next poll; running VMs are unaffected (devices stay mapped).
+
+### HIGH — HTTP keep-alive on the REST client
+
+The `LWP::UserAgent` now reuses one TCP+TLS connection across calls
+(`keep_alive => 1`) instead of opening a fresh connection and full TLS handshake
+per request. Under steady pvestatd polling (every ~10s on every cluster node,
+plus the background reaper) this materially reduces the connection churn the
+array's management gateway must absorb. A stale kept-alive socket after a
+controller failover fails one request and LWP transparently reconnects, bounded
+by the (short, on the health path) timeout.
+
+### MEDIUM — Bounded iSCSI activate discover/login loop
+
+The per-portal timeouts (probe 2s, discovery 30s, login 60s) bound each portal
+but not the loop total, so several reachable-but-hanging LIFs could still stall
+pvestatd. New option `pure-activate-deadline` (default 30s, 0 disables): once the
+budget is spent **and** at least one portal is logged in, the remaining portals
+are deferred to a later activation. The budget never applies while zero paths are
+up (the storage must get at least one path or fail honestly) and never interrupts
+an in-progress login, so a slow-but-reachable storage is never marked inactive.
+The iSCSI session list is now snapshotted once before the loop instead of being
+queried per portal.
+
+### LOW — Remove per-volume REST call from the temp-clone reaper
+
+`_cleanup_orphaned_temp_clones()` (which runs from the `status()` background
+reaper on every poll) now computes each temp clone's WWID locally via
+`serial_to_wwid()` from the serial already present in the `volume_list()`
+response, instead of issuing a per-volume `volume_get_wwid()` REST call. This
+matches the optimisation the orphan reaper already uses.
+
+### LOW — postinst upgrade warning to restart pvestatd
+
+After an upgrade, postinst now prints a prominent warning that the operator must
+run `systemctl restart pvestatd` on **every** cluster node to activate the new
+plugin code. The package intentionally uses `systemctl reload` (SIGHUP) to avoid
+the stop-phase hang on D-state children, but on many PVE versions reload does not
+reload Perl modules, so pvestatd can keep running stale code. The warning shows
+how to verify the `MainPID` changed.
+
+---
+
 ## [1.1.20] - 2026-05-29
 
 Proxmox VE 9.2 compatibility release.

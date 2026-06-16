@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.20-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.21-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -305,7 +305,7 @@ QEMU block device               passed to qemu           (raw, no FS layer
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.20-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.21-1_all.deb
 ```
 
 > ⚠ 首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件
@@ -483,6 +483,8 @@ PVE 本身擋下。
 | `pure-device-timeout` | 否 | 60 | 裝置探索逾時秒數 |
 | `pure-portal-probe-timeout` | 否 | 2 | iscsiadm 之前對每個 portal 的 TCP 預探測逾時秒數，設為 0 停用 |
 | `pure-config-backup-timeout` | 否 | 15 | 輔助 config-backup Volume 等 multipath device 的逾時秒數（5..60）。非必要功能；降級 fabric 下調低能更快返回 |
+| `pure-status-timeout` | 否 | 5 | pvestatd 健康路徑（`activate_storage` 與 `status` 前景）REST 呼叫的逾時秒數（2..60）。短逾時、單次嘗試，讓緩慢陣列快速失敗，而非把同節點其他 storage 拖成 `inactive`；下次輪詢即為重試。資料路徑與背景回收仍用耐用用戶端 |
+| `pure-activate-deadline` | 否 | 30 | `activate_storage` 中 iSCSI portal 探索／登入迴圈的累積時間預算秒數（0..300）。用盡且至少一條路徑已建立後，其餘 portal 延後至後續啟用處理。尚無任何路徑時不套用。設為 0 停用 |
 | `pure-pod` | 否 | - | Pod 名稱（見「容量與權限隔離」一節）。設定後容量回報以 Pod 配額為準，所有 Volume 名稱進入 Pod 命名空間 |
 | `content` | 是 | - | 內容類型：`images`、`rootdir` |
 | `nodes` | 否 | （全部） | 此 storage 開放給哪些叢集節點，逗號分隔。省略代表全部節點。PVE 通用 Storage 屬性 |

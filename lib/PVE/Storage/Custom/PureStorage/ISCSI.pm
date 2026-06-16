@@ -336,9 +336,12 @@ sub is_target_logged_in {
 # This is the correct check before logging in to a Pure Storage iSCSI portal,
 # because all Pure controller LIFs serving the same target share one IQN.
 sub is_portal_logged_in {
-    my ($portal_addr, $target) = @_;
+    my ($portal_addr, $target, $sessions) = @_;
 
-    my $sessions = get_sessions();
+    # Accept a pre-fetched session list so a caller iterating many portals
+    # can snapshot `iscsiadm -m session` ONCE before the loop instead of
+    # shelling out per portal (each call is an unbounded external command).
+    $sessions //= get_sessions();
     for my $session (@$sessions) {
         next unless $session->{target} eq $target;
         # iscsiadm -m session reports portal as "ip:port,tpgt"; strip the

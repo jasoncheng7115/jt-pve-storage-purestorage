@@ -8,6 +8,58 @@
 
 ---
 
+## [1.1.21] - 2026-06-16
+
+管理平面負載與 pvestatd 隔離釋出。降低外掛對 FlashArray 管理閘道造成的穩態
+REST 負載，並避免單一緩慢或劣化的陣列拖垮同節點上的其他 storage。本次修正
+自相關 NetApp 外掛的同型樣式（sibling-pattern）移植而來。
+
+### 高——將 pvestatd 健康路徑與緩慢陣列隔離
+
+`activate_storage()` 與 `status()` 的前景現在改用短逾時、單次嘗試的 REST
+用戶端，取代原本耐用的資料路徑用戶端（15 秒 × 2 次重試，最壞約 34 秒）。PVE
+每約 10 秒會循序輪詢各 storage，因此緩慢或劣化的陣列先前會拖累整個 pvestatd
+週期，把同節點上的其他 storage 拖成 `inactive`。新增選項 `pure-status-timeout`
+（預設 5 秒，範圍 2 至 60）。在此路徑上取消每次呼叫的重試不會有任何損失——
+下一次輪詢本身就是重試。資料路徑（配置／釋放／複製）與背景殘留回收仍維持
+耐用用戶端。在負載很重但健康的陣列上，狀態可能短暫顯示 `inactive` 並於下次
+輪詢恢復；執行中的 VM 不受影響（裝置維持對應）。
+
+### 高——REST 用戶端啟用 HTTP keep-alive
+
+`LWP::UserAgent` 現在會跨呼叫重複使用同一條 TCP+TLS 連線
+（`keep_alive => 1`），而非每次請求都重開連線與完整 TLS 交握。在穩態
+pvestatd 輪詢下（每個叢集節點每約 10 秒一次，外加背景回收），這明顯降低
+陣列管理閘道需吸收的連線抖動。控制器故障切換後若有失效的 keep-alive 連線，
+只會讓單一請求失敗，LWP 會透明重連，並受（健康路徑上的短）逾時所限。
+
+### 中——限制 iSCSI 啟用的探索／登入迴圈總時間
+
+每個 portal 的逾時（探測 2 秒、探索 30 秒、登入 60 秒）只能限制單一 portal，
+無法限制整個迴圈的時間，因此數個可達但卡住的 LIF 仍可能拖住 pvestatd。新增
+選項 `pure-activate-deadline`（預設 30 秒，設 0 可停用）：一旦時間預算用盡
+且至少有一個 portal 已登入，其餘 portal 便延後至後續啟用再處理。當尚無任何
+路徑時不會套用此預算（storage 必須取得至少一條路徑，否則據實失敗），且不會
+中斷進行中的登入，因此緩慢但可達的 storage 不會被標記為 inactive。iSCSI
+session 清單現在於迴圈前一次性快照，不再逐 portal 查詢。
+
+### 低——移除暫存複製回收中的逐 Volume REST 呼叫
+
+`_cleanup_orphaned_temp_clones()`（每次輪詢都會由 `status()` 背景回收執行）
+現在改用 `serial_to_wwid()`，從 `volume_list()` 回應中已含的 serial 在本地
+計算每個暫存複製的 WWID，而非逐 Volume 發出 `volume_get_wwid()` REST 呼叫。
+這與殘留回收已採用的最佳化一致。
+
+### 低——postinst 升級後提示重新啟動 pvestatd
+
+升級後，postinst 現在會顯示醒目警告，提示操作者必須在叢集的每個節點執行
+`systemctl restart pvestatd` 以啟用新的外掛程式碼。本套件刻意使用
+`systemctl reload`（SIGHUP）以避免 stop 階段卡在 D-state 子行程，但在許多
+PVE 版本上 reload 並不會重新載入 Perl 模組，因此 pvestatd 可能仍執行舊程式碼。
+該警告也說明如何驗證 `MainPID` 已變更。
+
+---
+
 ## [1.1.20] - 2026-05-29
 
 Proxmox VE 9.2 相容性釋出。

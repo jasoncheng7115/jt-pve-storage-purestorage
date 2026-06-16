@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.20-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.21-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -319,7 +319,7 @@ QEMU block device               passed to qemu           (raw, no FS layer
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.20-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.21-1_all.deb
 ```
 
 > ⚠ Avoid `dpkg -i` for the first install: it does **not** auto-install
@@ -507,6 +507,8 @@ amending the `nodes` line, or by re-creating the entry.
 | `pure-device-timeout` | No | 60 | Device discovery timeout in seconds |
 | `pure-portal-probe-timeout` | No | 2 | TCP pre-check timeout per portal before iscsiadm. Set to 0 to disable. |
 | `pure-config-backup-timeout` | No | 15 | Timeout (s, 5..60) for the auxiliary config-backup volume's multipath device wait. Non-critical; lower values exit faster on degraded fabric. |
+| `pure-status-timeout` | No | 5 | Timeout (s, 2..60) for REST calls on the pvestatd health path (`activate_storage` + foreground of `status`). Short, single-attempt so a slow array fails fast instead of starving sibling storages into `inactive`; the next poll is the retry. The data path and background reaper keep the resilient client. |
+| `pure-activate-deadline` | No | 30 | Cumulative wall-clock budget (s, 0..300) for the iSCSI portal discover/login loop in `activate_storage`. Once spent and at least one path is up, remaining portals are deferred to a later activation. Never applies while zero paths are up. Set to 0 to disable. |
 | `pure-pod` | No | - | Pod name (see Capacity and Permission Isolation). Sets capacity reporting to the Pod's quota and namespaces all Volume names. |
 | `content` | Yes | - | Content types: `images`, `rootdir` |
 | `nodes` | No | (all) | Comma-separated list of cluster nodes where this storage is offered. Omit to make it available everywhere. Standard PVE storage attribute. |

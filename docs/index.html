@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.20 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.21 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.20-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.21-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.20-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.21-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.21 <span class="changelog-tag changelog-tag--critical">High</span></div>
+        <div class="changelog-date">2026-06-16</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>pvestatd isolation from a slow array (HIGH):</strong> <code>activate_storage()</code> and the foreground of <code>status()</code> now use a short-timeout, single-attempt REST client (new option <code>pure-status-timeout</code>, default 5s) instead of the resilient data-path client (15s x 2 retries). PVE polls storages sequentially every ~10s, so a slow or degraded array previously backed up the whole pvestatd cycle and starved sibling storages on the same node into <code>inactive</code>; the next poll is the retry. <strong>HTTP keep-alive (HIGH):</strong> the REST client now reuses one TCP+TLS connection (<code>keep_alive =&gt; 1</code>) instead of a fresh handshake per call, cutting the steady-state load on the array's management gateway. <strong>Bounded iSCSI activate loop (MEDIUM):</strong> new option <code>pure-activate-deadline</code> (default 30s) caps the cumulative discover/login time — once spent and at least one path is up, remaining portals defer to a later activation (never while zero paths are up, never mid-login); the session list is snapshotted once before the loop. <strong>temp-clone reaper N+1 removed (LOW)</strong> and <strong>postinst upgrade warning (LOW):</strong> after an upgrade postinst now tells the operator to <code>systemctl restart pvestatd</code> on every node (SIGHUP reload does not reload Perl modules on many PVE versions). Ported from sibling-pattern fixes in the related NetApp plugin.</span>
+            <span class="lang-zh"><strong>pvestatd 與緩慢陣列隔離（高）：</strong><code>activate_storage()</code> 與 <code>status()</code> 前景改用短逾時、單次嘗試的 REST 用戶端（新增選項 <code>pure-status-timeout</code>，預設 5 秒），取代耐用的資料路徑用戶端（15 秒 × 2 次重試）。PVE 每約 10 秒循序輪詢各 storage，因此緩慢或劣化的陣列先前會拖累整個 pvestatd 週期，把同節點其他 storage 拖成 <code>inactive</code>；下次輪詢即為重試。<strong>HTTP keep-alive（高）：</strong>REST 用戶端現在重複使用同一條 TCP+TLS 連線（<code>keep_alive =&gt; 1</code>），不再每次呼叫重開交握，降低對陣列管理閘道的穩態負載。<strong>限制 iSCSI 啟用迴圈（中）：</strong>新增選項 <code>pure-activate-deadline</code>（預設 30 秒）限制探索／登入的累積時間——用盡且至少一條路徑已建立後，其餘 portal 延後至後續啟用（尚無路徑時不套用、不中斷進行中的登入）；session 清單於迴圈前一次性快照。<strong>移除暫存複製回收的 N+1（低）</strong>與 <strong>postinst 升級警告（低）：</strong>升級後 postinst 會提示在每個節點執行 <code>systemctl restart pvestatd</code>（許多 PVE 版本上 SIGHUP reload 不會重新載入 Perl 模組）。本次修正自相關 NetApp 外掛的同型樣式移植而來。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.20 <span class="changelog-tag changelog-tag--fix">Fix</span></div>

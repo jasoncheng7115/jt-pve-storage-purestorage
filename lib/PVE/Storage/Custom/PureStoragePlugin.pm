@@ -189,6 +189,42 @@ sub properties {
             maximum => 60,
             default => 15,
         },
+        'pure-status-timeout' => {
+            description => "Timeout in seconds for REST calls on the pvestatd"
+                . " health path (activate_storage + the foreground of status)."
+                . " This path is polled every ~10s and PVE processes storages"
+                . " sequentially, so a slow array would otherwise back up the"
+                . " whole pvestatd cycle and starve sibling storages on the"
+                . " same node into 'inactive'. The health client makes a"
+                . " single attempt (no retries) — the next poll IS the retry,"
+                . " so dropping per-call retries costs nothing. The data path"
+                . " (alloc/free/clone) and the background reaper keep the"
+                . " resilient client. On a heavily-loaded-but-healthy array"
+                . " status may briefly show 'inactive' and recover next poll;"
+                . " running VMs are unaffected (devices stay mapped). Raise"
+                . " this on slow/high-latency management networks.",
+            type => 'integer',
+            minimum => 2,
+            maximum => 60,
+            default => 5,
+        },
+        'pure-activate-deadline' => {
+            description => "Cumulative wall-clock budget in seconds for the"
+                . " iSCSI portal discover/login loop in activate_storage."
+                . " Per-portal timeouts (probe/discovery/login) bound each"
+                . " portal but NOT the loop total; several reachable-but-"
+                . "hanging LIFs can still stall pvestatd. Once the budget is"
+                . " spent AND at least one portal is already logged in, the"
+                . " remaining portals are deferred to a later activation. The"
+                . " budget is never enforced while zero paths are up (we must"
+                . " get >=1 path or fail honestly) and never interrupts an"
+                . " in-progress login, so it cannot mark a slow-but-reachable"
+                . " storage inactive. Set to 0 to disable the budget.",
+            type => 'integer',
+            minimum => 0,
+            maximum => 300,
+            default => 30,
+        },
         'pure-pod' => {
             description => "Pod name for ActiveCluster configurations. Required when File service is enabled.",
             type => 'string',
@@ -210,6 +246,8 @@ sub options {
         'pure-device-timeout' => { optional => 1 },
         'pure-portal-probe-timeout' => { optional => 1 },
         'pure-config-backup-timeout' => { optional => 1 },
+        'pure-status-timeout' => { optional => 1 },
+        'pure-activate-deadline' => { optional => 1 },
         'pure-pod'           => { optional => 1 },
         nodes                => { optional => 1 },
         disable              => { optional => 1 },
@@ -703,13 +741,23 @@ sub _cleanup_orphaned_devices {
 }
 
 sub _get_api {
-    my ($scfg) = @_;
+    my ($scfg, %opts) = @_;
+
+    # The pvestatd health path (activate_storage + the foreground of status)
+    # must fail fast so one slow array does not back up the whole sequential
+    # pvestatd cycle and starve sibling storages into 'inactive'. When called
+    # with status => 1 we hand back a short-timeout, single-attempt client.
+    # The data path and the background reaper omit the flag and get the
+    # resilient default client. The two clients are cached under distinct keys
+    # so they never clobber each other.
+    my $status_path = $opts{status} ? 1 : 0;
 
     my $storeid = $scfg->{storage} // $scfg->{'pure-portal'} // 'unknown';
+    my $cache_key = $status_path ? "$storeid\0status" : $storeid;
 
     # Return cached client if available, fresh, and from same process
     # (forked workers must not share session tokens)
-    if (my $cached = $api_cache{$storeid}) {
+    if (my $cached = $api_cache{$cache_key}) {
         my $cache_age = time() - ($cached->{timestamp} // 0);
         if ($cache_age < API_CACHE_TTL &&
             $cached->{host} eq $scfg->{'pure-portal'} &&
@@ -720,15 +768,21 @@ sub _get_api {
 
     my $ssl_verify = $scfg->{'pure-ssl-verify'} // 0;
 
-    my $api = PVE::Storage::Custom::PureStorage::API->new(
+    my %client_opts = (
         host       => $scfg->{'pure-portal'},
         api_token  => $scfg->{'pure-api-token'},
         username   => $scfg->{'pure-username'},
         password   => $scfg->{'pure-password'},
         ssl_verify => $ssl_verify,
     );
+    if ($status_path) {
+        $client_opts{timeout}     = $scfg->{'pure-status-timeout'} // 5;
+        $client_opts{retry_count} = 1;
+    }
 
-    $api_cache{$storeid} = {
+    my $api = PVE::Storage::Custom::PureStorage::API->new(%client_opts);
+
+    $api_cache{$cache_key} = {
         api       => $api,
         host      => $scfg->{'pure-portal'},
         timestamp => time(),
@@ -1342,8 +1396,17 @@ sub _cleanup_orphaned_temp_clones {
             warn "Cleaning up orphaned temporary clone: $vol->{name} (age: ${age_seconds}s)\n";
 
             eval {
-                # Get WWID for device cleanup
-                my $wwid = $api->volume_get_wwid($vol->{name});
+                # Get WWID for device cleanup. Prefer the serial already
+                # present in the volume_list response and compute the WWID
+                # locally (pure string math, no REST round-trip); fall back
+                # to the per-volume lookup only when serial is absent. This
+                # runs from the status() background reaper on every poll, so
+                # an extra GET per temp volume here is the same N+1 shape the
+                # orphan reaper already avoids in _cleanup_orphaned_devices.
+                my $wwid = $vol->{serial}
+                    ? $api->serial_to_wwid($vol->{serial})
+                    : undef;
+                $wwid //= $api->volume_get_wwid($vol->{name});
                 if ($wwid) {
                     cleanup_lun_devices($wwid);
                 }
@@ -1542,8 +1605,12 @@ sub _ensure_multipath_config {
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
 
-    # Verify Pure Storage connectivity
-    my $api = _get_api($scfg);
+    # Verify Pure Storage connectivity. activate_storage runs on the pvestatd
+    # health path, so use the short-timeout, single-attempt client (status =>
+    # 1): a slow array fails this fast instead of stalling the poll cycle.
+    # Long mutating calls (e.g. volume_delete in the temp-clone cleanup below)
+    # pass their own per-call timeout override, so they are unaffected.
+    my $api = _get_api($scfg, status => 1);
 
     # Verify we can connect to the array
     eval { $api->array_get(); };
@@ -1587,10 +1654,20 @@ sub activate_storage {
         my $ports = $api->iscsi_get_ports();
         if (@$ports) {
             my $probe_timeout = $scfg->{'pure-portal-probe-timeout'} // 2;
+            my $activate_deadline = $scfg->{'pure-activate-deadline'} // 30;
+            my $loop_start = time();
             my @logged_in;
             my @reach_ports;   # port objects we have a usable path to (for HA advisory)
             my @unreachable;
             my @failed;
+            my @deferred;
+
+            # Snapshot the iSCSI session list ONCE before the loop. The
+            # per-portal fast-path check below used to call is_portal_logged_in
+            # (→ iscsiadm -m session) for every portal; with N LIFs that is N
+            # unbounded external commands per activation, none of them covered
+            # by the wall-clock budget. One snapshot, reused for every portal.
+            my $sessions_snapshot = eval { get_sessions(); } // [];
 
             for my $port (@$ports) {
                 next unless $port->{portal};
@@ -1607,9 +1684,25 @@ sub activate_storage {
                 # an unresponsive portal and runs every time PVE re-activates
                 # the storage (status polling, linked clones, etc.).
                 my $portal_addr = "$ip:$port_num";
-                if (eval { is_portal_logged_in($portal_addr, $target) }) {
+                if (is_portal_logged_in($portal_addr, $target, $sessions_snapshot)) {
                     push @logged_in, $portal_addr;
                     push @reach_ports, $port;
+                    next;
+                }
+
+                # Wall-clock budget: per-portal timeouts (probe 2s, discovery
+                # 30s, login 60s) bound EACH portal but not the loop total.
+                # Several reachable-but-hanging LIFs can still stall pvestatd.
+                # Once the budget is spent AND we already have >=1 path up,
+                # defer the rest to a later activation. Gated so it can never
+                # mark a slow-but-reachable storage inactive: we never defer
+                # while zero paths are up (must get >=1 path or fail honestly),
+                # and the check is at the TOP of the iteration so it never
+                # interrupts an in-progress login.
+                if ($activate_deadline > 0
+                    && @logged_in
+                    && (time() - $loop_start) >= $activate_deadline) {
+                    push @deferred, $portal_addr;
                     next;
                 }
 
@@ -1647,6 +1740,19 @@ sub activate_storage {
                     . "  If this is unexpected, check network/switch zoning"
                     . " between this node and the listed portals, or disable"
                     . " unused iSCSI services on the array.\n";
+            }
+
+            if (@deferred) {
+                warn "Deferred login to " . scalar(@deferred)
+                    . " iSCSI portal(s) on Pure Storage array: "
+                    . join(", ", @deferred)
+                    . " (activate_storage wall-clock budget of"
+                    . " ${activate_deadline}s spent with "
+                    . scalar(@logged_in) . " path(s) already up).\n"
+                    . "  These portals will be retried on a later activation."
+                    . " If they should already be reachable, investigate why"
+                    . " their discovery/login is slow, or raise"
+                    . " 'pure-activate-deadline'.\n";
             }
 
             # If no portal is logged in and none was reachable, surface the
@@ -1820,8 +1926,11 @@ sub status {
 
     # Fail-fast: if we cannot even build the API client (auth/host/etc) we
     # MUST NOT block PVE status polling. Return inactive immediately so the
-    # web UI keeps responding instead of hanging on the API timeout.
-    my $api = eval { _get_api($scfg); };
+    # web UI keeps responding instead of hanging on the API timeout. Use the
+    # short-timeout, single-attempt health client (status => 1) so a slow
+    # array fails this poll quickly instead of backing up the sequential
+    # pvestatd cycle and starving sibling storages on this node.
+    my $api = eval { _get_api($scfg, status => 1); };
     if (!$api) {
         my $err = $@ || 'API client init failed';
         warn "Failed to connect to Pure Storage: $err";
@@ -1872,8 +1981,17 @@ sub status {
                 $got_lock = flock($lock_fh, LOCK_EX | LOCK_NB);
             }
             if ($got_lock) {
-                eval { _cleanup_orphaned_temp_clones($scfg, $storeid, $api); };
-                eval { _cleanup_orphaned_devices($api, $storeid, $scfg); };
+                # The reaper runs detached in the grandchild and is not on the
+                # pvestatd critical path, so it uses the resilient default
+                # client (longer timeout + retries), NOT the short health
+                # client the foreground used above. _get_api rebuilds a fresh
+                # client here anyway because the cached entry's pid no longer
+                # matches this forked process.
+                my $bg_api = eval { _get_api($scfg); };
+                if ($bg_api) {
+                    eval { _cleanup_orphaned_temp_clones($scfg, $storeid, $bg_api); };
+                    eval { _cleanup_orphaned_devices($bg_api, $storeid, $scfg); };
+                }
             }
             POSIX::_exit(0);
         }

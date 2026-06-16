@@ -144,6 +144,16 @@ sub _init_ua {
 
     my $ua = LWP::UserAgent->new(
         timeout         => $self->{timeout},
+        # Reuse one TCP+TLS connection across REST calls. Pure's management
+        # gateway pays a full TCP handshake + TLS negotiation per new
+        # connection; under the steady pvestatd polling load (status() every
+        # ~10s on every cluster node, plus the background reaper) opening a
+        # fresh connection per call multiplies the load the array's mgmt
+        # plane has to absorb and, on load-sensitive firmware, contributes to
+        # congestion collapse (slow responses, then connection-refused). A
+        # stale kept-alive socket after a controller failover fails one
+        # request and LWP transparently reconnects, bounded by {timeout}.
+        keep_alive      => 1,
         ssl_opts        => {
             verify_hostname => $self->{ssl_verify},
             SSL_verify_mode => $self->{ssl_verify} ? 1 : 0,

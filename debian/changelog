@@ -1,3 +1,43 @@
+jt-pve-storage-purestorage (1.1.21-1) stable; urgency=medium
+
+  * [HIGH] Isolate the pvestatd health path from a slow array. New
+    option pure-status-timeout (default 5s): activate_storage() and
+    the foreground of status() now use a short-timeout, single-attempt
+    REST client instead of the resilient data-path client (15s x 2
+    retries). PVE polls storages sequentially every ~10s, so a slow or
+    degraded array previously backed up the whole pvestatd cycle and
+    starved sibling storages on the same node into "inactive". Dropping
+    per-call retries on this path costs nothing because the next poll
+    is the retry. The data path (alloc/free/clone) and the background
+    reaper keep the resilient client.
+  * [HIGH] Enable HTTP keep-alive on the REST client. The LWP::UserAgent
+    now reuses one TCP+TLS connection across calls instead of opening a
+    fresh connection (and TLS handshake) per request, reducing the
+    steady-state load the plugin's polling places on the array's
+    management gateway.
+  * [MEDIUM] Bound the cumulative time of the iSCSI portal discover/
+    login loop in activate_storage(). New option pure-activate-deadline
+    (default 30s): once the budget is spent and at least one portal is
+    logged in, remaining portals are deferred to a later activation.
+    The budget never applies while zero paths are up and never
+    interrupts an in-progress login, so a slow-but-reachable storage is
+    never marked inactive. The iSCSI session list is now snapshotted
+    once before the loop instead of being queried per portal.
+  * [LOW] Compute the temp-clone WWID locally from the serial already
+    present in the volume_list() response (serial_to_wwid) instead of a
+    per-volume volume_get_wwid() REST call. _cleanup_orphaned_temp_clones
+    runs from the status() background reaper on every poll; this removes
+    the per-volume round-trip, matching the orphan reaper.
+  * [LOW] postinst now prints a prominent warning after an upgrade that
+    the operator must run "systemctl restart pvestatd" on every cluster
+    node to activate the new plugin code. The package intentionally uses
+    "systemctl reload" (SIGHUP) to avoid the stop-phase hang on D-state
+    children, but on many PVE versions reload does not reload Perl
+    modules, so pvestatd can keep running stale code. The warning shows
+    how to verify the MainPID changed.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Tue, 16 Jun 2026 19:30:00 +0800
+
 jt-pve-storage-purestorage (1.1.20-1) stable; urgency=medium
 
   * [MEDIUM] Override get_identity(), added to the base
