@@ -298,9 +298,45 @@ QEMU block device               passed to qemu           (raw, no FS layer
 ## Requirements
 
 - Proxmox VE 9.1 or later
-- Pure Storage FlashArray with Purity//FA 2.26 or later (REST API 2.x)
+- Pure Storage **FlashArray** reachable over **iSCSI or Fibre Channel**
+- FlashArray REST API 1.16 or later (the plugin negotiates the highest
+  version the array offers, preferring 2.x — see Platform support below)
 - API Token or user credentials for Pure Storage API
 - Network connectivity to Pure Storage management interface
+
+### Platform support
+
+The plugin depends on three things, none of which vary by FlashArray model,
+so the whole FlashArray line is covered — //M, //X, //XR, //C, //XL, //E, //ST:
+
+1. The FlashArray REST API. Version is auto-negotiated at connect time across
+   `2.26, 2.21, 2.16, 2.11, 2.4, 2.0, 1.19, 1.17, 1.16`, taking the highest
+   the array also supports.
+2. The SCSI inquiry strings `vendor "PURE"` / `product "FlashArray"`, used to
+   scope the multipath device block.
+3. The WWID format `naa.624a9370<serial>` (Pure's IEEE OUI `24:a9:37`), used
+   to map a Pure volume to its local `/dev/mapper` device.
+
+**Not supported:**
+
+| Platform / transport | Status |
+|---|---|
+| **FlashBlade** | Not supported. It is a file/object system (NFS/SMB/S3) with a different REST API and no block LUNs to attach to Proxmox VE. There is no code path for it. |
+| **NVMe-oF** (NVMe/FC, NVMe/RoCE, NVMe/TCP) | Not supported, even on arrays whose hardware offers it. `pure-protocol` accepts only `iscsi` or `fc`; host registration sends `iqns`/`wwns` and never `nqns`; and device discovery is entirely SCSI-based (`/sys/class/iscsi_host`, `/sys/class/fc_host`, `multipathd`). NVMe namespaces surface as `/dev/nvme*` under NVMe native multipath, which the plugin does not handle. Use iSCSI or FC. |
+| **Cloud Block Store** | Untested. It presents the same REST API and inquiry strings, so it is plausible, but nothing in this project has been validated against it. |
+| **FlashArray File Services** (SMB/NFS shares) | Out of scope — this is a block storage plugin. |
+
+**Purity version gates.** Everything above is about whether the plugin works
+at all. Individual features have their own floors:
+
+| Feature | Requires |
+|---|---|
+| Volumes, snapshots, clones, multipath | REST 1.16+ (1.x or 2.x) |
+| Pod (ActiveCluster) support | REST 2.x |
+| Setting a Pod quota from the GUI | Purity 6.6+ (earlier: CLI or REST only) |
+| Realm-based isolation | Purity 6.6+ |
+| Snapshot tombstone rename on delete | REST 2.x (1.x has no REST snapshot rename) |
+| Paginated listing beyond one page of volumes | REST 2.x (1.x returns the full set in one response) |
 
 ### For iSCSI
 - `open-iscsi` package

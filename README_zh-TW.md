@@ -285,9 +285,44 @@ QEMU block device               passed to qemu           (raw, no FS layer
 ## 系統需求
 
 - Proxmox VE 9.1 或更新版本
-- Pure Storage FlashArray，Purity//FA 2.26 或更新版本（REST API 2.x）
+- 可經由 **iSCSI 或 Fibre Channel** 連線的 Pure Storage **FlashArray**
+- FlashArray REST API 1.16 或更新版本（外掛會自動協商陣列支援的最高版本，
+  優先採用 2.x，詳見下方「平台支援範圍」）
 - Pure Storage API Token 或使用者帳號密碼
 - 可連線至 Pure Storage 管理介面
+
+### 平台支援範圍
+
+外掛只依賴以下三件事，而這三件都不隨 FlashArray 型號改變，因此整條
+FlashArray 產品線都在支援範圍內——//M、//X、//XR、//C、//XL、//E、//ST：
+
+1. FlashArray REST API。連線時會在
+   `2.26、2.21、2.16、2.11、2.4、2.0、1.19、1.17、1.16` 之中自動協商，
+   取陣列同樣支援的最高版本。
+2. SCSI inquiry 字串 `vendor "PURE"` 與 `product "FlashArray"`，用於界定
+   multipath device 區塊的適用範圍。
+3. WWID 格式 `naa.624a9370<serial>`（Pure 的 IEEE OUI `24:a9:37`），用於把
+   Pure Volume 對應到本機的 `/dev/mapper` 裝置。
+
+**不支援的平台與傳輸協定：**
+
+| 平台／傳輸協定 | 狀態 |
+|---|---|
+| **FlashBlade** | 不支援。它是檔案／物件系統（NFS/SMB/S3），REST API 完全不同，也沒有可掛給 Proxmox VE 的 block LUN。程式中沒有任何對應路徑。 |
+| **NVMe-oF**（NVMe/FC、NVMe/RoCE、NVMe/TCP） | 不支援，即使陣列硬體本身具備此能力亦然。`pure-protocol` 只接受 `iscsi` 或 `fc`；Host 註冊只送出 `iqns`／`wwns`，不會送 `nqns`；裝置探索也完全走 SCSI（`/sys/class/iscsi_host`、`/sys/class/fc_host`、`multipathd`）。NVMe namespace 會以 `/dev/nvme*` 搭配 NVMe 原生多重路徑呈現，外掛並未處理。請改用 iSCSI 或 FC。 |
+| **Cloud Block Store** | 未測試。它提供相同的 REST API 與 inquiry 字串，理論上可行，但本專案未針對它做過任何驗證。 |
+| **FlashArray File Services**（SMB／NFS 共享） | 不在範圍內——本外掛是 block storage 外掛。 |
+
+**Purity 版本相依的功能。** 上述說明的是「能不能運作」，個別功能各自另有版本門檻：
+
+| 功能 | 需求 |
+|---|---|
+| Volume、Snapshot、Clone、多重路徑 | REST 1.16 以上（1.x 或 2.x 皆可） |
+| Pod（ActiveCluster）支援 | REST 2.x |
+| 以 GUI 設定 Pod 配額 | Purity 6.6 以上（更早版本只能用 CLI 或 REST） |
+| Realm 隔離 | Purity 6.6 以上 |
+| 刪除 Snapshot 時的 tombstone rename | REST 2.x（1.x 的 REST 沒有 snapshot rename） |
+| Volume 超過單頁的分頁列舉 | REST 2.x（1.x 一次回傳完整清單，不需分頁） |
 
 ### iSCSI 需求
 - `open-iscsi` 套件
