@@ -1,3 +1,96 @@
+jt-pve-storage-purestorage (1.1.22-1) stable; urgency=medium
+
+  * [CRITICAL] Stop performing a full SAN rescan on every pvestatd poll.
+    Proxmox VE calls activate_storage() from storage_info() on every poll
+    (~10s), sequentially for every storage. activate_storage
+    unconditionally ran an iSCSI session rescan, a SCSI host scan, a
+    host-wide "multipathd reconfigure" and "udevadm trigger
+    --subsystem-match=block" plus "udevadm settle" on each of those calls,
+    i.e. a full multipath rebuild and a re-trigger of every block device on
+    the node six times a minute. Besides the standing cost, this competed
+    directly with device discovery: a VM start or backup waiting for a new
+    LUN was racing a reconfigure that repeatedly tore down and rebuilt the
+    map table. Rescans now run immediately when this node logs in to a new
+    iSCSI portal, and otherwise at most once per new option
+    pure-rescan-interval (default 300s, 0 restores the old behaviour).
+    Discovery of new LUNs is unaffected: activate_volume(), path() and
+    alloc_image() each perform their own targeted rescan and wait.
+  * [HIGH] Fix a potential unkillable hang inside the command-timeout
+    handler in Multipath.pm and ISCSI.pm. On timeout the handler ran
+    kill('TERM') followed by a blocking waitpid(). A child in
+    uninterruptible sleep - the exact case these timeouts exist for -
+    cannot be killed, so the blocking waitpid never returned and the alarm
+    that would have broken us out had already been cleared. Now escalates
+    TERM to KILL and reaps only with WNOHANG on a bounded poll.
+  * [HIGH] Rework the device-discovery wait loop (issue #13).
+    wait_for_multipath_device() probed for the device only at the END of a
+    body that could consume the entire timeout budget (per-session iSCSI
+    rescan, per-host SCSI scan, multipathd reconfigure, udev trigger and
+    settle), so on a fabric with slow paths the caller got a single look at
+    the device, taken right after a host-wide reconfigure. The loop now
+    probes before doing any work, probes again after each step, polls
+    cheaply between steps, is deadline-aware at every stage, and reaches
+    for a host-wide reconfigure only from the second round and at most once
+    per 30s process-wide.
+  * [HIGH] Do not run orphaned temp-clone cleanup in activate_storage. It
+    disconnects and destroys volumes on the array - mutating, potentially
+    slow work that does not belong on a path polled every ~10s with the
+    short-timeout health client. status() already forks it into the
+    background reaper under a lock with the resilient client.
+  * [HIGH] Report far more diagnostic detail when a device does not appear.
+    The error now includes what multipathd currently sees (map count, Pure
+    map count, whether a map exists for the WWID, whether its /dev/mapper
+    node was created), matching /dev/disk/by-id links, and per-session iSCSI
+    state read from sysfs - captured at failure time rather than left for
+    the operator to reproduce.
+  * [MEDIUM] Fix Pure REST 2.x timestamp handling. REST 2.x returns
+    milliseconds since the epoch, REST 1.x an ISO 8601 string; the code
+    assumed the opposite. Two consequences: snapshot ctime reported to
+    Proxmox VE was a millisecond value read as seconds, so the Web UI
+    showed nonsensical snapshot dates; and the orphaned temp-clone reaper's
+    "older than one hour" test could never be true on a 2.x array, so
+    orphaned temporary snapshot clones were never cleaned up, each holding
+    a volume slot, a host connection on every node and a stale multipath
+    device.
+  * [MEDIUM] Fix host lookup for the connect-to-all-nodes step. API 2.x
+    does not accept wildcards in the "names" query parameter, so
+    host_list("pve-<cluster>-*") always came back empty and new volumes
+    were pre-connected to the local node only. Wildcards now go through the
+    filter parameter, as volume_list already did.
+  * [MEDIUM] Pod capacity reporting (issue #10). "used" is now clamped to
+    the pod quota so Proxmox VE is never handed used > total, and a pod at
+    or over its quota logs an explanation of what that does and does not
+    mean, including the raw pod space figures the array returned. New
+    option pure-pod-usage-metric (provisioned, default / virtual /
+    physical) selects which figure is reported.
+  * [MEDIUM] Remove the per-volume WWID lookup from deactivate_storage; the
+    WWID is derived from the serial the volume list already returned. The
+    old form was an N+1 REST storm against the array, fired exactly when a
+    node is shutting down.
+  * [MEDIUM] Fix the API client cache key. It keyed on $scfg->{storage},
+    which Proxmox VE never populates, so it degraded to the portal address
+    alone: two storages on the same array with different API tokens or
+    different pure-status-timeout values shared one cached client.
+  * [LOW] filesystem_path() now fails with an actionable message instead of
+    a bare "storage is required" from inside the naming module. It passed
+    $scfg->{storage} as the storage id, which is always undef.
+  * [LOW] Remove the argument-less multipath_flush() call in
+    deactivate_storage, which could only ever throw (the helper refuses to
+    run "multipath -F", which would flush every unused map on the host).
+  * [LOW] postinst no longer reports another vendor's multipath settings as
+    a Pure hazard. The dangerous-settings check grepped the whole of
+    /etc/multipath.conf with no scope awareness, so `no_path_retry queue`
+    inside a `device { vendor "NETAPP" }` block - which cannot affect Pure
+    devices, and is that vendor's own recommendation - was reported as a
+    Pure risk. The check now tracks scope and only warns for settings in
+    `defaults` or in a PURE device block; settings scoped to another
+    vendor are reported as a note for awareness.
+  * [LOW] activate_volume() now tracks the volume WWID, closing a gap where
+    a volume activated without path() being called was invisible to the
+    cluster residual-device cleanup.
+
+ -- Jason Cheng <jason@jason.tools>  Sun, 26 Jul 2026 18:20:00 +0800
+
 jt-pve-storage-purestorage (1.1.21-1) stable; urgency=medium
 
   * [HIGH] Isolate the pvestatd health path from a slow array. New

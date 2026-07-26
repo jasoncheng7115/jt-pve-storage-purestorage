@@ -11,6 +11,7 @@ use Carp qw(croak);
 use IO::Select;
 use IO::Socket::INET;
 use IPC::Open3;
+use POSIX ();
 use Symbol qw(gensym);
 
 use Exporter qw(import);
@@ -23,6 +24,7 @@ our @EXPORT_OK = qw(
     login_target
     logout_target
     get_sessions
+    get_session_states
     rescan_sessions
     is_target_logged_in
     is_portal_logged_in
@@ -56,6 +58,32 @@ sub _write_file {
     print $fh $content;
     close($fh);
     return 1;
+}
+
+# Reap a child that blew through its alarm budget, WITHOUT ever blocking.
+#
+# `kill('TERM'); waitpid($pid, 0);` blocks forever when the child is stuck in
+# uninterruptible sleep — which is precisely the iscsiadm-against-a-dead-path
+# case this timeout exists for (see rescan_sessions). Our alarm has already
+# fired and been cleared by then, so nothing would break us out again.
+# Escalate TERM -> KILL, reap only with WNOHANG on a bounded poll, and leave
+# an unreapable child to init rather than joining it in D state.
+sub _reap_timed_out_child {
+    my ($pid, $cmd) = @_;
+    return unless $pid;
+
+    for my $sig ('TERM', 'KILL') {
+        kill($sig, $pid);
+        my $deadline = time() + 2;
+        while (time() < $deadline) {
+            my $res = waitpid($pid, POSIX::WNOHANG());
+            return if $res != 0;   # reaped, or already gone
+            select(undef, undef, undef, 0.1);
+        }
+    }
+
+    warn "child pid $pid for '@{$cmd // []}' did not die after TERM+KILL "
+        . "(likely uninterruptible sleep in the kernel); leaving it to init\n";
 }
 
 # Run a command and return output
@@ -101,11 +129,7 @@ sub _run_cmd {
     if ($@) {
         alarm(0);
         if ($@ eq "timeout\n") {
-            # Kill the child process on timeout to prevent orphans
-            if ($pid) {
-                kill('TERM', $pid);
-                waitpid($pid, 0);
-            }
+            _reap_timed_out_child($pid, $cmd);
             croak "Command timed out after ${timeout}s: @$cmd";
         }
         croak "Command failed: $@";
@@ -318,6 +342,43 @@ sub get_sessions {
     }
 
     return \@sessions;
+}
+
+# Report every kernel-visible iSCSI session and its state, read straight from
+# /sys/class/iscsi_session/ with bounded reads. Unlike get_sessions() this does
+# NOT shell out to iscsiadm, so it stays usable exactly when iscsiadm is the
+# thing that is wedged — which is when a diagnostic is most needed.
+#
+# Returns an arrayref of { session, state, target, portal }, where state is the
+# kernel session state (LOGGED_IN / FAILED / FREE / ...) or undef if unreadable.
+# rescan_sessions() only rescans LOGGED_IN sessions, so this is the fastest way
+# to tell "the rescan was skipped" apart from "the rescan found nothing".
+sub get_session_states {
+    my @out;
+
+    my @sessions;
+    eval {
+        local $SIG{ALRM} = sub { die "timeout\n" };
+        alarm(5);
+        opendir(my $dh, '/sys/class/iscsi_session') or die "opendir: $!\n";
+        @sessions = sort grep { /^session\d+$/ } readdir($dh);
+        closedir($dh);
+        alarm(0);
+    };
+    alarm(0);
+    return \@out if $@;
+
+    for my $s (@sessions) {
+        my $base = "/sys/class/iscsi_session/$s";
+        push @out, {
+            session => $s,
+            state   => _read_sysfs_attr("$base/state", 2),
+            target  => _read_sysfs_attr("$base/targetname", 2),
+            portal  => _read_sysfs_attr("$base/persistent_address", 2),
+        };
+    }
+
+    return \@out;
 }
 
 # Check if any session is open to a target (anywhere). Used as a coarse check.

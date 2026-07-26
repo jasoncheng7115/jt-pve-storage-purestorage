@@ -447,6 +447,43 @@ sub delete {
 }
 
 #
+# Timestamp normalisation
+#
+
+# Convert a Pure timestamp to Unix epoch SECONDS.
+#
+# The two API generations disagree, and getting this wrong is silent:
+#   - REST 2.x returns integer MILLISECONDS since the epoch (e.g.
+#     1747000000000). Treating that as seconds puts the value ~53000 years in
+#     the future, which makes "is this older than an hour?" checks always
+#     false and renders snapshot dates as nonsense in the PVE Web UI.
+#   - REST 1.x returns an ISO 8601 string (e.g. "2026-01-15T10:30:00Z").
+#
+# Returns 0 for anything unparseable so callers can treat it as "unknown"
+# rather than having to distinguish undef from a real zero.
+sub pure_time_to_epoch {
+    my ($value) = @_;
+
+    return 0 unless defined $value && $value ne '';
+
+    # API 1.x: ISO 8601, always UTC ("Z").
+    if ($value =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
+        require Time::Local;
+        return eval { Time::Local::timegm($6, $5, $4, $3, $2 - 1, $1) } // 0;
+    }
+
+    return 0 unless $value =~ /^\d+$/;
+    $value = $value + 0;
+
+    # API 2.x: milliseconds. Anything above ~1973-in-seconds is far more
+    # plausibly a millisecond value than a second value, and Pure has never
+    # emitted second-granularity integers here — but keep the branch so a
+    # future/legacy second-granularity field still works.
+    return int($value / 1000) if $value > 100_000_000_000;
+    return $value;
+}
+
+#
 # Operator-friendly error translation
 #
 
@@ -561,10 +598,43 @@ sub array_space {
     }
 }
 
+# Which pod space metric counts as "used" against the pod quota.
+#
+#   provisioned - sum of the provisioned (logical) sizes of the pod's volumes.
+#                 This is what the array checks when you ask it to create or
+#                 grow a volume in the pod, so it is what determines whether
+#                 the NEXT allocation succeeds. Default.
+#   virtual     - bytes actually written by hosts (pre-reduction logical).
+#                 Matches an operator's intuition of "how full is it", but has
+#                 no bearing on whether an allocation will be accepted.
+#   physical    - post-dedup/compression bytes consumed on the array.
+#
+# The distinction is the whole of issue #10: a pod holding one thin 32 GiB
+# volume reports provisioned = 32 GiB even with ~0 bytes written, so a 3 GiB
+# quota set afterwards reads as 100% full — correctly, in the sense that the
+# array will refuse the next allocation, and confusingly, in the sense that
+# writing into the existing volume keeps working.
+my %POD_USAGE_METRIC_FIELD = (
+    provisioned => 'total_provisioned',
+    virtual     => 'virtual',
+    physical    => 'total_physical',
+);
+
+sub pod_usage_metric_fields {
+    return sort keys %POD_USAGE_METRIC_FIELD;
+}
+
 # Get managed capacity (for PVE status)
 # If pod is specified, return pod capacity; otherwise return array capacity
+#
+# Options:
+#   usage_metric => provisioned|virtual|physical   (pod only, default provisioned)
+#
+# For a pod-backed storage the returned hash also carries diagnostic keys the
+# caller can surface when the numbers look surprising:
+#   quota_source, metric, raw_used, raw_space, array_count
 sub get_managed_capacity {
-    my ($self, $pod) = @_;
+    my ($self, $pod, %opts) = @_;
 
     my $resp;
     my $space;
@@ -592,41 +662,61 @@ sub get_managed_capacity {
 
         my $quota = $self->pod_get_quota_limit($pod);
 
-        my $used = 0;
-        if (ref($space) eq 'HASH' && $space->{space}) {
-            # Pod quota in Pure is enforced against `total_provisioned`
-            # (sum of all volume sizes within the pod), NOT against
-            # `virtual` (host-written bytes). To match what the array
-            # actually enforces at allocation time — and to align with
-            # the headline "Size" indicator Pure UI shows on the pod
-            # detail page — prefer total_provisioned first here.
-            #
-            # History: a previous release briefly preferred `virtual`
-            # first after a report of unexpected 100% readings. Closer
-            # review showed those readings were semantically correct
-            # (the pod contained a thin volume of its quota's size, so
-            # total_provisioned == quota, and Pure would have refused
-            # the next allocation in that state) and that aligning
-            # with virtual was masking the legitimate allocation
-            # ceiling. The total_provisioned-first ordering is the
-            # correct match for what the array enforces.
-            $used = $space->{space}{total_provisioned}
-                 // $space->{space}{virtual}
-                 // $space->{space}{total_physical}
-                 // $space->{space}{total_used}
-                 // 0;
+        my $metric = $opts{usage_metric} // 'provisioned';
+        $metric = 'provisioned' unless $POD_USAGE_METRIC_FIELD{$metric};
+        my $field = $POD_USAGE_METRIC_FIELD{$metric};
+
+        my $raw_space = (ref($space) eq 'HASH' && ref($space->{space}) eq 'HASH')
+            ? $space->{space} : {};
+
+        # Some Purity releases omit `space` from GET /pods and expose it only
+        # through the dedicated GET /pods/space endpoint. Only reach for it
+        # when the pod object really came back without space data, so the
+        # common path stays at one REST call per poll.
+        if (!%$raw_space && $self->is_api_v2()) {
+            my $sp = eval { $self->get('pods/space', { names => $pod }); };
+            my $item = (ref($sp) eq 'HASH' && ref($sp->{items}) eq 'ARRAY')
+                ? $sp->{items}[0] : undef;
+            $raw_space = $item->{space}
+                if ref($item) eq 'HASH' && ref($item->{space}) eq 'HASH';
         }
 
+        # Preferred field first, then fall back through the remaining ones so
+        # an older Purity that omits the requested field still yields a number
+        # rather than reporting the pod as empty.
+        my $used = $raw_space->{$field}
+                // $raw_space->{total_provisioned}
+                // $raw_space->{virtual}
+                // $raw_space->{total_physical}
+                // $raw_space->{total_used}
+                // 0;
+
+        # How many arrays the pod is stretched over. Pure reports several pod
+        # space figures per-array-replica, so a pod stretched over two arrays
+        # can report double the logical size an operator expects. Pass it up
+        # so the caller can say so instead of leaving the operator to guess.
+        my $array_count = (ref($space) eq 'HASH' && ref($space->{arrays}) eq 'ARRAY')
+            ? scalar(@{$space->{arrays}}) : undef;
+
         if ($quota > 0) {
-            my $avail = $quota - $used;
-            $avail = 0 if $avail < 0;
+            # Clamp used to the quota. Reporting used > total makes PVE render
+            # a >100% bar and a negative-looking free figure; the honest
+            # numbers are preserved in raw_used for diagnostics. avail is 0
+            # either way, which is the operationally true statement: the array
+            # will refuse the next allocation in the pod.
+            my $reported_used = $used > $quota ? $quota : $used;
             return {
-                total     => $quota,
-                used      => $used,
-                available => $avail,
+                total        => $quota,
+                used         => $reported_used,
+                available    => $quota - $reported_used,
+                quota_source => 'pod',
+                metric       => $metric,
+                raw_used     => $used,
+                raw_space    => $raw_space,
+                array_count  => $array_count,
             };
         }
-        # Fall through to array capacity if no quota policy attached
+        # Fall through to array capacity if no pod quota_limit is set
     }
 
     # Get array capacity
@@ -1582,19 +1672,35 @@ sub host_get {
     return $resp;
 }
 
-# List hosts
+# List hosts matching a pattern (glob, e.g. "pve-mycluster-*").
+#
+# API 2.x does NOT accept wildcards in the `names` query parameter — `names`
+# takes exact resource names only, and a glob there yields an error or an
+# empty result. Wildcards belong in `filter=name='...'`, the same way
+# volume_list already does it. Passing the glob as `names` silently returned
+# no hosts, which made _connect_to_all_hosts() connect new volumes to the
+# local node only: live migration still worked (the target node connects the
+# volume itself during activate_volume), but the pre-connect that exists to
+# make migration seamless never happened, and the "not connected to hosts:
+# ..." warning could never fire because the host list was always empty.
+#
+# API 1.x does support globs in `names`, so that path is unchanged.
 sub host_list {
     my ($self, $pattern) = @_;
 
     my $params = {};
-    if ($pattern) {
-        $params->{names} = $pattern;
-    }
-
     my $resp;
     if ($self->is_api_v2()) {
+        if ($pattern) {
+            if ($pattern =~ /\*/) {
+                $params->{filter} = "name='$pattern'";
+            } else {
+                $params->{names} = $pattern;
+            }
+        }
         $resp = $self->get('hosts', $params);
     } else {
+        $params->{names} = $pattern if $pattern;
         $resp = $self->get('host', $params);
     }
 

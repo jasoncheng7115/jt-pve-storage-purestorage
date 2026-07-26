@@ -8,6 +8,164 @@
 
 ---
 
+## [1.1.22] - 2026-07-26
+
+主機端穩定性釋出。移除 Proxmox VE 每次狀態輪詢都會觸發的常態 SAN 重新掃描
+負載，修正指令逾時處理器內部無法終結的卡死，重寫裝置探索流程，並修正 Pure
+REST 2.x 的時間戳記處理。本次同時處理 issue #13，並釐清 issue #10 背後的
+pod 容量回報行為。
+
+### 嚴重——不再於每次 pvestatd 輪詢執行完整 SAN 重新掃描
+
+Proxmox VE 會在每次 pvestatd 輪詢（約 10 秒）時，由
+`PVE::Storage::storage_info()` 對每個已設定的 storage 循序呼叫
+`activate_storage()`。而 `activate_storage()` 在每一次呼叫中都無條件執行：
+
+- iSCSI session 重新掃描（每個 `LOGGED_IN` session 最多 10 秒）；
+- 對所有 iSCSI host 執行 SCSI host 掃描；
+- 全主機範圍的 `multipathd reconfigure`，會重建節點上的**每一個** multipath
+  對應；以及
+- `udevadm trigger --subsystem-match=block` 後接 `udevadm settle`，會重新觸發
+  系統上的**每一個**區塊裝置。
+
+換言之，每個節點、每個 Pure storage 每分鐘會做六次完整 multipath 重建與全系統
+udev 重新觸發。除了常態成本之外（它會排在其他所有 storage 狀態輪詢之前循序
+執行），它更直接與裝置探索互相競爭：正在等待新對應 LUN 的 VM 啟動或備份作業，
+等於在跟一個不斷拆除並重建對應表的 reconfigure 賽跑。
+
+現在只有在本節點**實際登入新的 iSCSI portal** 時才會立即重新掃描，其餘情況
+最多每 `pure-rescan-interval` 執行一次（新選項，預設 300 秒；設為 0 可回到
+先前行為）。新 LUN 的探索並不依賴這個週期性掃描——`activate_volume()`、
+`path()` 與 `alloc_image()` 各自會針對所需的 WWID 執行專屬的重新掃描與等待。
+保留在此處的僅是針對外部（out-of-band）對應 LUN 的安全網。
+
+此外，`multipathd reconfigure` 在所有探索與輪詢路徑上都以行程範圍限流，最多
+每 30 秒一次，避免多個呼叫端又形成 reconfigure 風暴。真正的設定變更（寫入
+`/etc/multipath/conf.d/pure-storage.conf`）仍會立即重新載入。
+
+### 高——指令逾時處理器內部無法終結的卡死
+
+`Multipath.pm` 與 `ISCSI.pm` 的 `_run_cmd` 逾時處理器原本執行
+`kill('TERM', $pid)` 之後接一個**會阻塞的** `waitpid($pid, 0)`。處於不可中斷
+睡眠（D state）的子行程——正是這些逾時機制存在的理由——無法被 `TERM` 或
+`KILL` 終結，因此阻塞的 `waitpid` 永遠不會返回，而原本能救我們出來的 alarm
+早已觸發並被清除。逾時處理器本身變成了卡死點。
+
+現在改為由 `TERM` 升級到 `KILL`，並只以 `WNOHANG` 在有限次數的輪詢中回收，
+若仍無法回收則交由 init 處理，而不是讓自己一起陷入 D state——與
+`sysfs_write_with_timeout()` 一貫採用的作法相同。
+
+### 高——重寫裝置探索等待迴圈（issue #13）
+
+`wait_for_multipath_device()` 原本只在迴圈本體的**最後**才檢查裝置，而該本體
+在劣化的 fabric 上可能耗盡整個逾時預算（逐 session 的 iSCSI 重新掃描、逐 host
+的 SCSI 掃描、`multipathd reconfigure`、`udevadm trigger`、`udevadm settle`）。
+在 60 秒預算而單趟耗時 45 秒的情況下，呼叫端只會看到裝置一次——而且是在最糟的
+時間點，剛好在全主機 reconfigure 攪動對應表之後。晚兩秒才出現的 LUN 就會被
+判定為不存在。它也從不在重新掃描**之前**先檢查，因此最常見的情況（裝置其實
+已經在了）仍然要付出完整成本。
+
+現在改為逐級升高的流程：先檢查，接著是傳輸層重新掃描、SCSI host 掃描、udev，
+只有從第二輪起才動用受限流的 reconfigure——每個步驟後都會再檢查一次，步驟之間
+以約 1 秒間隔輕量輪詢，且每個階段都會檢查截止時間。`activate_volume()` 同樣
+會在執行任何重新掃描前先確認裝置是否已存在。
+
+### 高——`activate_storage` 不再執行殘留暫存複製的清理
+
+該清理會在陣列上中斷連線並刪除 Volume。具變更性、可能緩慢的陣列操作，不應該
+放在 Proxmox VE 每約 10 秒以短逾時健康用戶端輪詢的路徑上。`status()` 早已將它
+以背景回收行程 fork 出去，並在鎖保護下使用耐用用戶端執行。
+
+### 高——裝置未出現時提供可據以行動的診斷資訊
+
+「裝置未出現」錯誤現在會回報**在失敗當下擷取**的主機狀態，而不是留給管理者
+自行重現：
+
+- `multipathd` 當下看到的內容（對應總數、Pure 對應數、此 WWID 是否有對應、
+  其 `/dev/mapper` 節點是否確實已建立）；
+- 若找不到我們的 WWID，列出 multipathd 確實看得到的其他 Pure WWID；
+- 相符的 `/dev/disk/by-id` 符號連結；
+- 直接自 sysfs 讀取的逐 session iSCSI 狀態，並在 session 非 `LOGGED_IN` 時明確
+  標註——LUN 重新掃描只會對 `LOGGED_IN` 的 session 發出，因此只能經由失效路徑
+  抵達的 LUN，在該路徑恢復前無法被探索到；
+- FC 環境則回報線上目標埠數量。
+
+### 中——Pure REST 2.x 時間戳記為毫秒
+
+REST 2.x 回傳的時間戳記是自 epoch 起算的毫秒，REST 1.x 回傳的則是 ISO 8601
+字串，而原本的程式碼假設剛好相反。造成兩個後果：
+
+- 交給 Proxmox VE 的快照 `ctime` 是被當成秒來讀的毫秒值，導致 Web UI 上的快照
+  日期落在約 53000 年後。
+- 殘留暫存複製回收的「超過一小時」判斷在 2.x 陣列上永遠不成立，因此殘留的暫存
+  快照複製從未被清理。每一個都佔用一個 Volume 名額、在每個叢集節點上佔用一條
+  主機連線，並留下一個殘留的 multipath 裝置。
+
+兩者現在都改用單一的 `pure_time_to_epoch()` 輔助函式，可同時處理兩種格式。
+
+### 中——連線至所有節點步驟的主機查詢
+
+API 2.x 的 `names` 查詢參數不接受萬用字元，因此
+`host_list("pve-<cluster>-*")` 總是回傳空值，新 Volume 只會預先連線到本機
+節點。線上遷移仍然可用——目標節點會在 `activate_volume()` 時自行連線該
+Volume——但用來讓遷移更順暢的預先連線從未發生，且「未連線至下列主機：⋯」的
+警告也永遠不會出現。萬用字元現在改走 `filter` 參數，與 `volume_list` 既有作法
+一致。
+
+### 中——Pod 容量回報（issue #10）
+
+對於使用 pod 的 storage，外掛以 pod 的 `quota_limit` 作為 `total`，並以某個
+pod 空間數值作為 `used`。由於 Pure 的 Volume 是精簡配置，一個內含 32 GiB
+Volume 的 pod 即使幾乎沒有寫入資料，其 provisioned 仍為 32 GiB，因此之後才
+設定的 3 GiB 配額會立刻顯示為 100% 已滿——而寫入既有 Volume 卻仍然正常。兩者
+都是正確的：陣列**會**拒絕該 pod 內的下一次 Volume 建立或擴充，但**不會**拒絕
+對既有 Volume 的寫入。過去這些數字並未說明這一點。
+
+- `used` 現在會被限制在配額之內，Proxmox VE 不會再拿到 `used > total`
+  （先前會呈現超過 100% 的長條）。
+- 達到或超過配額的 pod 每小時會記錄一次說明，內容包含陣列回傳的原始 `space`
+  數值；若為延伸（stretched）pod，也會列出成員陣列數量——Pure 的部分 pod 空間
+  數值是以每個陣列副本為單位回報的。
+- 新增選項 `pure-pod-usage-metric` 可選擇回報哪一個數值：`provisioned`
+  （預設，可預測配置失敗）、`virtual`（主機寫入的邏輯位元組，符合直覺的
+  「用了多少」但無法預測配置失敗）或 `physical`（陣列上縮減後的實際位元組）。
+
+### 中——移除 `deactivate_storage` 的 N+1 REST 查詢
+
+逐 Volume 的 `volume_get_wwid()` 呼叫已改為由 Volume 清單既有回傳的 serial
+在本地推導 WWID。舊寫法是對陣列管理閘道的 N+1 風暴，而且正好發生在節點關機或
+storage 於整個叢集停用時。
+
+### 中——API 用戶端快取鍵
+
+快取鍵原本使用 `$scfg->{storage}`，而 Proxmox VE 從不填入該欄位，因此實際上
+退化為僅以 portal 位址作為鍵值。指向同一陣列但使用不同 API token——或不同
+`pure-status-timeout`——的兩個 storage 會共用同一個快取用戶端，且先建立者會在
+整個 300 秒 TTL 內勝出。新的鍵值涵蓋 portal、憑證、SSL 設定、健康路徑旗標與
+逾時。
+
+### 低——其他修正
+
+- `filesystem_path()` 原本把 `$scfg->{storage}` 當作 storage id 傳遞，而該值
+  恆為 `undef`，因此每次呼叫都會在命名模組內部以「storage is required」失敗。
+  現在改為以可據以行動的訊息失敗。目前 Proxmox VE 沒有任何路徑會對本外掛呼叫
+  到它。
+- 移除 `deactivate_storage` 中不帶參數的 `multipath_flush()` 呼叫，該呼叫只可能
+  拋出例外——此輔助函式刻意拒絕執行 `multipath -F`，因為它會清除主機上所有未
+  使用的對應。
+- `activate_volume()` 現在會追蹤 Volume 的 WWID，補上原本的缺口：未經 `path()`
+  呼叫而啟用的 Volume，對叢集殘留裝置清理是不可見的。
+- postinst 不再把其他廠商的 multipath 設定回報為 Pure 的風險。原本的危險設定
+  檢查是對整份 `/etc/multipath.conf` 做 grep，完全不判斷作用範圍，因此位於
+  `device { vendor "NETAPP" }` 區塊內的 `no_path_retry queue`——它對 Pure
+  裝置毫無作用，而且是該廠商自己的建議值——會被當成 Pure 的風險回報。現在會
+  追蹤作用範圍，只有位於 `defaults` 或 PURE device 區塊的設定才會發出警告；
+  屬於其他廠商範圍的設定則以提示方式列出供參考。
+- 當某些 Purity 版本的 `GET /pods` 未回傳 `space` 時，`get_managed_capacity()`
+  會改用 `GET /pods/space`。
+
+---
+
 ## [1.1.21] - 2026-06-16
 
 管理平面負載與 pvestatd 隔離釋出。降低外掛對 FlashArray 管理閘道造成的穩態

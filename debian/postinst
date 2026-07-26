@@ -43,22 +43,91 @@ print_safety_warning() {
 BANNER
 }
 
+# Detect dangerous multipath settings, AND report which scope each one is in.
+#
+# A flat grep over multipath.conf is wrong: `no_path_retry queue` inside a
+# `device { vendor "NETAPP" ... }` block applies only to NetApp LUNs and has no
+# effect whatsoever on Pure devices, yet the previous flat grep reported it as
+# a Pure hazard. That cries wolf, and worse, it can push an operator into
+# "fixing" another vendor's recommended configuration.
+#
+# Scope rules:
+#   defaults { }            -> applies to Pure devices unless a device block
+#                              overrides it. Real hazard: warn.
+#   device { vendor PURE }  -> applies directly to Pure. Real hazard: warn.
+#   device { vendor OTHER } -> does not affect Pure. Same hazard class for that
+#                              vendor's LUNs on a PVE node, so mention it as a
+#                              note, not as a Pure warning.
+#   multipaths { }          -> per-WWID; report with the scope named so the
+#                              operator can judge.
+scan_multipath_scopes() {
+    awk '
+        function emit(setting) {
+            printf "%s\t%s\n", scope, setting
+        }
+        /^[[:space:]]*defaults[[:space:]]*\{/  { scope="defaults"; next }
+        /^[[:space:]]*multipaths[[:space:]]*\{/ { scope="multipaths"; next }
+        /^[[:space:]]*device[[:space:]]*\{/    { scope="device:?"; next }
+        /^[[:space:]]*vendor[[:space:]]+/ {
+            v=$2; gsub(/"/,"",v)
+            if (scope ~ /^device/) scope="device:" v
+            next
+        }
+        /^[[:space:]]*\}/ { if (scope ~ /^device/) scope="devices"; else scope=""; next }
+        /^[[:space:]]*no_path_retry[[:space:]]+queue([[:space:]]|$)/ { emit("no_path_retry queue") }
+        /^[[:space:]]*queue_if_no_path([[:space:]]|$)/               { emit("queue_if_no_path") }
+        /^[[:space:]]*dev_loss_tmo[[:space:]]+infinity([[:space:]]|$)/ { emit("dev_loss_tmo infinity") }
+    ' "$1"
+}
+
 detect_dangerous_multipath_settings() {
     [ -f "$MULTIPATH_CONF" ] || return 0
+    command -v awk >/dev/null 2>&1 || return 0
 
     local found=0
     local hits=""
-    if grep -Eq '^[[:space:]]*no_path_retry[[:space:]]+queue\b' "$MULTIPATH_CONF"; then
-        hits+="  - no_path_retry queue (in $MULTIPATH_CONF)\n"
-        found=1
-    fi
-    if grep -Eq '^[[:space:]]*queue_if_no_path\b' "$MULTIPATH_CONF"; then
-        hits+="  - queue_if_no_path (in $MULTIPATH_CONF)\n"
-        found=1
-    fi
-    if grep -Eq '^[[:space:]]*dev_loss_tmo[[:space:]]+infinity\b' "$MULTIPATH_CONF"; then
-        hits+="  - dev_loss_tmo infinity (in $MULTIPATH_CONF)\n"
-        found=1
+    local notes=""
+    local scope setting line
+
+    while IFS=$'\t' read -r scope setting; do
+        [ -n "$setting" ] || continue
+        case "$scope" in
+            defaults)
+                hits+="  - $setting (in the 'defaults' section of $MULTIPATH_CONF)\n"
+                found=1
+                ;;
+            device:PURE|device:Pure|device:pure)
+                hits+="  - $setting (in the PURE device block of $MULTIPATH_CONF)\n"
+                found=1
+                ;;
+            device:*)
+                notes+="  - $setting (scoped to ${scope#device:} devices in $MULTIPATH_CONF)\n"
+                ;;
+            *)
+                notes+="  - $setting (in the '${scope:-unknown}' scope of $MULTIPATH_CONF)\n"
+                ;;
+        esac
+    done <<EOSCAN
+$(scan_multipath_scopes "$MULTIPATH_CONF")
+EOSCAN
+
+    if [ -n "$notes" ]; then
+        cat <<'EOF'
+
+------------------------------------------------------------------------------
+ NOTE: risky multipath settings found, but NOT applied to Pure devices
+------------------------------------------------------------------------------
+ These are scoped to another vendor's device block, so they do not affect
+ this plugin. They carry the same hang risk for that vendor's LUNs on a
+ Proxmox VE node, so they are reported for awareness only — no action is
+ required for Pure Storage:
+
+EOF
+        printf "$notes"
+        cat <<'EOF'
+------------------------------------------------------------------------------
+
+EOF
     fi
 
     if [ "$found" = "1" ]; then

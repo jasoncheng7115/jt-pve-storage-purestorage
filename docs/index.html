@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.21 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.22 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.21-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.22-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.21-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.22-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.22 <span class="changelog-tag changelog-tag--critical">High</span></div>
+        <div class="changelog-date">2026-07-26</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>No more full SAN rescan on every pvestatd poll (CRITICAL):</strong> Proxmox VE calls <code>activate_storage()</code> from <code>storage_info()</code> on every pvestatd poll (~10s), sequentially for every storage — and <code>activate_storage()</code> unconditionally ran an iSCSI session rescan, a SCSI host scan, a host-wide <code>multipathd reconfigure</code> and <code>udevadm trigger --subsystem-match=block</code> + <code>udevadm settle</code>. That is a full multipath rebuild and a re-trigger of every block device on the node, six times a minute, on every node. It also competed directly with device discovery: a VM start or backup waiting on a new LUN was racing a reconfigure that kept tearing the map table down and rebuilding it. Rescans now run immediately when the node logs in to a new iSCSI portal, and otherwise at most once per new option <code>pure-rescan-interval</code> (default 300s); <code>multipathd reconfigure</code> is throttled process-wide to once per 30s on all discovery paths. <strong>Unkillable hang in the timeout handler (HIGH):</strong> <code>_run_cmd</code> ran <code>kill(TERM)</code> then a <em>blocking</em> <code>waitpid</code>; a D-state child — the exact case these timeouts exist for — cannot be killed, so the handler itself hung. Now escalates TERM to KILL and reaps only with <code>WNOHANG</code>. <strong>Device discovery reworked (HIGH, #13):</strong> <code>wait_for_multipath_device()</code> probed only at the end of a loop body that could consume the whole timeout, giving the caller a single look at the device right after the most disruptive step. It now probes first, probes after every step, polls cheaply between steps and is deadline-aware throughout — and the failure message now reports what multipathd actually saw, the matching <code>/dev/disk/by-id</code> links and per-session iSCSI state, captured at failure time. <strong>REST 2.x timestamps are milliseconds (MEDIUM):</strong> snapshot dates in the Web UI were ~53000 years out, and the orphaned temp-clone reaper could never fire. <strong>Pod capacity reporting (MEDIUM, #10):</strong> <code>used</code> is clamped to the pod quota, a pod at or over quota logs what that does and does not mean plus the array's raw figures, and new option <code>pure-pod-usage-metric</code> selects <code>provisioned</code> (default) / <code>virtual</code> / <code>physical</code>. Also: API 2.x host lookup no longer passes a wildcard to <code>names</code> (which silently returned nothing), N+1 REST lookup removed from <code>deactivate_storage</code>, and the API client cache key no longer collapses two storages on one array into a single client; and postinst no longer reports another vendor's <code>device</code>-scoped multipath settings as a Pure hazard.</span>
+            <span class="lang-zh"><strong>不再於每次 pvestatd 輪詢執行完整 SAN 重新掃描（嚴重）：</strong>Proxmox VE 每次 pvestatd 輪詢（約 10 秒）都會由 <code>storage_info()</code> 對每個 storage 循序呼叫 <code>activate_storage()</code>，而 <code>activate_storage()</code> 無條件執行 iSCSI session 重新掃描、SCSI host 掃描、全主機 <code>multipathd reconfigure</code> 以及 <code>udevadm trigger --subsystem-match=block</code> 與 <code>udevadm settle</code>。等於每個節點每分鐘做六次完整 multipath 重建與全系統區塊裝置重新觸發，而且會直接與裝置探索競爭：正在等待新 LUN 的 VM 啟動或備份，等於在跟一個不斷拆除並重建對應表的 reconfigure 賽跑。現在只有登入新的 iSCSI portal 時會立即重新掃描，其餘最多每 <code>pure-rescan-interval</code>（新選項，預設 300 秒）一次；<code>multipathd reconfigure</code> 在所有探索路徑上以行程範圍限流為每 30 秒一次。<strong>逾時處理器內部無法終結的卡死（高）：</strong><code>_run_cmd</code> 原本執行 <code>kill(TERM)</code> 後接<em>會阻塞的</em> <code>waitpid</code>；處於 D state 的子行程——正是這些逾時存在的理由——無法被終結，因此處理器本身卡死。現在改為 TERM 升級 KILL，並只以 <code>WNOHANG</code> 回收。<strong>重寫裝置探索（高，#13）：</strong><code>wait_for_multipath_device()</code> 原本只在可能耗盡整個逾時的迴圈本體最後才檢查，等於只讓呼叫端在最具破壞性的步驟之後看一次裝置。現在改為先檢查、每個步驟後再檢查、步驟之間輕量輪詢，且全程檢查截止時間——失敗訊息也會回報 multipathd 當下實際看到的內容、相符的 <code>/dev/disk/by-id</code> 連結，以及在失敗當下擷取的逐 session iSCSI 狀態。<strong>REST 2.x 時間戳記為毫秒（中）：</strong>Web UI 的快照日期偏離約 53000 年，殘留暫存複製回收也永遠不會觸發。<strong>Pod 容量回報（中，#10）：</strong><code>used</code> 會被限制在 pod 配額之內，達到或超過配額的 pod 會記錄這代表什麼、不代表什麼，以及陣列回傳的原始數值；新增選項 <code>pure-pod-usage-metric</code> 可選 <code>provisioned</code>（預設）／<code>virtual</code>／<code>physical</code>。另外：API 2.x 的主機查詢不再把萬用字元傳給 <code>names</code>（先前會靜默回傳空值）、移除 <code>deactivate_storage</code> 的 N+1 REST 查詢，API 用戶端快取鍵不再把同一陣列上的兩個 storage 併成同一個用戶端，postinst 也不再把其他廠商 <code>device</code> 範圍的 multipath 設定回報為 Pure 的風險。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.21 <span class="changelog-tag changelog-tag--critical">High</span></div>

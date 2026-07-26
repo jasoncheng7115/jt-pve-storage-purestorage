@@ -41,6 +41,7 @@ use PVE::Storage::Custom::PureStorage::ISCSI qw(
     login_target
     logout_target
     get_sessions
+    get_session_states
     rescan_sessions
     is_portal_logged_in
     wait_for_device
@@ -49,6 +50,8 @@ use PVE::Storage::Custom::PureStorage::Multipath qw(
     rescan_scsi_hosts
     rescan_scsi_device
     multipath_reload
+    multipath_reload_throttled
+    describe_wwid_state
     multipath_flush
     multipath_resize_map
     get_multipath_device
@@ -230,6 +233,48 @@ sub properties {
             type => 'string',
             optional => 1,
         },
+        'pure-pod-usage-metric' => {
+            description => "Which Pure pod space figure is reported to Proxmox"
+                . " VE as 'used' when the pod has a quota_limit set."
+                . " 'provisioned' (default) is the sum of the provisioned"
+                . " sizes of the pod's volumes — this is what the array"
+                . " checks when deciding whether the NEXT volume create or"
+                . " grow in the pod is allowed, so it is the figure that"
+                . " predicts allocation failures. Because Pure volumes are"
+                . " thin, a pod can read as 100% full while almost nothing"
+                . " has been written to it, and writing into the existing"
+                . " volumes keeps working. 'virtual' reports host-written"
+                . " logical bytes instead, which matches the intuitive"
+                . " 'how full is it' reading but does NOT predict when an"
+                . " allocation will be refused. 'physical' reports the"
+                . " post-deduplication bytes actually consumed on the array."
+                . " Only affects reporting; it never changes what the array"
+                . " enforces.",
+            type => 'string',
+            enum => ['provisioned', 'virtual', 'physical'],
+            default => 'provisioned',
+            optional => 1,
+        },
+        'pure-rescan-interval' => {
+            description => "Minimum seconds between the SAN rescans that"
+                . " activate_storage performs (iSCSI session rescan, SCSI"
+                . " host scan, multipath reconfigure, udev trigger)."
+                . " Proxmox VE calls activate_storage on every pvestatd"
+                . " poll (~10s), so running those unconditionally means a"
+                . " host-wide 'multipathd reconfigure' and 'udevadm"
+                . " trigger' six times a minute on every node, which keeps"
+                . " device-mapper in flux and competes with device"
+                . " discovery during VM start/backup. A rescan is always"
+                . " performed immediately when this node logs in to a new"
+                . " iSCSI portal; this interval bounds the periodic"
+                . " safety-net rescan in between. Set to 0 to rescan on"
+                . " every activation (legacy behaviour).",
+            type => 'integer',
+            minimum => 0,
+            maximum => 3600,
+            default => 300,
+            optional => 1,
+        },
     };
 }
 
@@ -249,6 +294,8 @@ sub options {
         'pure-status-timeout' => { optional => 1 },
         'pure-activate-deadline' => { optional => 1 },
         'pure-pod'           => { optional => 1 },
+        'pure-pod-usage-metric' => { optional => 1 },
+        'pure-rescan-interval'  => { optional => 1 },
         nodes                => { optional => 1 },
         disable              => { optional => 1 },
         content              => { optional => 1 },
@@ -425,6 +472,63 @@ sub _record_status_ok {
             delete $h->{cap_warn_emit};
         }
     }
+    _write_health_state($storeid, $h);
+}
+
+# Explain a pod that reports as full, once per CAPACITY_COOLDOWN_SEC.
+#
+# A pod-backed storage reports total = the pod's quota_limit and used = a pod
+# space figure (pure-pod-usage-metric, default 'provisioned'). Because Pure
+# volumes are thin, a pod holding one 32 GiB volume reports 32 GiB provisioned
+# with ~0 bytes written — so setting a 3 GiB quota afterwards makes Proxmox VE
+# show the storage as 100% full immediately, while writing into the existing
+# volume keeps working. Both halves of that are correct: the array WILL refuse
+# the next volume create or grow in the pod, and it will NOT refuse writes to
+# volumes that already exist. Nothing in the numbers says so, though, so say it
+# explicitly and print the raw figures the array returned.
+sub _warn_pod_quota_exhausted {
+    my ($storeid, $scfg, $capacity) = @_;
+
+    return unless ref($capacity) eq 'HASH';
+    return unless ($capacity->{quota_source} // '') eq 'pod';
+
+    my $total    = $capacity->{total}    // 0;
+    my $raw_used = $capacity->{raw_used} // 0;
+    return unless $total > 0 && $raw_used >= $total;
+
+    my $h = _read_health_state($storeid);
+    my $now = time();
+    return if ($now - ($h->{pod_quota_emit} // 0)) < CAPACITY_COOLDOWN_SEC;
+
+    my $space = ref($capacity->{raw_space}) eq 'HASH' ? $capacity->{raw_space} : {};
+    my $raw = join(', ', map { "$_=" . ($space->{$_} // 'n/a') }
+        grep { defined $space->{$_} }
+        qw(total_provisioned virtual total_physical total_used unique snapshots));
+
+    my $msg = sprintf(
+        "pure-storage: [WARNING] storage '%s' pod '%s' is at or over its quota: "
+        . "quota_limit=%d bytes, %s=%d bytes.\n"
+        . "  This means the array will REFUSE the next volume create or grow in "
+        . "this pod. It does NOT mean the pod is out of physical space, and it "
+        . "does not stop writes to volumes that already exist — Pure volumes are "
+        . "thin, so provisioned size counts against the quota from the moment a "
+        . "volume is created, whether or not data has been written to it.\n"
+        . "  To fix: raise the pod quota (Storage > Pods > Edit, or "
+        . "'purepod setattr --quota-limit'), or free provisioned capacity by "
+        . "destroying and eradicating unused volumes in the pod.\n"
+        . "  To report host-written bytes instead of provisioned size, set "
+        . "'pure-pod-usage-metric virtual' — note that reading will no longer "
+        . "predict when an allocation is refused.\n",
+        $storeid, ($scfg->{'pure-pod'} // '?'), $total,
+        ($capacity->{metric} // 'provisioned'), $raw_used);
+    $msg .= "  Raw pod space from the array: $raw\n" if $raw;
+    $msg .= "  Pod is stretched over $capacity->{array_count} arrays; some Pure "
+          . "pod space figures are reported per array replica.\n"
+        if ($capacity->{array_count} // 0) > 1;
+
+    warn $msg;
+
+    $h->{pod_quota_emit} = $now;
     _write_health_state($storeid, $h);
 }
 
@@ -752,8 +856,20 @@ sub _get_api {
     # so they never clobber each other.
     my $status_path = $opts{status} ? 1 : 0;
 
-    my $storeid = $scfg->{storage} // $scfg->{'pure-portal'} // 'unknown';
-    my $cache_key = $status_path ? "$storeid\0status" : $storeid;
+    # Cache key. NOTE: $scfg->{storage} is always undef — PVE's storage config
+    # hash does not carry the storage id — so this used to degrade to keying on
+    # the portal alone. Two storages pointing at the same array with different
+    # API tokens (or different pure-status-timeout values) would then share one
+    # cached client, and whichever one built it first won for the whole TTL.
+    # Key on everything that actually distinguishes a client.
+    my $cache_key = join("\0",
+        $scfg->{'pure-portal'}   // '',
+        $scfg->{'pure-api-token'} // '',
+        $scfg->{'pure-username'} // '',
+        $scfg->{'pure-ssl-verify'} // 0,
+        $status_path,
+        $status_path ? ($scfg->{'pure-status-timeout'} // 5) : '',
+    );
 
     # Return cached client if available, fresh, and from same process
     # (forked workers must not share session tokens)
@@ -933,7 +1049,7 @@ sub _backup_vm_config {
     } else {
         rescan_fc_hosts();
     }
-    multipath_reload();
+    multipath_reload_throttled();
 
     # Use a shorter, separate timeout for the config-backup volume:
     # it's a 1 MB auxiliary volume used only by pve-pure-config-get for
@@ -1376,20 +1492,19 @@ sub _cleanup_orphaned_temp_clones {
         next unless $vol->{name};
 
         # Safety: only delete volumes older than 1 hour
-        # This prevents deleting volumes currently in use
-        my $created = $vol->{created} // 0;
-        # API 2.x returns ISO 8601 timestamp (e.g., "2025-01-15T10:30:00Z")
-        # API 1.x returns epoch seconds
-        if ($created && $created =~ /^\d{4}-\d{2}-\d{2}T/) {
-            # Parse ISO 8601 to epoch (basic parsing without external modules)
-            if ($created =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
-                require POSIX;
-                require Time::Local;
-                $created = eval { Time::Local::timegm($6, $5, $4, $3, $2 - 1, $1) } // 0;
-            } else {
-                $created = 0;
-            }
-        }
+        # This prevents deleting volumes currently in use.
+        #
+        # Timestamp units matter here and used to be inverted: REST 2.x
+        # returns integer MILLISECONDS since the epoch, REST 1.x returns an
+        # ISO 8601 string. The old code assumed the opposite (ISO for 2.x,
+        # epoch SECONDS otherwise), so on every 2.x array `time() - $created`
+        # came out around -1.7e12 — never greater than 3600 — and orphaned
+        # temp snapshot clones were never reaped. Each leaked clone holds a
+        # volume slot, a host connection on every node, and a stale multipath
+        # device. pure_time_to_epoch() normalises both forms.
+        my $created = PVE::Storage::Custom::PureStorage::API::pure_time_to_epoch(
+            $vol->{created});
+        next unless $created;   # unknown age: never assume it is stale
         my $age_seconds = time() - $created;
 
         if ($age_seconds > 3600) {  # 1 hour
@@ -1602,14 +1717,55 @@ sub _ensure_multipath_config {
 # Storage operations
 #
 
+# Wall-clock of the last SAN rescan performed by activate_storage, per storeid.
+# Process-wide: pvestatd is long-lived, so this survives across polls and is
+# what actually bounds the rescan rate.
+my %_last_activate_rescan;
+
+# Decide whether activate_storage should perform its SAN rescan this time.
+#
+# Proxmox VE calls activate_storage() from storage_info() on EVERY pvestatd
+# poll (~10s), sequentially across all storages — see PVE::Storage::storage_info.
+# The previous implementation unconditionally ran, per poll and per node:
+#   rescan_sessions() + rescan_scsi_hosts() + multipathd reconfigure +
+#   udevadm trigger --subsystem-match=block + udevadm settle
+# i.e. a host-wide multipath rebuild and a re-trigger of every block device on
+# the system, six times a minute, forever. That is expensive on its own (it
+# serialises ahead of every other storage's status poll) and actively harmful
+# while something else is trying to discover a device: a backup or VM start
+# waiting for a new LUN is racing a reconfigure that keeps tearing the map
+# table down and rebuilding it.
+#
+# Discovery of genuinely new LUNs does not depend on this periodic rescan:
+# activate_volume(), path() and alloc_image() each run their own targeted
+# rescan/wait for the WWID they need. What remains here is a safety net for
+# LUNs mapped out-of-band (another node, the Pure UI), so a slow cadence is
+# sufficient. A rescan is still performed immediately, ignoring the interval,
+# whenever this call actually logged in to a new portal.
+sub _should_rescan_after_activate {
+    my ($storeid, $scfg, $forced) = @_;
+
+    return 1 if $forced;
+
+    my $interval = $scfg->{'pure-rescan-interval'} // 300;
+    return 1 if $interval <= 0;
+
+    my $last = $_last_activate_rescan{$storeid} // 0;
+    return 0 if (time() - $last) < $interval;
+    return 1;
+}
+
+sub _mark_activate_rescan {
+    my ($storeid) = @_;
+    $_last_activate_rescan{$storeid} = time();
+}
+
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
 
     # Verify Pure Storage connectivity. activate_storage runs on the pvestatd
     # health path, so use the short-timeout, single-attempt client (status =>
     # 1): a slow array fails this fast instead of stalling the poll cycle.
-    # Long mutating calls (e.g. volume_delete in the temp-clone cleanup below)
-    # pass their own per-call timeout override, so they are unaffected.
     my $api = _get_api($scfg, status => 1);
 
     # Verify we can connect to the array
@@ -1618,8 +1774,11 @@ sub activate_storage {
         die "Cannot connect to Pure Storage array at $scfg->{'pure-portal'}: $@";
     }
 
-    # Cleanup any orphaned temporary snapshot clones from previous crashes
-    _cleanup_orphaned_temp_clones($scfg, $storeid, $api);
+    # NOTE: orphaned temp-clone cleanup deliberately does NOT run here. It
+    # disconnects and destroys volumes on the array — mutating, potentially
+    # slow work that has no business on a path Proxmox VE polls every ~10s
+    # with the short-timeout health client. status() already forks it into
+    # the background reaper, under a lock, with the resilient client.
 
     # Ensure multipath is configured for Pure Storage
     _ensure_multipath_config();
@@ -1633,13 +1792,18 @@ sub activate_storage {
                 "Please install FC HBA or use 'pure-protocol iscsi'.";
         }
 
-        # FC: Rescan for any existing LUNs
-        rescan_fc_hosts(delay => 1);
-        rescan_scsi_hosts(delay => 1);
-        multipath_reload();
+        # FC: periodic safety-net rescan for LUNs mapped out-of-band. There is
+        # no login step on FC, so there is nothing that can force it; the
+        # interval is the only gate.
+        if (_should_rescan_after_activate($storeid, $scfg, 0)) {
+            _mark_activate_rescan($storeid);
+            rescan_fc_hosts(delay => 1);
+            rescan_scsi_hosts(delay => 1);
+            multipath_reload_throttled();
 
-        # Trigger udev to update device info
-        _udev_refresh();
+            # Trigger udev to update device info
+            _udev_refresh();
+        }
 
         # Verify FC fabric connectivity to Pure Storage target ports
         my $fc_targets = eval { get_fc_targets(); } // [];
@@ -1661,6 +1825,11 @@ sub activate_storage {
             my @unreachable;
             my @failed;
             my @deferred;
+            # Set when this call actually establishes a NEW session (as
+            # opposed to finding every portal already logged in). A new
+            # session can expose LUNs nothing else is going to look for, so it
+            # forces the rescan below past the pure-rescan-interval gate.
+            my $forced_rescan = 0;
 
             # Snapshot the iSCSI session list ONCE before the loop. The
             # per-portal fast-path check below used to call is_portal_logged_in
@@ -1729,6 +1898,7 @@ sub activate_storage {
                 } else {
                     push @logged_in, $portal_addr;
                     push @reach_ports, $port;
+                    $forced_rescan = 1;
                 }
             }
 
@@ -1803,13 +1973,19 @@ sub activate_storage {
                 }
             }
 
-            # Rescan for any existing LUNs after iSCSI login
-            rescan_sessions();
-            rescan_scsi_hosts(delay => 1);
-            multipath_reload();
+            # Rescan for LUNs. Forced when this call actually established a
+            # new session (there may be LUNs behind it that nothing else will
+            # look for); otherwise rate-limited by pure-rescan-interval, see
+            # _should_rescan_after_activate for why that matters.
+            if (_should_rescan_after_activate($storeid, $scfg, $forced_rescan)) {
+                _mark_activate_rescan($storeid);
+                rescan_sessions();
+                rescan_scsi_hosts(delay => 1);
+                multipath_reload_throttled();
 
-            # Trigger udev to update device info
-            _udev_refresh();
+                # Trigger udev to update device info
+                _udev_refresh();
+            }
         }
     }
 
@@ -1845,7 +2021,16 @@ sub deactivate_storage {
     for my $vol (@$volumes) {
         next unless $vol->{name};
 
-        my $wwid = eval { $api->volume_get_wwid($vol->{name}); };
+        # Derive the WWID from the serial the list response already carried
+        # instead of issuing a per-volume REST round-trip. On a storage with
+        # hundreds of volumes the old form was an N+1 storm against the
+        # array's management gateway, fired exactly when a node is shutting
+        # down or a storage is being disabled cluster-wide. Fall back to the
+        # per-volume lookup only when serial is absent.
+        my $wwid = $vol->{serial}
+            ? eval { $api->serial_to_wwid($vol->{serial}); }
+            : undef;
+        $wwid = eval { $api->volume_get_wwid($vol->{name}); } unless $wwid;
         next unless $wwid;
 
         # Check if device is in use before cleanup (protect running VMs)
@@ -1915,8 +2100,12 @@ sub deactivate_storage {
         }
     }
 
-    # Flush unused multipath maps
-    eval { multipath_flush(); };
+    # NOTE: no global multipath flush here. `multipath -F` would flush every
+    # unused map on the host, including maps owned by other storage plugins
+    # and by the customer's own LUNs — multipath_flush() deliberately croaks
+    # when called without a device for exactly that reason, so the previous
+    # `eval { multipath_flush(); }` here could only ever throw and be
+    # swallowed. Per-volume cleanup above already removed our own maps.
 
     return 1;
 }
@@ -1941,11 +2130,14 @@ sub status {
     my $pod = $scfg->{'pure-pod'};
 
     eval {
-        my $capacity = $api->get_managed_capacity($pod);
+        my $capacity = $api->get_managed_capacity(
+            $pod, usage_metric => $scfg->{'pure-pod-usage-metric'});
 
         $cache->{total}     = $capacity->{total};
         $cache->{used}      = $capacity->{used};
         $cache->{avail}     = $capacity->{available};
+
+        _warn_pod_quota_exhausted($storeid, $scfg, $capacity);
     };
     if ($@) {
         my $err = $@;
@@ -2199,7 +2391,7 @@ sub alloc_image {
             # SCSI host rescan and multipath reload
             warn "[$loop_count] Rescanning SCSI hosts and multipath...\n" if $loop_count <= 3;
             eval { rescan_scsi_hosts(delay => 1); };
-            eval { multipath_reload(); };
+            eval { multipath_reload_throttled(); };
 
             # Trigger udev to update WWIDs (fixes stale WWID cache issue)
             _udev_refresh();
@@ -2341,7 +2533,7 @@ sub free_image {
         }
 
         # Step 6: Final multipath reload to settle any leftover state.
-        eval { multipath_reload(); };
+        eval { multipath_reload_throttled(); };
     }
 
     # Step 7: Destroy volume on Pure Storage (soft delete — Pure auto-eradicates
@@ -2638,7 +2830,32 @@ sub activate_volume {
         }
     }
 
-    # Rescan for the device based on protocol
+    # Get volume WWID for device identification
+    my $wwid = eval { $api->volume_get_wwid($pure_volname); };
+    unless ($wwid) {
+        die "Cannot get WWID for volume '$pure_volname'. " .
+            "This may indicate a Pure Storage API issue.";
+    }
+
+    # Fast path: the device is usually already present (the volume was
+    # connected before, or another activation on this node already discovered
+    # it). Check before doing anything expensive. The old order rescanned the
+    # transport, scanned every SCSI host and issued a host-wide `multipathd
+    # reconfigure` FIRST, unconditionally — so the common case paid the full
+    # cost, and worse, activate_volume is on the path of VM start and backup
+    # preparation, where that reconfigure churns maps other operations are
+    # concurrently trying to use.
+    {
+        my $existing = eval { get_device_by_wwid($wwid); };
+        if ($existing && -b $existing) {
+            eval { _track_wwid($storeid, $wwid); };
+            return 1;
+        }
+    }
+
+    # Not present yet: rescan for it. wait_for_multipath_device() below runs
+    # its own escalation ladder (transport rescan -> SCSI host scan -> udev ->
+    # throttled reconfigure), so do not duplicate the expensive steps here.
     if ($protocol eq 'fc') {
         eval { rescan_fc_hosts(delay => 1); };
         if ($@) {
@@ -2651,22 +2868,9 @@ sub activate_volume {
         }
     }
 
-    # Common: Rescan SCSI hosts and reload multipath
     eval { rescan_scsi_hosts(); };
     if ($@) {
         warn "Warning: SCSI host rescan failed: $@\n";
-    }
-
-    eval { multipath_reload(); };
-    if ($@) {
-        warn "Warning: Multipath reload failed: $@\n";
-    }
-
-    # Get volume WWID for device identification
-    my $wwid = eval { $api->volume_get_wwid($pure_volname); };
-    unless ($wwid) {
-        die "Cannot get WWID for volume '$pure_volname'. " .
-            "This may indicate a Pure Storage API issue.";
     }
 
     # Wait for device to appear with protocol-specific rescan in loop
@@ -2683,24 +2887,64 @@ sub activate_volume {
     my $device = wait_for_multipath_device($wwid, %wait_opts);
 
     unless ($device) {
-        # Device discovery failed - provide detailed diagnostics
+        # Device discovery failed. Capture the host-side state NOW, while it
+        # is still the state that produced the failure — by the time an
+        # operator runs 'multipath -ll' by hand the transient is long gone,
+        # which is exactly what made this class of report unanswerable.
         my $diag_msg = "Device for volume '$pure_volname' (WWID: $wwid) did not appear within ${timeout}s.\n";
         $diag_msg .= "Diagnostics:\n";
         $diag_msg .= "  - Protocol: $protocol\n";
         $diag_msg .= "  - Host: $host\n";
         $diag_msg .= "  - Volume connected: " . ($was_connected ? "yes (pre-existing)" : "yes (just connected)") . "\n";
 
+        my $state = eval { describe_wwid_state($wwid); } // '';
+        $diag_msg .= "$state\n" if $state;
+
         if ($protocol eq 'fc') {
+            my $fc_targets = eval { get_fc_targets(); } // [];
+            my @online = grep { $_->{is_target} && ($_->{port_state} // '') =~ /online/i } @$fc_targets;
+            $diag_msg .= "  - FC targets visible: " . scalar(@online) . " online of "
+                . scalar(@$fc_targets) . " total\n";
             $diag_msg .= "  - Check: FC HBA status, FC switch zoning, fiber connections\n";
             $diag_msg .= "  - Try: 'cat /sys/class/fc_host/host*/port_state' to verify FC port status\n";
         } else {
-            $diag_msg .= "  - Check: iSCSI sessions, network connectivity, target portal accessibility\n";
+            # Session state matters specifically: rescan_sessions() only
+            # rescans sessions the kernel reports as LOGGED_IN, so a session
+            # sitting in FAILED/REOPEN is silently skipped and no amount of
+            # waiting will surface a LUN behind it.
+            my $sessions = eval { get_session_states(); } // [];
+            if (@$sessions) {
+                $diag_msg .= "  - iSCSI sessions (" . scalar(@$sessions) . "):\n";
+                for my $s (@$sessions) {
+                    $diag_msg .= "      $s->{session}: state="
+                        . ($s->{state} // 'unreadable')
+                        . " portal=" . ($s->{portal} // '?') . "\n";
+                }
+                my @bad = grep { ($_->{state} // '') ne 'LOGGED_IN' } @$sessions;
+                $diag_msg .= "    NOTE: " . scalar(@bad) . " session(s) are not LOGGED_IN."
+                    . " LUN rescan is only issued on LOGGED_IN sessions, so a LUN"
+                    . " reachable only through those paths cannot be discovered until"
+                    . " they recover.\n" if @bad;
+            } else {
+                $diag_msg .= "  - iSCSI sessions: NONE. This node has no iSCSI session to"
+                    . " the array, so no LUN can appear. Check network reachability to"
+                    . " the array's iSCSI portals.\n";
+            }
             $diag_msg .= "  - Try: 'iscsiadm -m session' to verify iSCSI sessions\n";
         }
         $diag_msg .= "  - Try: 'multipath -ll' to check multipath device status\n";
+        $diag_msg .= "  - If the device shows up healthy moments later, raise"
+            . " 'pure-device-timeout' (currently ${timeout}s).\n";
 
         die $diag_msg;
     }
+
+    # Track the WWID so cluster residual cleanup can find a stale device for
+    # it later. path() has always done this, but a node can legitimately
+    # activate a volume without path() being called on it, and an untracked
+    # WWID is invisible to the orphan reaper once the volume is gone from the
+    # array (Phase 1 can only re-import WWIDs that still exist there).
+    eval { _track_wwid($storeid, $wwid); };
 
     return 1;
 }
@@ -2824,7 +3068,7 @@ sub path {
             rescan_sessions();
         }
         rescan_scsi_hosts();
-        multipath_reload();
+        multipath_reload_throttled();
 
         # Trigger udev to update WWIDs (fixes stale WWID cache issue)
         _udev_refresh();
@@ -2849,7 +3093,10 @@ sub path {
                 eval { rescan_sessions(); };
             }
             eval { rescan_scsi_hosts(); };
-            eval { multipath_reload(); };
+            # Throttled: a host-wide `multipathd reconfigure` every 2 seconds
+            # rebuilds every map on the node and can transiently hide the very
+            # map being waited for.
+            multipath_reload_throttled();
 
             # Trigger udev to update WWIDs (fixes stale WWID cache issue)
             _udev_refresh();
@@ -2927,7 +3174,26 @@ sub _cleanup_temp_snap_clone {
 sub filesystem_path {
     my ($class, $scfg, $volname, $snapname) = @_;
 
-    my ($path, $vmid, $format) = $class->path($scfg, $volname, $scfg->{storage}, $snapname);
+    # PVE's storage config hash does NOT carry the storage id — $scfg->{storage}
+    # is always undef (verified against PVE::Storage::config on 9.x). The old
+    # body passed it straight through as the storeid, so every call died deep
+    # inside Naming.pm with a bare "storage is required" and no indication of
+    # where it came from.
+    #
+    # Every Pure volume name is derived from the storeid, so this method simply
+    # cannot be implemented without one. Nothing in PVE reaches it for this
+    # plugin today: the base-class methods that use filesystem_path
+    # (activate_volume, volume_size_info) are all overridden here, and
+    # PVE::Storage::abs_filesystem_path goes through PVE::Storage::path, which
+    # does pass the storeid. Fail loudly and legibly if a future caller shows up.
+    my $storeid = $scfg->{storage};
+    die "filesystem_path is not supported by the purestorage plugin "
+        . "(volume '$volname'): Pure volume names are derived from the storage "
+        . "id, which is not available in this call. Use "
+        . "PVE::Storage::path()/\$plugin->path(\$scfg, \$volname, \$storeid) instead.\n"
+        unless defined $storeid && length $storeid;
+
+    my ($path, $vmid, $format) = $class->path($scfg, $volname, $storeid, $snapname);
     return wantarray ? ($path, $vmid, $format) : $path;
 }
 
@@ -3125,7 +3391,12 @@ sub volume_snapshot_list {
 
         push @result, {
             name   => $snap_name,
-            ctime  => $snap->{created} // 0,
+            # PVE expects epoch SECONDS. Pure REST 2.x reports milliseconds,
+            # 1.x reports an ISO 8601 string; passing either through verbatim
+            # rendered snapshot dates in the Web UI as garbage (a millisecond
+            # value read as seconds lands ~53000 years in the future).
+            ctime  => PVE::Storage::Custom::PureStorage::API::pure_time_to_epoch(
+                $snap->{created}),
         };
     }
 

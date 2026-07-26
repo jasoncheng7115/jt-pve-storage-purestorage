@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.21-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.22-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -305,7 +305,7 @@ QEMU block device               passed to qemu           (raw, no FS layer
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.21-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.22-1_all.deb
 ```
 
 > ⚠ 首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件
@@ -384,6 +384,27 @@ Pod 是陣列上的命名空間。在 Pod 設定 `quota_limit` 並讓外掛指�
 > 錯誤。如果遇到這個錯誤：用 `purepolicy quota destroy <policy-name>`
 > （或 REST `DELETE /api/2.x/policies/quota?names=<policy-name>`）
 > 把 policy 砍掉，再改用 `Pod.quota_limit`。
+
+> **為什麼 Pod 幾乎沒寫入資料卻顯示 100% 已滿**
+>
+> Pure 的 Volume 是精簡配置。配置（allocation）時真正計入
+> `Pod.quota_limit` 的是 Pod 內各 Volume 的**配置（provisioned）大小**，
+> 而不是主機實際寫入的位元組。一個內含 32 GiB Volume 的 Pod，從該
+> Volume 建立的那一刻起就回報 32 GiB provisioned，即使它是空的。之後
+> 才在該 Pod 設定 3 GiB 配額，Proxmox VE 會立刻顯示為已滿——而且這是
+> 正確的：陣列**會**拒絕該 Pod 內的下一次 Volume 建立或擴充，但**不會**
+> 拒絕對既有 Volume 的寫入，這就是為什麼資料仍然寫得進去。
+>
+> 處理方式：調高配額（`purepod setattr --quota-limit`，或 Purity 6.6+
+> 的 Storage > Pods > Edit），或銷毀**並清除（eradicate）** Pod 內未使用
+> 的 Volume 以釋放已配置容量（已銷毀但尚未清除的 Volume 仍會計入）。
+>
+> 若要改為回報主機寫入的位元組，可設定
+> `pure-pod-usage-metric virtual`。顯示的數字會符合直覺的「用了多少」，
+> 但將無法預測何時會被拒絕配置。
+>
+> 當 Pod 達到或超過配額時，外掛每小時會記錄一次說明，內含陣列回傳的
+> 原始 Pod 空間數值：`journalctl -t pvestatd | grep pure-storage`。
 
 Proxmox VE 端：
 ```bash
@@ -485,7 +506,9 @@ PVE 本身擋下。
 | `pure-config-backup-timeout` | 否 | 15 | 輔助 config-backup Volume 等 multipath device 的逾時秒數（5..60）。非必要功能；降級 fabric 下調低能更快返回 |
 | `pure-status-timeout` | 否 | 5 | pvestatd 健康路徑（`activate_storage` 與 `status` 前景）REST 呼叫的逾時秒數（2..60）。短逾時、單次嘗試，讓緩慢陣列快速失敗，而非把同節點其他 storage 拖成 `inactive`；下次輪詢即為重試。資料路徑與背景回收仍用耐用用戶端 |
 | `pure-activate-deadline` | 否 | 30 | `activate_storage` 中 iSCSI portal 探索／登入迴圈的累積時間預算秒數（0..300）。用盡且至少一條路徑已建立後，其餘 portal 延後至後續啟用處理。尚無任何路徑時不套用。設為 0 停用 |
+| `pure-rescan-interval` | 否 | 300 | `activate_storage` 週期性 SAN 重新掃描（iSCSI session 重新掃描、SCSI host 掃描、`multipathd reconfigure`、`udevadm trigger`）的最小間隔秒數（0..3600）。Proxmox VE 每次 pvestatd 輪詢（約 10 秒）都會呼叫 `activate_storage`，若無條件執行，等於每個節點每分鐘做六次全主機 multipath 重建。本節點登入新的 iSCSI portal 時一定會立即重新掃描；此間隔只限制中間的週期性安全網。設為 0 可回到 1.1.22 之前的行為 |
 | `pure-pod` | 否 | - | Pod 名稱（見「容量與權限隔離」一節）。設定後容量回報以 Pod 配額為準，所有 Volume 名稱進入 Pod 命名空間 |
+| `pure-pod-usage-metric` | 否 | provisioned | Pod 設有 `quota_limit` 時，以哪一個 pod 空間數值回報為 `used`。`provisioned` 為 Pod 內各 Volume 配置大小的總和，也是陣列在允許下一次配置前檢查的數值，因此可預測配置失敗——但由於 Volume 為精簡配置，Pod 可能在幾乎沒有寫入的情況下顯示 100% 已滿。`virtual` 為主機寫入的邏輯位元組（符合直覺，但無法預測配置失敗）。`physical` 為陣列上縮減後的位元組。僅影響回報，不會改變陣列實際的強制行為 |
 | `content` | 是 | - | 內容類型：`images`、`rootdir` |
 | `nodes` | 否 | （全部） | 此 storage 開放給哪些叢集節點，逗號分隔。省略代表全部節點。PVE 通用 Storage 屬性 |
 

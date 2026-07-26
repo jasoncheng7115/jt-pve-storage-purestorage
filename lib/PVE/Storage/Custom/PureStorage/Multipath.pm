@@ -19,6 +19,8 @@ use Exporter qw(import);
 our @EXPORT_OK = qw(
     rescan_scsi_hosts
     multipath_reload
+    multipath_reload_throttled
+    describe_wwid_state
     multipath_flush
     multipath_resize_map
     get_multipath_device
@@ -44,8 +46,14 @@ use constant {
     SCSI_DEVICE_PATH   => '/sys/class/scsi_device',
     BLOCK_DEVICE_PATH  => '/sys/class/block',
     DEVICE_WAIT_TIMEOUT   => 60,
-    DEVICE_WAIT_INTERVAL  => 2,
+    DEVICE_WAIT_INTERVAL  => 1,
+    # Minimum seconds between two host-wide `multipathd reconfigure` calls
+    # issued by this process. See multipath_reload_throttled().
+    RECONFIGURE_MIN_INTERVAL => 30,
 };
+
+# Process-wide timestamp of the last `multipathd reconfigure` we issued.
+our $LAST_RECONFIGURE = 0;
 
 # Untaint a device name (e.g., sda, dm-0)
 sub _untaint_device_name {
@@ -228,6 +236,37 @@ sub sysfs_read_with_timeout {
     return length($content) ? $content : undef;
 }
 
+# Reap a child that blew through its alarm budget, WITHOUT ever blocking.
+#
+# The obvious `kill('TERM', $pid); waitpid($pid, 0);` is a trap in exactly the
+# scenario this whole module exists to survive: a child wedged in
+# uninterruptible sleep (D state) inside the kernel block layer. Such a child
+# cannot be killed by TERM *or* KILL, so the blocking waitpid never returns —
+# and by that point our alarm has already fired and been cleared, so nothing
+# is left to break us out. The timeout handler itself becomes the hang.
+#
+# Escalate TERM -> KILL and only ever reap with WNOHANG, on a short bounded
+# poll. A child we cannot reap is left for init; it holds a kernel resource
+# either way, and blocking here would only add our process to the casualty
+# list. Same pattern as sysfs_write_with_timeout().
+sub _reap_timed_out_child {
+    my ($pid, $cmd) = @_;
+    return unless $pid;
+
+    for my $sig ('TERM', 'KILL') {
+        kill($sig, $pid);
+        my $deadline = time() + 2;
+        while (time() < $deadline) {
+            my $res = waitpid($pid, POSIX::WNOHANG());
+            return if $res != 0;   # reaped, or already gone
+            select(undef, undef, undef, 0.1);
+        }
+    }
+
+    warn "child pid $pid for '@{$cmd // []}' did not die after TERM+KILL "
+        . "(likely uninterruptible sleep in the kernel); leaving it to init\n";
+}
+
 # Run a command and return output
 sub _run_cmd {
     my ($cmd, %opts) = @_;
@@ -271,11 +310,7 @@ sub _run_cmd {
     if ($@) {
         alarm(0);
         if ($@ eq "timeout\n") {
-            # Kill the child process on timeout to prevent orphans
-            if ($pid) {
-                kill('TERM', $pid);
-                waitpid($pid, 0);
-            }
+            _reap_timed_out_child($pid, $cmd);
             croak "Command timed out after ${timeout}s: @$cmd";
         }
         croak "Command failed: $@";
@@ -359,11 +394,36 @@ sub rescan_scsi_hosts {
     return 1;
 }
 
-# Reload multipath configuration
+# Reload multipath configuration.
+#
+# `multipathd reconfigure` is a HOST-WIDE sledgehammer: multipathd re-reads
+# every config file and rebuilds every map on the node, not just ours. It is
+# the right call after we edit /etc/multipath/conf.d/pure-storage.conf. It is
+# the wrong call to put in a polling loop — while a reconfigure is in flight,
+# `multipathd show maps` can report an incomplete map list, so a caller that
+# reconfigures and then immediately looks for a map is racing itself. Two such
+# loops running concurrently (a backup waiting for a device, and pvestatd's
+# 10-second activate_storage poll) keep device-mapper permanently in flux.
 sub multipath_reload {
     my (%opts) = @_;
 
+    $LAST_RECONFIGURE = time();
     _run_cmd([MULTIPATHD, 'reconfigure'], allow_nonzero => 1, timeout => $opts{timeout} // 30);
+    return 1;
+}
+
+# Rate-limited reconfigure for discovery/polling paths. Returns 1 if a
+# reconfigure was actually issued, 0 if it was suppressed by the cooldown.
+# Process-wide (not per-call) on purpose: pvedaemon and pvestatd are long-lived
+# and each hosts several callers that would otherwise reconfigure independently.
+sub multipath_reload_throttled {
+    my (%opts) = @_;
+
+    my $interval = $opts{min_interval} // RECONFIGURE_MIN_INTERVAL;
+    return 0 if (time() - $LAST_RECONFIGURE) < $interval;
+
+    eval { multipath_reload(%opts); };
+    warn "multipath reconfigure failed: $@" if $@;
     return 1;
 }
 
@@ -489,53 +549,180 @@ sub get_device_by_wwid {
     return $found ? _untaint_device_path($found) : undef;
 }
 
-# Wait for a multipath device to appear
+# Wait for a multipath device to appear.
+#
 # Options:
-#   timeout - max wait time in seconds (default 60)
-#   interval - check interval in seconds (default 2)
+#   timeout      - max wall-clock wait in seconds (default 60)
+#   interval     - cheap-poll interval in seconds (default 1)
 #   iscsi_rescan - coderef to call for iSCSI rescan (optional)
-#   fc_rescan - coderef to call for FC rescan (optional)
+#   fc_rescan    - coderef to call for FC rescan (optional)
+#
+# Structure matters here, and the previous structure was the bug behind
+# "device did not appear within 60s" reports on hosts where `multipath -ll`
+# looked perfectly healthy a minute later (issue #13):
+#
+#   1. The old loop probed for the device only at the END of a body that ran
+#      an iSCSI rescan (up to 10s per LOGGED_IN session), a SCSI host scan
+#      (up to 10s per host + 1s settle), a full `multipathd reconfigure` (up
+#      to 30s), `udevadm trigger` and `udevadm settle` (up to 10s each). On a
+#      fabric with a couple of slow paths one pass can consume the entire 60s
+#      budget, so the caller got exactly ONE look at the device — taken at the
+#      worst possible moment, right after a host-wide reconfigure churned the
+#      map table. A LUN that surfaced two seconds later was reported missing.
+#   2. It never probed BEFORE rescanning, so the overwhelmingly common case
+#      (the device is already there) paid the full expensive path anyway.
+#   3. It called `multipathd reconfigure` on every pass, which rebuilds every
+#      map on the host and can transiently hide the very map being waited for.
+#
+# The replacement is an escalation ladder with a cheap probe after every step
+# and between steps: check first, then rescan the transport, then scan SCSI
+# hosts, then nudge udev, and only reach for a host-wide reconfigure from the
+# second round onward and at most once per RECONFIGURE_MIN_INTERVAL. Every
+# step is deadline-aware, so the wall-clock budget is honoured instead of
+# being consumed by one indivisible pass.
 sub wait_for_multipath_device {
     my ($wwid, %opts) = @_;
 
     croak "wwid is required" unless $wwid;
 
-    my $timeout = $opts{timeout} // DEVICE_WAIT_TIMEOUT;
-    my $interval = $opts{interval} // DEVICE_WAIT_INTERVAL;
+    my $timeout      = $opts{timeout}  // DEVICE_WAIT_TIMEOUT;
+    my $interval     = $opts{interval} // DEVICE_WAIT_INTERVAL;
     my $iscsi_rescan = $opts{iscsi_rescan};
-    my $fc_rescan = $opts{fc_rescan};
-    my $start_time = time();
+    my $fc_rescan    = $opts{fc_rescan};
+    my $deadline     = time() + $timeout;
 
-    while ((time() - $start_time) < $timeout) {
-        # Protocol-specific rescan (if provided)
+    my $probe = sub {
+        my $device = get_device_by_wwid($wwid);
+        return ($device && -b $device) ? $device : undef;
+    };
+
+    # Cheapest thing first: it may already be here.
+    my $device = $probe->();
+    return $device if $device;
+
+    my $round = 0;
+    while (time() < $deadline) {
+        $round++;
+
+        # Step 1: transport rescan — ask the initiator to look for new LUNs.
         if ($iscsi_rescan && ref($iscsi_rescan) eq 'CODE') {
             eval { $iscsi_rescan->(); };
         }
         if ($fc_rescan && ref($fc_rescan) eq 'CODE') {
             eval { $fc_rescan->(); };
         }
+        $device = $probe->();
+        return $device if $device;
+        last if time() >= $deadline;
 
-        # Trigger SCSI rescan
-        rescan_scsi_hosts(delay => 1);
-        multipath_reload();
+        # Step 2: SCSI host scan — makes the kernel enumerate new LUNs.
+        eval { rescan_scsi_hosts(delay => 1); };
+        $device = $probe->();
+        return $device if $device;
+        last if time() >= $deadline;
 
-        # Trigger udev to update WWIDs (fixes stale WWID cache issue).
-        # Use timeout-bounded _run_cmd — bare system('udevadm') can hang.
+        # Step 3: udev — creates the /dev/mapper and /dev/disk/by-id nodes.
+        # Cheap relative to a reconfigure and usually all that is missing.
         eval { _run_cmd(['/sbin/udevadm', 'trigger', '--subsystem-match=block'],
             timeout => 10, allow_nonzero => 1, ignore_errors => 1); };
         eval { _run_cmd(['/sbin/udevadm', 'settle', '--timeout=5'],
             timeout => 10, allow_nonzero => 1, ignore_errors => 1); };
+        $device = $probe->();
+        return $device if $device;
+        last if time() >= $deadline;
 
-        # Check for device
-        my $device = get_device_by_wwid($wwid);
-        if ($device && -b $device) {
-            return $device;
+        # Step 4: host-wide reconfigure, last resort only. Skipped on the
+        # first round (udev almost always suffices for a freshly mapped LUN)
+        # and rate-limited process-wide so concurrent callers cannot turn it
+        # into a reconfigure storm.
+        if ($round >= 2) {
+            multipath_reload_throttled();
+            $device = $probe->();
+            return $device if $device;
         }
 
-        sleep($interval);
+        # Step 5: cheap polling until the next escalation round. `multipathd
+        # show maps` is inexpensive, so poll it rather than sitting idle —
+        # this is what turns "one look per minute" into "a look per second".
+        my $next_round = time() + 5;
+        while (time() < $next_round && time() < $deadline) {
+            sleep($interval);
+            $device = $probe->();
+            return $device if $device;
+        }
     }
 
     return undef;
+}
+
+# Human-readable snapshot of everything the host knows about a WWID, for
+# inclusion in "device did not appear" errors. An operator (or an issue
+# report) should be able to tell from this alone whether multipathd never saw
+# the LUN, saw it under a different WWID, or built the map but udev never
+# created the node — without asking for a second reproduction.
+#
+# Every lookup is best-effort and bounded; this runs on an already-failing
+# path and must never add a new way to hang.
+sub describe_wwid_state {
+    my ($wwid) = @_;
+    return '' unless $wwid;
+
+    my $wwid_lc = lc($wwid);
+    my @out;
+
+    # What multipathd currently has, and whether our WWID is among it.
+    my ($stdout, $stderr, $exit) = eval {
+        _run_cmd([MULTIPATHD, 'show', 'maps', 'raw', 'format', '%n %w'],
+            allow_nonzero => 1, ignore_errors => 1, timeout => 10);
+    };
+    if ($@) {
+        push @out, "  multipathd: NOT RESPONDING ($@)";
+        push @out, "    (this alone explains the failure: device lookup goes"
+            . " through 'multipathd show maps'. Check 'systemctl status multipathd'.)";
+    } else {
+        my @maps;
+        for my $line (split /\n/, ($stdout // '')) {
+            $line =~ s/^\s+|\s+$//g;
+            my ($name, $map_wwid) = split /\s+/, $line, 2;
+            next unless $name && $map_wwid;
+            push @maps, { name => $name, wwid => lc($map_wwid) };
+        }
+        my ($match) = grep { $_->{wwid} eq $wwid_lc } @maps;
+        push @out, "  multipathd maps: " . scalar(@maps) . " total, "
+            . scalar(grep { $_->{wwid} =~ /^3624a9370/ } @maps) . " Pure";
+        if ($match) {
+            my $node = "/dev/mapper/$match->{name}";
+            push @out, "  map for this WWID: $match->{name} -> $node"
+                . ((-b $node) ? " (block device present)"
+                              : " (NODE MISSING — udev did not create it)");
+        } else {
+            push @out, "  map for this WWID: NONE — multipathd has not built a"
+                . " map for $wwid";
+            my @pure = grep { $_->{wwid} =~ /^3624a9370/ } @maps;
+            if (@pure) {
+                push @out, "  other Pure WWIDs multipathd does see:";
+                push @out, "    $_->{wwid} ($_->{name})" for @pure[0 .. ($#pure > 4 ? 4 : $#pure)];
+                push @out, "    ... and " . (scalar(@pure) - 5) . " more" if @pure > 5;
+            }
+        }
+    }
+
+    # udev symlinks for the underlying SCSI paths. Present here but absent
+    # from multipathd means the paths arrived and multipath did not claim
+    # them (commonly `find_multipaths` waiting for a second path).
+    my @links;
+    eval {
+        local $SIG{ALRM} = sub { die "timeout\n" };
+        alarm(5);
+        @links = grep { lc($_) =~ /\Q$wwid_lc\E$/ }
+            glob("/dev/disk/by-id/scsi-*"), glob("/dev/disk/by-id/dm-uuid-mpath-*");
+        alarm(0);
+    };
+    alarm(0);
+    push @out, "  /dev/disk/by-id links for this WWID: "
+        . (@links ? join(', ', map { my $b = $_; $b =~ s|.*/||; $b } @links) : "none");
+
+    return join("\n", @out);
 }
 
 # Remove a SCSI device from the system

@@ -8,6 +8,184 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.22] - 2026-07-26
+
+Host-side stability release. Removes a standing SAN-rescan load that Proxmox VE
+triggered on every status poll, fixes an unkillable hang inside the command
+timeout handler, reworks device discovery, and corrects Pure REST 2.x timestamp
+handling. Addresses issue #13 and clarifies the pod capacity reporting behind
+issue #10.
+
+### CRITICAL — No more full SAN rescan on every pvestatd poll
+
+Proxmox VE calls `activate_storage()` from `PVE::Storage::storage_info()` on
+every pvestatd poll (~10s), sequentially for every configured storage.
+`activate_storage()` unconditionally performed, on each of those calls:
+
+- an iSCSI session rescan (up to 10s per `LOGGED_IN` session),
+- a SCSI host scan across every iSCSI host,
+- a host-wide `multipathd reconfigure`, which rebuilds **every** multipath map
+  on the node, and
+- `udevadm trigger --subsystem-match=block` followed by `udevadm settle`, which
+  re-triggers **every** block device on the system.
+
+That is a full multipath rebuild and a system-wide udev re-trigger six times a
+minute, on every node, per Pure storage. Beyond the standing cost — it runs in
+series ahead of every other storage's status poll — it competed directly with
+device discovery: a VM start or a backup waiting for a newly mapped LUN was
+racing a reconfigure that repeatedly tore the map table down and rebuilt it.
+
+Rescans now run **immediately** whenever this node logs in to a new iSCSI
+portal, and otherwise at most once per `pure-rescan-interval` (new option,
+default 300s; set to 0 to restore the previous behaviour). Discovery of new
+LUNs does not depend on this periodic rescan — `activate_volume()`, `path()`
+and `alloc_image()` each run their own targeted rescan and wait for the WWID
+they need. What remains here is a safety net for LUNs mapped out-of-band.
+
+`multipathd reconfigure` is additionally rate-limited process-wide to at most
+once per 30 seconds on all discovery and polling paths, so concurrent callers
+cannot turn it back into a reconfigure storm. Genuine configuration changes
+(writing `/etc/multipath/conf.d/pure-storage.conf`) still reload immediately.
+
+### HIGH — Unkillable hang inside the command timeout handler
+
+The `_run_cmd` timeout handler in `Multipath.pm` and `ISCSI.pm` ran
+`kill('TERM', $pid)` followed by a **blocking** `waitpid($pid, 0)`. A child in
+uninterruptible sleep — precisely the case these timeouts exist to survive —
+cannot be killed by `TERM` or `KILL`, so the blocking `waitpid` never returned,
+and the alarm that would have broken us out had already fired and been cleared.
+The timeout handler itself became the hang.
+
+It now escalates `TERM` to `KILL` and reaps only with `WNOHANG` on a bounded
+poll, leaving an unreapable child to init rather than joining it in D state —
+the same pattern `sysfs_write_with_timeout()` has always used.
+
+### HIGH — Device discovery wait loop reworked (issue #13)
+
+`wait_for_multipath_device()` probed for the device only at the **end** of a
+loop body that could consume the entire timeout budget on a degraded fabric
+(per-session iSCSI rescan, per-host SCSI scan, `multipathd reconfigure`, `udevadm
+trigger`, `udevadm settle`). With a 60s budget and a 45s pass, the caller got a
+single look at the device — taken at the worst possible moment, immediately
+after a host-wide reconfigure churned the map table. A LUN that surfaced two
+seconds later was reported missing. It also never probed *before* rescanning,
+so the common case (the device is already present) paid the full cost anyway.
+
+The loop is now an escalation ladder: probe first, then transport rescan, then
+SCSI host scan, then udev, and only from the second round a throttled
+reconfigure — with a cheap probe after every step and a ~1s poll between steps,
+deadline-aware at every stage. `activate_volume()` likewise checks for an
+existing device before doing any rescan work.
+
+### HIGH — Orphaned temp-clone cleanup removed from `activate_storage`
+
+That cleanup disconnects and destroys volumes on the array. Mutating,
+potentially slow array work does not belong on a path Proxmox VE polls every
+~10s with the short-timeout health client. `status()` already forks it into the
+background reaper, under a lock, with the resilient client.
+
+### HIGH — Actionable diagnostics when a device does not appear
+
+The "device did not appear" error now reports the host state **captured at
+failure time**, rather than leaving an operator to reproduce it:
+
+- what `multipathd` currently sees (total maps, Pure maps, whether a map exists
+  for this WWID, and whether its `/dev/mapper` node was actually created),
+- other Pure WWIDs multipathd does see, when ours is absent,
+- matching `/dev/disk/by-id` symlinks,
+- per-session iSCSI state read straight from sysfs, with an explicit note when
+  sessions are not `LOGGED_IN` — LUN rescan is only issued on `LOGGED_IN`
+  sessions, so a LUN reachable only through a failed path cannot be discovered
+  until it recovers,
+- for FC, the count of online target ports.
+
+### MEDIUM — Pure REST 2.x timestamps are milliseconds
+
+REST 2.x returns timestamps as milliseconds since the epoch; REST 1.x returns an
+ISO 8601 string. The code assumed the opposite. Two consequences:
+
+- Snapshot `ctime` handed to Proxmox VE was a millisecond value read as seconds,
+  placing snapshot dates roughly 53,000 years in the future in the Web UI.
+- The orphaned temp-clone reaper's "older than one hour" test could never be
+  true on a 2.x array, so orphaned temporary snapshot clones were never cleaned
+  up. Each one holds a volume slot, a host connection on every cluster node, and
+  a stale multipath device.
+
+Both now go through a single `pure_time_to_epoch()` helper that handles both
+forms.
+
+### MEDIUM — Host lookup for the connect-to-all-nodes step
+
+API 2.x does not accept wildcards in the `names` query parameter, so
+`host_list("pve-<cluster>-*")` always returned empty and new volumes were
+pre-connected to the local node only. Live migration still worked — the target
+node connects the volume itself during `activate_volume()` — but the
+pre-connect that exists to make migration seamless never happened, and the
+"not connected to hosts: ..." warning could never fire. Wildcards now go through
+the `filter` parameter, as `volume_list` already did.
+
+### MEDIUM — Pod capacity reporting (issue #10)
+
+For a pod-backed storage the plugin reports `total` = the pod's `quota_limit`
+and `used` = a pod space figure. Because Pure volumes are thin, a pod holding
+one 32 GiB volume reports 32 GiB provisioned with almost nothing written, so a
+3 GiB quota set afterwards reads as 100% full immediately — while writing into
+the existing volume keeps working. Both halves are correct: the array **will**
+refuse the next volume create or grow in the pod, and it will **not** refuse
+writes to volumes that already exist. Nothing in the numbers said so.
+
+- `used` is now clamped to the quota, so Proxmox VE is never handed
+  `used > total` (which rendered as a >100% bar).
+- A pod at or over its quota logs an explanation once per hour, including the
+  raw `space` figures the array returned and, for a stretched pod, the number of
+  member arrays — several Pure pod space figures are reported per array replica.
+- New option `pure-pod-usage-metric` selects which figure is reported:
+  `provisioned` (default; predicts allocation failures), `virtual`
+  (host-written logical bytes; matches the intuitive "how full is it" reading
+  but does not predict allocation failures), or `physical` (post-reduction
+  bytes on the array).
+
+### MEDIUM — N+1 REST lookup removed from `deactivate_storage`
+
+The per-volume `volume_get_wwid()` call is replaced by deriving the WWID from
+the serial the volume list already returned. The old form was an N+1 storm
+against the array's management gateway, fired exactly when a node is shutting
+down or a storage is being disabled cluster-wide.
+
+### MEDIUM — API client cache key
+
+The cache keyed on `$scfg->{storage}`, which Proxmox VE never populates, so it
+degraded to the portal address alone. Two storages pointing at the same array
+with different API tokens — or different `pure-status-timeout` values — shared a
+single cached client, and whichever built it first won for the whole 300s TTL.
+The key now covers portal, credentials, SSL setting, health-path flag and
+timeout.
+
+### LOW — Other fixes
+
+- `filesystem_path()` passed `$scfg->{storage}` as the storage id, which is
+  always `undef`, so every call died with a bare "storage is required" from
+  inside the naming module. It now fails with an actionable message. No Proxmox
+  VE path reaches it for this plugin today.
+- Removed the argument-less `multipath_flush()` call in `deactivate_storage`,
+  which could only ever throw — the helper deliberately refuses to run
+  `multipath -F`, which would flush every unused map on the host.
+- `activate_volume()` now tracks the volume WWID, closing a gap where a volume
+  activated without `path()` being called was invisible to the cluster
+  residual-device cleanup.
+- postinst no longer reports another vendor's multipath settings as a Pure
+  hazard. The dangerous-settings check grepped the whole of
+  `/etc/multipath.conf` with no scope awareness, so `no_path_retry queue`
+  inside a `device { vendor "NETAPP" }` block — which cannot affect Pure
+  devices, and is that vendor's own recommendation — was reported as a Pure
+  risk. The check now tracks scope and only warns for settings in `defaults`
+  or in a PURE device block; settings scoped to another vendor are reported
+  as a note for awareness.
+- `get_managed_capacity()` falls back to `GET /pods/space` when a Purity release
+  omits `space` from `GET /pods`.
+
+---
+
 ## [1.1.21] - 2026-06-16
 
 Management-plane load and pvestatd-isolation release. Reduces the steady-state

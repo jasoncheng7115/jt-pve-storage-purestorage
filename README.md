@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.21-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.22-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -319,7 +319,7 @@ QEMU block device               passed to qemu           (raw, no FS layer
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.21-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.22-1_all.deb
 ```
 
 > ⚠ Avoid `dpkg -i` for the first install: it does **not** auto-install
@@ -402,6 +402,32 @@ cannot collide with anything outside the Pod.
 > `purepolicy quota destroy <policy-name>` (or via REST
 > `DELETE /api/2.x/policies/quota?names=<policy-name>`) and set
 > `Pod.quota_limit` instead.
+
+> **Why a Pod can show as 100% full with almost nothing written**
+>
+> Pure Volumes are thin. What counts against `Pod.quota_limit` at
+> allocation time is the *provisioned* size of the Pod's Volumes, not
+> the bytes hosts have actually written. A Pod holding one 32 GiB
+> Volume reports 32 GiB provisioned from the moment that Volume is
+> created, even if it is empty. Set a 3 GiB quota on that Pod
+> afterwards and Proxmox VE will immediately show the storage as full
+> — correctly: the array **will** refuse the next Volume create or
+> grow in that Pod. It will **not** refuse writes into the Volumes
+> that already exist, which is why data can still be written.
+>
+> To resolve: raise the quota (`purepod setattr --quota-limit`, or
+> Storage > Pods > Edit in Purity 6.6+), or free provisioned capacity
+> by destroying **and eradicating** unused Volumes in the Pod
+> (destroyed-but-not-eradicated Volumes keep counting).
+>
+> To report host-written bytes instead, set
+> `pure-pod-usage-metric virtual`. The displayed figure will then match
+> the intuitive "how full is it" reading, but it will no longer predict
+> when an allocation is about to be refused.
+>
+> The plugin logs an explanation with the array's raw Pod space figures
+> once per hour while a Pod is at or over its quota:
+> `journalctl -t pvestatd | grep pure-storage`.
 
 On Proxmox VE:
 ```bash
@@ -509,7 +535,9 @@ amending the `nodes` line, or by re-creating the entry.
 | `pure-config-backup-timeout` | No | 15 | Timeout (s, 5..60) for the auxiliary config-backup volume's multipath device wait. Non-critical; lower values exit faster on degraded fabric. |
 | `pure-status-timeout` | No | 5 | Timeout (s, 2..60) for REST calls on the pvestatd health path (`activate_storage` + foreground of `status`). Short, single-attempt so a slow array fails fast instead of starving sibling storages into `inactive`; the next poll is the retry. The data path and background reaper keep the resilient client. |
 | `pure-activate-deadline` | No | 30 | Cumulative wall-clock budget (s, 0..300) for the iSCSI portal discover/login loop in `activate_storage`. Once spent and at least one path is up, remaining portals are deferred to a later activation. Never applies while zero paths are up. Set to 0 to disable. |
+| `pure-rescan-interval` | No | 300 | Minimum seconds (0..3600) between the periodic SAN rescans performed by `activate_storage` (iSCSI session rescan, SCSI host scan, `multipathd reconfigure`, `udevadm trigger`). Proxmox VE calls `activate_storage` on every pvestatd poll (~10s), so running these unconditionally means a host-wide multipath rebuild six times a minute on every node. A rescan is always performed immediately when this node logs in to a new iSCSI portal; this interval only bounds the periodic safety net. Set to 0 for the pre-1.1.22 behaviour. |
 | `pure-pod` | No | - | Pod name (see Capacity and Permission Isolation). Sets capacity reporting to the Pod's quota and namespaces all Volume names. |
+| `pure-pod-usage-metric` | No | provisioned | Which pod space figure is reported as `used` when the pod has a `quota_limit`. `provisioned` = sum of the provisioned sizes of the pod's Volumes; this is what the array checks before allowing the next allocation, so it predicts allocation failures — but because Volumes are thin, a pod can read 100% full with almost nothing written. `virtual` = host-written logical bytes (intuitive, but does not predict allocation failures). `physical` = post-reduction bytes on the array. Reporting only; never changes what the array enforces. |
 | `content` | Yes | - | Content types: `images`, `rootdir` |
 | `nodes` | No | (all) | Comma-separated list of cluster nodes where this storage is offered. Omit to make it available everywhere. Standard PVE storage attribute. |
 
