@@ -10,7 +10,10 @@ use warnings;
 use Carp qw(croak);
 use File::Basename qw(basename);
 
-use PVE::Storage::Custom::PureStorage::Multipath qw(sysfs_write_with_timeout);
+use PVE::Storage::Custom::PureStorage::Multipath qw(
+    sysfs_write_with_timeout
+    sysfs_read_with_timeout
+);
 
 use Exporter qw(import);
 
@@ -33,15 +36,21 @@ use constant {
     FC_REMOTE_PATH => '/sys/class/fc_remote_ports',
 };
 
-# Read file content
+# Read a sysfs attribute with a bounded timeout.
+#
+# This used to be a bare open()+readline. Every other sysfs read in the plugin
+# goes through sysfs_read_with_timeout() because a read of /sys can block
+# indefinitely when the underlying transport is wedged — and a wedged FC HBA
+# is exactly the situation in which this module gets called. get_fc_targets()
+# runs from activate_storage() on the pvestatd path, so an unbounded read here
+# stalls the whole poll cycle.
 sub _read_file {
-    my ($path) = @_;
-    return undef unless -r $path;
-    open(my $fh, '<', $path) or return undef;
-    my $content = <$fh>;
-    close($fh);
-    chomp($content) if defined $content;
-    return $content;
+    my ($path, $timeout) = @_;
+    return undef unless -e $path;
+    my $content = sysfs_read_with_timeout($path, $timeout // 3);
+    return undef unless defined $content;
+    chomp($content);
+    return length($content) ? $content : undef;
 }
 
 # Format WWN from 0x format to colon-separated format
@@ -258,9 +267,6 @@ sub rescan_fc_hosts {
     my $hosts = get_fc_hosts();
     my $rescanned = 0;
 
-    # Build set of FC host names for targeted SCSI rescan
-    my %fc_host_set = map { $_ => 1 } @$hosts;
-
     # Issue LIP and SCSI scan use sysfs_write_with_timeout (not bare
     # open()) — even though we filter to FC hosts only (which is the
     # categorical safety from to_pure5 Bug 1), the write itself can
@@ -273,14 +279,32 @@ sub rescan_fc_hosts {
     # protection here is that we ONLY iterate hosts already in
     # @$hosts (returned by get_fc_hosts() which queries
     # /sys/class/fc_host/), so we never touch a non-FC HBA.
-    for my $host (@$hosts) {
-        # Issue LIP (Loop Initialization Primitive)
-        my $issue_lip_file = FC_HOST_PATH . "/$host/issue_lip";
-        if (-w $issue_lip_file) {
-            if (sysfs_write_with_timeout($issue_lip_file, "1\n", 10)) {
-                $rescanned++;
-            } else {
-                warn "Failed to issue LIP on $host (timeout or error)\n";
+    # LIP is OPT-IN and off by default. It is a link reset, not a lookup.
+    #
+    # Issuing a Loop Initialization Primitive forces every device behind that
+    # HBA port to re-login — including LUNs belonging to other storage on the
+    # same HBA. It is the right tool for "a target port appeared or the link
+    # changed", and the wrong tool for "the array mapped me a new LUN".
+    #
+    # This function used to issue a LIP unconditionally, and it is called from
+    # tight loops: path()'s retry loop (every 2s), alloc_image()'s wait loop
+    # (every 3s), wait_for_multipath_device()'s fc_rescan callback (every
+    # round) and, before v1.1.22, activate_storage() on every pvestatd poll
+    # (every 10s). That is a repeated fabric-wide link reset in exchange for
+    # nothing: the SCSI host scan below is what actually discovers a newly
+    # mapped LUN, via REPORT_LUNS on the existing session.
+    #
+    # Pass lip => 1 only when a target port itself is expected to have
+    # changed, and never from a polling loop.
+    if ($opts{lip}) {
+        for my $host (@$hosts) {
+            my $issue_lip_file = FC_HOST_PATH . "/$host/issue_lip";
+            if (-w $issue_lip_file) {
+                if (sysfs_write_with_timeout($issue_lip_file, "1\n", 10)) {
+                    $rescanned++;
+                } else {
+                    warn "Failed to issue LIP on $host (timeout or error)\n";
+                }
             }
         }
     }
@@ -292,7 +316,7 @@ sub rescan_fc_hosts {
         for my $host (@$hosts) {
             my $scan_file = "$scsi_host_path/$host/scan";
             if (-w $scan_file) {
-                sysfs_write_with_timeout($scan_file, "- - -\n", 10);
+                $rescanned++ if sysfs_write_with_timeout($scan_file, "- - -\n", 10);
             }
         }
     }
@@ -391,8 +415,11 @@ Returns arrayref of FC host names (e.g., ['host0', 'host1']).
 
 =item B<rescan_fc_hosts(%opts)>
 
-Triggers LIP and SCSI rescan for new LUNs.
-Options: delay => seconds to wait after rescan.
+Triggers a SCSI host scan for new LUNs on every FC host.
+Options: delay => seconds to wait after the scan; lip => 1 to additionally
+issue a Loop Initialization Primitive. LIP is a disruptive link reset and is
+NOT needed to discover newly mapped LUNs — leave it off unless a target port
+itself is expected to have changed, and never enable it in a polling loop.
 
 =item B<format_wwn($wwn)>
 

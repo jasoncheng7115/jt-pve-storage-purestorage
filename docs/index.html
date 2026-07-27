@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.22 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.23 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.22-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.23-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.22-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.23-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.23 <span class="changelog-tag changelog-tag--critical">Critical</span></div>
+        <div class="changelog-date">2026-07-27</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>The in-use guard now fails CLOSED (CRITICAL):</strong> <code>is_device_in_use()</code> collapsed "I could not determine the answer" into "not in use" — a <code>/proc/mounts</code> read that timed out, or a <code>fuser</code> call killed by its own 5s watchdog, fell through to <code>return 0</code>. For a raw Pure LUN attached to a running VM there is no mount and no real holder (kpartx partitions are deliberately ignored), so <code>fuser</code> is the <em>only</em> positive signal that a guest has the device open — and a timed-out <code>fuser</code> turned "a VM is using this disk" into "nothing is using this disk", exactly when the node was unhealthy enough for that watchdog to fire. New <code>device_usage_state()</code> returns in-use / idle / <em>unknown</em> with a reason; unknown now counts as in use. <strong>A failed WWID lookup no longer disables the guard (CRITICAL):</strong> <code>free_image()</code>, <code>volume_snapshot_rollback()</code> and <code>create_base()</code> wrapped the lookup in <code>eval</code> and skipped the whole safety check when it failed, then destroyed or overwrote anyway. Rollback was the worst case — <code>volume_overwrite()</code> replaces the volume outright and has no eradication-delay recovery window. <strong>No automated path eradicates any more (HIGH):</strong> the temp-clone reapers called <code>volume_delete()</code> without <code>skip_eradicate</code>, i.e. permanent deletion with no recovery window from a background process; all 15 delete call sites are now recoverable. The reaper also re-matches candidates against the exact name <code>path()</code> generates and requires two independent age sources to agree. <strong>alloc_image() checks before replacing a state/cloudinit volume (HIGH)</strong> — it was the only destructive path with no in-use check at all. <strong>Two mirrored volume_list() calls that cancelled each other out (HIGH):</strong> named arguments passed to a positional-only function meant config-backup cleanup never ran and the "last disk?" test was always true; fixing either side alone would have destroyed config backups on the first disk deletion of a multi-disk VM, so both are fixed together. <strong>Fibre Channel: no more LIP on every rescan (HIGH):</strong> a Loop Initialization Primitive is a link reset that forces every device behind the HBA port to re-login, including other vendors' LUNs — and it was issued unconditionally from loops running every 2-3 seconds. It is not needed to find a newly mapped LUN; the SCSI host scan does that. Now opt-in and unused by default. <code>FC.pm</code> also reads sysfs with a timeout instead of a bare <code>open()</code>. <strong>The disaster-recovery tool cannot hang (HIGH):</strong> <code>pve-pure-config-get</code> used bare <code>system('mount')</code>/<code>system('umount')</code> with no timeout, which never returns on a multipath device whose paths are gone — the exact state in which the tool is run. It also now picks the newest destroyed generation when a disk has been deleted and recreated several times (lexical sort picked the oldest, and the newer ones then aborted the restore on a name conflict). <strong>The temp-clone reaper respects ownership (HIGH):</strong> a temp clone is connected only to its creating node, but every node reaps — so a snapshot-source operation running over an hour on node A had its device disconnected and destroyed by node B.</span>
+            <span class="lang-zh"><strong>使用中檢查改為 fail-closed（嚴重）：</strong><code>is_device_in_use()</code> 把「我無法判斷」歸類成「沒有在使用」——<code>/proc/mounts</code> 讀取逾時，或 <code>fuser</code> 被自己的 5 秒看門狗殺掉，都會落到 <code>return 0</code>。對一顆交給執行中 VM 使用的 raw Pure LUN 而言，沒有掛載點也沒有真正的 holder（kpartx 分割被刻意忽略），因此 <code>fuser</code> 是<em>唯一</em>會回報 guest 正持有該裝置的訊號——而 <code>fuser</code> 逾時就把「有 VM 正在使用這顆磁碟」變成「沒有任何東西在用」，恰好發生在節點不健康到足以觸發該看門狗的時候。新增的 <code>device_usage_state()</code> 回傳 in-use／idle／<em>unknown</em> 並附理由，unknown 一律視為使用中。<strong>WWID 查詢失敗不再讓保護失效（嚴重）：</strong><code>free_image()</code>、<code>volume_snapshot_rollback()</code> 與 <code>create_base()</code> 原本把查詢包在 <code>eval</code> 裡，失敗就跳過整段安全檢查，然後照樣銷毀或覆寫。rollback 最嚴重——<code>volume_overwrite()</code> 直接取代整顆 Volume，且沒有 eradication delay 的復原窗口。<strong>不再有任何自動路徑執行 eradicate（高）：</strong>暫存複製回收原本呼叫 <code>volume_delete()</code> 未帶 <code>skip_eradicate</code>，等於由背景程序執行永久且無復原窗口的刪除；現在 15 個刪除呼叫點全部可復原。回收器也改為以 <code>path()</code> 產生的精確名稱二次比對，並要求兩個獨立的年齡來源都同意才刪除。<strong>alloc_image() 取代 state／cloudinit Volume 前會先檢查（高）</strong>——這是唯一完全沒有使用中檢查的破壞性路徑。<strong>兩個互相抵消的 volume_list() 呼叫（高）：</strong>對只吃位置參數的函式傳具名參數，導致 config 備份清理從未執行，而「最後一顆磁碟？」判斷永遠為真；只修好其中一邊，多磁碟 VM 刪除第一顆磁碟時就會銷毀 config 備份，因此兩者一併修正。<strong>Fibre Channel：不再每次 rescan 都發 LIP（高）：</strong>LIP 是鏈路重置，會強迫該 HBA port 後面所有裝置重新登入，包含其他廠商的 LUN——而它原本是在每 2 至 3 秒執行一次的迴圈裡無條件發送。探索新對應的 LUN 根本不需要它，SCSI host 掃描就夠了。現在改為選用且預設不使用。<code>FC.pm</code> 也改用有逾時保護的 sysfs 讀取，不再用裸 <code>open()</code>。<strong>災難復原工具不會再卡死（高）：</strong><code>pve-pure-config-get</code> 原本用裸 <code>system('mount')</code>／<code>system('umount')</code> 且無逾時，對路徑全斷的 multipath 裝置永遠不返回——而那正是這支工具被執行時的狀態。它同時改為在磁碟被刪除重建多次時挑選最新的一代（字典序排序原本會挑到最舊的，較新的幾代接著因撞名而中止還原）。<strong>暫存複製回收器尊重歸屬（高）：</strong>暫存複製只連線到建立它的節點，但每個節點都在回收——因此在節點 A 上執行超過一小時的快照來源操作，會被節點 B 斷線並銷毀。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.22 <span class="changelog-tag changelog-tag--critical">High</span></div>

@@ -59,6 +59,7 @@ use PVE::Storage::Custom::PureStorage::Multipath qw(
     wait_for_multipath_device
     cleanup_lun_devices
     is_device_in_use
+    device_usage_state
     get_multipath_slaves
     remove_scsi_device
     list_pure_multipath_devices
@@ -908,6 +909,90 @@ sub _get_api {
     return $api;
 }
 
+# Look up a volume's WWID before a destructive operation.
+#
+# Every destructive path used to do this:
+#
+#   my $wwid = eval { $api->volume_get_wwid($pure_volname); };
+#   if ($wwid) { ...the entire local in-use safety check... }
+#   ...destroy / overwrite anyway...
+#
+# so a single transient REST failure silently disabled the guard and let the
+# destroy or overwrite run unprotected. The eval was there to tolerate a
+# volume with no local device, but it could not tell that apart from "the
+# array did not answer".
+#
+# This helper makes the failure explicit: one bounded retry, then refuse.
+# Refusing costs the operator a retry; proceeding costs them a volume.
+sub _require_wwid_for_guard {
+    my ($api, $pure_volname, $operation) = @_;
+
+    my $wwid;
+    my $err;
+    for my $attempt (1 .. 2) {
+        $wwid = eval { $api->volume_get_wwid($pure_volname); };
+        $err = $@;
+        last unless $err;
+        sleep(1) if $attempt == 1;
+    }
+
+    if ($err) {
+        chomp $err;
+        die "Refusing to $operation '$pure_volname': its WWID could not be "
+          . "read from the array, so the local safety check that verifies "
+          . "the device is not in use cannot run. Retry once the array is "
+          . "reachable. Underlying error: $err\n";
+    }
+
+    unless (defined $wwid && length $wwid) {
+        die "Refusing to $operation '$pure_volname': the array returned no "
+          . "serial for this volume, so its local device cannot be "
+          . "identified and the in-use safety check cannot run. Verify the "
+          . "volume in the Pure UI.\n";
+    }
+
+    return $wwid;
+}
+
+# Run the local in-use guard for a destructive operation on $wwid.
+# Dies unless the device is positively determined to be idle — an
+# undetermined answer is treated exactly like "in use", because for a raw
+# LUN attached to a running VM the checks that can fail are the same checks
+# that would otherwise report the VM.
+sub _assert_device_idle {
+    my ($wwid, $volname, $operation) = @_;
+
+    # The device lookup itself can fail (multipathd unresponsive, a
+    # /dev/disk/by-id stat that hit the block layer's uninterruptible wait).
+    # "I could not look for the device" is not the same as "there is no
+    # device", so do not let an exception here read as the latter.
+    my $device = eval { get_device_by_wwid($wwid); };
+    if (my $err = $@) {
+        chomp $err;
+        die "Refusing to $operation '$volname': could not look up the local "
+          . "device for WWID $wwid, so the in-use safety check cannot run "
+          . "($err). Check 'systemctl status multipathd' and retry.\n";
+    }
+    return unless $device;   # no local device on this node: nothing to protect
+
+    my ($state, $reason) = device_usage_state($device);
+    return if $state eq 'idle';
+
+    if ($state eq 'unknown') {
+        die "Refusing to $operation '$volname': cannot determine whether "
+          . "device $device is still in use ($reason). Treating an "
+          . "undetermined answer as in-use on purpose — proceeding could "
+          . "destroy data belonging to a running guest. Resolve the "
+          . "condition above and retry.\n";
+    }
+
+    my $msg = "Cannot $operation '$volname': device $device is still in use "
+            . "($reason).\n";
+    my $details = eval { get_device_usage_details($device) } // '';
+    $msg .= "\n$details\n" if $details;
+    die $msg;
+}
+
 # Get host name for current node
 sub _get_host_name {
     my ($scfg) = @_;
@@ -1177,10 +1262,21 @@ sub _cleanup_vm_config_volumes {
     # List all config volumes for this VM
     my $san_storage = storeid_to_pure_prefix($storeid);
 
+    # volume_list() takes ONE positional argument. This used to be called as
+    # volume_list(pattern => ..., pod => ...), so $pattern bound to the
+    # literal string "pattern" and the array was asked for a volume with
+    # that exact name — it always came back empty and this function has
+    # never actually deleted anything. Its caller in free_image() had the
+    # identical mistake, which made the "is this the VM's last disk?" test
+    # always true; the two bugs cancelled out into "config volumes leak".
+    # Fixing only one side would have started destroying config backups on
+    # the FIRST disk deletion of a multi-disk VM, while snapshots of the
+    # remaining disks still referenced them. Both are fixed together.
     my $pattern = "pve-${san_storage}-${vmid}-vmconf-*";
     my $pod = $scfg->{'pure-pod'};
+    $pattern = "${pod}::${pattern}" if $pod;
 
-    my $volumes = eval { $api->volume_list(pattern => $pattern, pod => $pod); } // [];
+    my $volumes = eval { $api->volume_list($pattern); } // [];
 
     for my $vol (@$volumes) {
         my $volname = $vol->{name};
@@ -1312,6 +1408,15 @@ sub _disconnect_from_all_hosts {
     return unless $api && $vol;
 
     my $connections = eval { $api->volume_get_connections($vol); };
+    if ($@) {
+        # Cannot enumerate, so cannot disconnect. Say so loudly: the caller is
+        # a cleanup path that is about to destroy the volume, and leaving
+        # connections behind is what turns into ghost LUNs on other nodes.
+        warn "_disconnect_from_all_hosts: could not list host connections for "
+           . "$vol ($@); any remaining connections must be removed manually "
+           . "from the Pure UI.\n";
+        return;
+    }
     return unless $connections && @$connections;
 
     for my $conn (@$connections) {
@@ -1488,8 +1593,27 @@ sub _cleanup_orphaned_temp_clones {
     my $temp_vols = eval { $api->volume_list($pattern); };
     return unless $temp_vols && @$temp_vols;
 
+    # Exact shape of the names path() generates:
+    #   [<pod>::]pve-<storage>-...-temp-snap-access-<unix-ts>-<pid>
+    # The glob handed to the array is deliberately loose (Pure's filter has
+    # no anchoring), so re-match locally against the precise form before
+    # touching anything. This reaper is the only place in the plugin that
+    # ERADICATES rather than soft-destroys, so "it looked a bit like ours"
+    # is not a good enough reason to act on a volume.
+    my $strict_re = qr/^pve-\Q$san_storage\E-.+-temp-snap-access-(\d+)-(\d+)$/;
+    my $my_host = _get_host_name($scfg);
+
     for my $vol (@$temp_vols) {
         next unless $vol->{name};
+
+        my $bare = _strip_pod_prefix($scfg, $vol->{name});
+        my ($name_ts) = $bare =~ $strict_re;
+        unless (defined $name_ts) {
+            warn "temp-clone cleanup: skipping '$vol->{name}' — it matched the "
+               . "array-side pattern but not the exact name this plugin "
+               . "generates, so it is not ours to delete.\n";
+            next;
+        }
 
         # Safety: only delete volumes older than 1 hour
         # This prevents deleting volumes currently in use.
@@ -1505,10 +1629,43 @@ sub _cleanup_orphaned_temp_clones {
         my $created = PVE::Storage::Custom::PureStorage::API::pure_time_to_epoch(
             $vol->{created});
         next unless $created;   # unknown age: never assume it is stale
-        my $age_seconds = time() - $created;
 
-        if ($age_seconds > 3600) {  # 1 hour
+        # Two independent age sources must BOTH agree the volume is stale:
+        # the array's created timestamp, and the unix timestamp path() baked
+        # into the name at creation. They come from different clocks and
+        # different code paths, so a bug or unit mix-up in either one cannot
+        # on its own authorise an eradication.
+        my $age_seconds      = time() - $created;
+        my $age_from_name    = time() - $name_ts;
+
+        if ($age_seconds > 3600 && $age_from_name > 3600) {  # 1 hour
             warn "Cleaning up orphaned temporary clone: $vol->{name} (age: ${age_seconds}s)\n";
+
+            # Ownership check: a temp clone is connected only to the node
+            # that created it. Every node runs this reaper, so without this a
+            # snapshot-source operation running longer than an hour on node A
+            # — a qemu-img convert of a large disk is routinely longer — gets
+            # its device yanked by node B, which has no local device for the
+            # clone, sails past cleanup_lun_devices(), disconnects it from
+            # ALL hosts and destroys it. Node A's own reaper is protected by
+            # is_device_in_use(); node B had nothing to protect it.
+            #
+            # Orphans left by a crashed node are still reaped — by that node
+            # when it comes back, which is the correct owner anyway.
+            my $conns = eval { $api->volume_get_connections($vol->{name}); };
+            if ($@) {
+                warn "temp-clone cleanup: cannot list connections for "
+                   . "$vol->{name}, skipping this pass: $@\n";
+                next;
+            }
+            my @foreign = grep { ($_->{name} // '') ne $my_host } @{ $conns // [] };
+            if (@foreign) {
+                warn "temp-clone cleanup: skipping $vol->{name} — still "
+                   . "connected to " . join(', ', map { $_->{name} } @foreign)
+                   . ". It belongs to another node, which may still be reading "
+                   . "from it; that node will reap it.\n";
+                next;
+            }
 
             eval {
                 # Get WWID for device cleanup. Prefer the serial already
@@ -1532,8 +1689,17 @@ sub _cleanup_orphaned_temp_clones {
                     $api->volume_disconnect_host($vol->{name}, $conn->{name});
                 }
 
-                # Delete the volume
-                $api->volume_delete($vol->{name});
+                # Soft-destroy, not eradicate. This used to call
+                # volume_delete() with no skip_eradicate, i.e. DELETE
+                # /volumes — permanent, with no recovery window at all,
+                # from an automated background reaper. Pure still frees
+                # the name immediately (the tombstone rename in
+                # volume_delete does that) and eradicates on the array's
+                # normal schedule, so the only thing given up is the
+                # volume-count slot for the eradication delay. That is a
+                # cheap price for making every automated deletion in this
+                # plugin recoverable.
+                $api->volume_delete($vol->{name}, skip_eradicate => 1);
             };
             if ($@) {
                 warn "Failed to cleanup orphaned temp clone $vol->{name}: $@\n";
@@ -2190,7 +2356,19 @@ sub status {
         # Intermediate exits immediately, leaving grandchild orphaned.
         POSIX::_exit(0);
     }
-    waitpid($intermediate_pid, 0) if defined $intermediate_pid;
+    # Reap the intermediate child without ever blocking. It only forks the
+    # grandchild and _exit()s, so it is gone almost immediately — but this
+    # runs on the pvestatd poll path, and fork() itself can block under
+    # memory pressure or a cgroup pids limit. A bounded poll keeps the
+    # storage status cycle moving; an unreaped child is collected by the
+    # next call or by init.
+    if (defined $intermediate_pid) {
+        my $deadline = time() + 5;
+        while (time() < $deadline) {
+            last if waitpid($intermediate_pid, POSIX::WNOHANG()) != 0;
+            select(undef, undef, undef, 0.05);
+        }
+    }
 
     return ($cache->{total}, $cache->{avail}, $cache->{used}, 1);
 }
@@ -2243,6 +2421,19 @@ sub alloc_image {
         # For state/cloudinit volumes, try to cleanup orphaned volumes from previous failed attempts
         if ($name && ($name =~ /^vm-\d+-state-/ || $name =~ /^vm-\d+-cloudinit$/)) {
             warn "Found orphaned state/cloudinit volume '$pure_volname', attempting cleanup...\n";
+
+            # This was the ONLY destructive path in the plugin with no in-use
+            # check at all: it disconnected and destroyed whatever it found
+            # under the name. A vm-<id>-state-<snap> volume holding a live
+            # suspended guest's RAM image would be thrown away with nothing
+            # but a warn() to show for it. Apply the same guard every other
+            # destroy path uses; refusing here is safe because PVE will
+            # surface the error and the operator can clean up deliberately.
+            my $orphan_wwid = _require_wwid_for_guard(
+                $api, $pure_volname, 'replace existing state/cloudinit volume');
+            _assert_device_idle(
+                $orphan_wwid, $pve_volname // $name,
+                'replace existing state/cloudinit volume');
 
             # Try to disconnect and delete the orphaned volume
             eval {
@@ -2466,24 +2657,12 @@ sub free_image {
     }
 
     # Step 1: Get the WWID and verify the local device is not in use.
-    my $wwid = eval { $api->volume_get_wwid($pure_volname); };
-
-    if ($wwid) {
-        my $device = get_device_by_wwid($wwid);
-        if ($device && -b $device && is_device_in_use($device)) {
-            # Provide detailed usage info so operators can self-diagnose.
-            # Common case: host LVM auto-activated guest VGs on upgraded
-            # PVE nodes missing global_filter in lvm.conf.
-            my $details = eval { get_device_usage_details($device) } // '';
-            my $msg = "Cannot delete volume '$volname': device $device is still in use.\n";
-            if ($details) {
-                $msg .= "\n$details\n";
-            } else {
-                $msg .= "Ensure VM is stopped and disk is not mounted.\n";
-            }
-            die $msg;
-        }
-    }
+    # Both halves refuse rather than fall through: a WWID lookup failure used
+    # to skip the whole check, and an undetermined in-use answer used to read
+    # as "idle". Either one let free_image destroy a volume a running guest
+    # was using.
+    my $wwid = _require_wwid_for_guard($api, $pure_volname, 'delete volume');
+    _assert_device_idle($wwid, $volname, 'delete volume');
 
     # Step 2: Capture the multipath slave list BEFORE any unmap. After we
     # disconnect the volume on the array, an iSCSI rescan can make the
@@ -2504,7 +2683,29 @@ sub free_image {
     # If we cleaned local devices first and then disconnected, an in-flight
     # iSCSI rescan (e.g. from another node activating storage) could
     # re-import the LUN and recreate the multipath device behind us.
-    my $connections = eval { $api->volume_get_connections($pure_volname); };
+    my $connections;
+    {
+        my $err;
+        for my $attempt (1 .. 2) {
+            $connections = eval { $api->volume_get_connections($pure_volname); };
+            $err = $@;
+            last unless $err;
+            sleep(1) if $attempt == 1;
+        }
+        if ($err) {
+            chomp $err;
+            # Deleting a volume we could not disconnect leaves orphaned host
+            # connections behind. Other cluster nodes then discover a LUN
+            # whose volume no longer exists, which becomes a stale multipath
+            # device — the exact failure that motivated the whole residual
+            # cleanup architecture. Refuse and let the operator retry.
+            die "Refusing to delete volume '$pure_volname': its host "
+              . "connections could not be listed, so they cannot be removed "
+              . "first. Deleting now would leave ghost LUNs on the other "
+              . "cluster nodes. Retry once the array is reachable. "
+              . "Underlying error: $err\n";
+        }
+    }
     if ($connections && @$connections) {
         for my $conn (@$connections) {
             eval { $api->volume_disconnect_host($pure_volname, $conn->{name}); };
@@ -2528,7 +2729,10 @@ sub free_image {
         # /sys/block/.../slaves directory, so the slaves can leak.
         for my $slave (@scsi_slaves) {
             if (-b $slave) {
-                eval { remove_scsi_device($slave); };
+                # Pass the WWID: this list was captured before the array-side
+                # disconnect, and the kernel may have reused the /dev/sdX name
+                # for an unrelated LUN in the meantime.
+                eval { remove_scsi_device($slave, expect_wwid => $wwid); };
             }
         }
 
@@ -2567,12 +2771,26 @@ sub free_image {
         my $san_storage = storeid_to_pure_prefix($storeid);
         my $disk_pattern = "pve-${san_storage}-${vmid}-disk*";
         my $pod = $scfg->{'pure-pod'};
+        $disk_pattern = "${pod}::${disk_pattern}" if $pod;
 
-        my $remaining = eval { $api->volume_list(pattern => $disk_pattern, pod => $pod); } // [];
+        # See _cleanup_vm_config_volumes: this was passing named arguments to
+        # a positional-only function, so $remaining was always empty and this
+        # branch always believed it had just removed the VM's last disk.
+        my $remaining = eval { $api->volume_list($disk_pattern); };
+        if ($@) {
+            # Could not establish whether other disks remain. Do NOT guess:
+            # guessing "none left" destroys the config backups that the other
+            # disks' snapshots still point at. Leaving them costs 1 MB each.
+            warn "Could not list remaining disks for VM $vmid, skipping config "
+               . "volume cleanup (they will be removed with the VM's last "
+               . "disk on a later attempt): $@\n";
+            $remaining = undef;
+        }
         # Filter out destroyed volumes
-        $remaining = [grep { !$_->{destroyed} } @$remaining];
+        $remaining = [grep { !$_->{destroyed} } @{ $remaining // [] }]
+            if defined $remaining;
 
-        if (!@$remaining) {
+        if (defined $remaining && !@$remaining) {
             # No more disks, cleanup all config volumes for this VM
             eval { _cleanup_vm_config_volumes($api, $scfg, $storeid, $vmid); };
             if ($@) {
@@ -3165,7 +3383,10 @@ sub _cleanup_temp_snap_clone {
         for my $conn (@$connections) {
             $api->volume_disconnect_host($temp_vol, $conn->{name});
         }
-        $api->volume_delete($temp_vol);
+        # Soft-destroy for the same reason as the orphan reaper above:
+        # no automated path in this plugin should perform an unrecoverable
+        # eradication.
+        $api->volume_delete($temp_vol, skip_eradicate => 1);
     };
 
     delete $_temp_snap_clones{$cache_key};
@@ -3319,18 +3540,13 @@ sub volume_snapshot_rollback {
         die "Cannot rollback: snapshot '$snap' for volume '$volname' not found on Pure Storage";
     }
 
-    # Safety check: Verify device is not in use before rollback
-    # Rollback replaces volume contents - this is destructive
-    my $wwid = eval { $api->volume_get_wwid($pure_volname); };
-    if ($wwid) {
-        my $device = get_device_by_wwid($wwid);
-        if ($device && -b $device) {
-            if (is_device_in_use($device)) {
-                die "Cannot rollback volume '$volname': device $device is still in use. " .
-                    "Ensure VM is stopped before rollback.";
-            }
-        }
-    }
+    # Safety check: verify the device is not in use before rollback.
+    # This is the most destructive operation the plugin performs — the
+    # overwrite replaces the volume's contents outright and, unlike a
+    # destroy, has NO eradication-delay recovery window. Neither a failed
+    # WWID lookup nor an undetermined in-use answer may skip the guard.
+    my $wwid = _require_wwid_for_guard($api, $pure_volname, 'roll back volume');
+    _assert_device_idle($wwid, $volname, 'roll back volume');
 
     # Perform rollback - overwrite volume from snapshot
     eval { $api->volume_overwrite($pure_volname, $full_snap_name); };
@@ -3472,18 +3688,12 @@ sub create_base {
         die "Cannot create template: volume '$pure_volname' not found on Pure Storage\n";
     }
 
-    # Safety check: Verify the volume is not currently in use
-    # Converting to template while VM is running could cause issues
-    my $wwid = eval { $api->volume_get_wwid($pure_volname); };
-    if ($wwid) {
-        my $device = get_device_by_wwid($wwid);
-        if ($device && -b $device) {
-            if (is_device_in_use($device)) {
-                die "Cannot convert to template: volume '$volname' is currently in use. " .
-                    "Please stop the VM first.\n";
-            }
-        }
-    }
+    # Safety check: verify the volume is not currently in use. Converting a
+    # live volume to a template would freeze a base snapshot of an
+    # inconsistent, actively-written image. Same fail-closed rule as
+    # free_image and rollback.
+    my $wwid = _require_wwid_for_guard($api, $pure_volname, 'convert volume to template');
+    _assert_device_idle($wwid, $volname, 'convert volume to template');
 
     # Create pve-base snapshot for future linked cloning
     # This snapshot serves as the base for all linked clones

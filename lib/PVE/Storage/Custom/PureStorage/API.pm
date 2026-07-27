@@ -1991,7 +1991,17 @@ sub volume_get_connections {
         # API 1.x: GET /volume/<vol>/host
         $resp = eval { $self->get("volume/$volume/host"); };
     }
-    return [] if $@;
+    if ($@) {
+        # "no connections" and "I could not ask" are NOT the same answer, and
+        # this used to return [] for both. Callers use the result to decide
+        # whether anything still needs disconnecting before a destroy; an
+        # empty list from a failed query made them skip the disconnect and
+        # delete anyway, leaving orphaned host connections that surface as
+        # ghost LUNs on the other cluster nodes — the root cause of the
+        # v1.1.3/v1.1.4 production incident. Only a genuine 404 means "none".
+        return [] if $@ =~ /HTTP 404|not found|does not exist/i;
+        die $@;
+    }
     return [] unless $resp;
 
     # Normalise to a single shape regardless of API version. Callers expect

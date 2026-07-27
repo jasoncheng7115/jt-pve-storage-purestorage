@@ -31,6 +31,7 @@ our @EXPORT_OK = qw(
     get_multipath_slaves
     cleanup_lun_devices
     is_device_in_use
+    device_usage_state
     sysfs_write_with_timeout
     sysfs_read_with_timeout
     list_pure_multipath_devices
@@ -208,6 +209,7 @@ sub sysfs_read_with_timeout {
     close($write_fh);
     my $content = '';
 
+    my $prev_alarm = alarm(0);   # suspend and remember any caller alarm
     eval {
         local $SIG{ALRM} = sub { die "timeout\n" };
         alarm($timeout);
@@ -222,7 +224,7 @@ sub sysfs_read_with_timeout {
         alarm(0);
     };
     my $timed_out = $@;
-    alarm(0);
+    alarm($prev_alarm);
     close($read_fh);
 
     if ($timed_out) {
@@ -232,9 +234,27 @@ sub sysfs_read_with_timeout {
         return undef;
     }
 
-    waitpid($pid, 0);
+    # Bounded reap. We only get here after EOF on the pipe, so the child has
+    # already closed its end and is on its way out — but nothing in this
+    # module may block without a ceiling, and the alarm has been cleared by
+    # this point so there would be nothing left to break us out.
+    my $deadline = time() + 2;
+    while (time() < $deadline) {
+        last if waitpid($pid, POSIX::WNOHANG()) != 0;
+        select(undef, undef, undef, 0.05);
+    }
     return length($content) ? $content : undef;
 }
+
+# NOTE on alarm(): this module arms alarm() in several places and clears it
+# with alarm(0). A bare alarm(0) also cancels any alarm the CALLER had armed,
+# silently disarming their watchdog. PVE's own PVE::Tools::run_with_timeout
+# avoids that with `my $prev = alarm 0; ... alarm $prev`, and the three
+# funnels below (_run_cmd, sysfs_read_with_timeout) now do the same, so the
+# hot paths are safe. Proxmox VE does not currently invoke storage plugins
+# from inside an alarm — lock_file_full() arms one only around acquiring the
+# lock, not around the callback — so the remaining sites are latent rather
+# than live. Any NEW alarm use should save and restore.
 
 # Reap a child that blew through its alarm budget, WITHOUT ever blocking.
 #
@@ -277,6 +297,7 @@ sub _run_cmd {
     my $err = gensym;
     my $pid;
 
+    my $prev_alarm = alarm(0);   # suspend and remember any caller alarm
     eval {
         local $SIG{ALRM} = sub { die "timeout\n" };
         alarm($timeout);
@@ -303,18 +324,22 @@ sub _run_cmd {
             }
         }
 
+        # Covered by the alarm armed above: SIGALRM interrupts waitpid and
+        # the handler dies, landing us in the timeout branch below, which
+        # reaps without blocking. Do not "fix" this into WNOHANG polling.
         waitpid($pid, 0);
         alarm(0);
     };
 
     if ($@) {
-        alarm(0);
+        alarm($prev_alarm);
         if ($@ eq "timeout\n") {
             _reap_timed_out_child($pid, $cmd);
             croak "Command timed out after ${timeout}s: @$cmd";
         }
         croak "Command failed: $@";
     }
+    alarm($prev_alarm);
 
     my $exit_code = $? >> 8;
 
@@ -726,6 +751,19 @@ sub describe_wwid_state {
 }
 
 # Remove a SCSI device from the system
+# Read a SCSI disk's WWID straight from sysfs, normalised to the multipath
+# form (3 + 32 hex). Returns undef if the attribute is absent or unreadable.
+sub _scsi_device_wwid {
+    my ($dev_name) = @_;
+    my $raw = sysfs_read_with_timeout("/sys/block/$dev_name/device/wwid", 3);
+    return undef unless defined $raw;
+    chomp $raw;
+    $raw =~ s/^\s+|\s+$//g;
+    return undef unless $raw =~ s/^naa\.//i;
+    return undef unless $raw =~ /^[0-9a-fA-F]{32}$/;
+    return '3' . lc($raw);
+}
+
 sub remove_scsi_device {
     my ($device, %opts) = @_;
 
@@ -733,6 +771,34 @@ sub remove_scsi_device {
 
     my $dev_name = _untaint_device_name(basename($device));
     croak "Invalid device name" unless $dev_name;
+
+    # Verify we are deleting the path we think we are.
+    #
+    # free_image() captures the multipath slave list BEFORE disconnecting the
+    # volume on the array and deletes those slaves afterwards. The kernel
+    # reuses /dev/sdX names as soon as they are freed, so in that window a
+    # concurrent rescan (pvestatd activating another storage, another plugin)
+    # can hand the same name to an unrelated LUN — and this function would
+    # then delete a live path belonging to it. With multipath that is a path
+    # loss rather than data loss, unless it happens to be the last path.
+    #
+    # If the caller tells us which WWID it expects, compare against the
+    # kernel's own answer. An unreadable attribute is not treated as a
+    # mismatch: older kernels and some transports do not expose it, and the
+    # caller derived this name from the multipath map, so refusing there
+    # would block legitimate cleanup for no gain. A name that has genuinely
+    # been reused always has a readable, different WWID.
+    if (my $expect = $opts{expect_wwid}) {
+        my $actual = _scsi_device_wwid($dev_name);
+        if (defined $actual && lc($actual) ne lc($expect)) {
+            warn "remove_scsi_device: refusing to delete /dev/$dev_name — it "
+               . "now reports WWID $actual but we expected $expect. The "
+               . "kernel has reused this device name for a different LUN; "
+               . "deleting it would remove a path belonging to other "
+               . "storage.\n";
+            return 0;
+        }
+    }
 
     # Untaint device path for system calls
     my $safe_device = _untaint_path($device);
@@ -889,9 +955,11 @@ sub cleanup_lun_devices {
         # Step 5: Brief pause to let device-mapper settle.
         sleep(1);
 
-        # Step 6: Remove the underlying SCSI slave devices.
+        # Step 6: Remove the underlying SCSI slave devices, verifying each
+        # one still belongs to this WWID (the map has just been torn down, so
+        # the kernel is free to reuse those names).
         for my $slave (@$slaves) {
-            eval { remove_scsi_device($slave); };
+            eval { remove_scsi_device($slave, expect_wwid => $wwid); };
         }
 
         # Step 7: Brief pause for cleanup to complete.
@@ -1022,141 +1090,183 @@ sub get_device_usage_details {
     return @details ? join("\n", @details) : undef;
 }
 
-# Check if a device is currently in use (mounted, open by process, or has
-# holders such as LVM, dm-crypt, dm-raid).
+# Determine whether a device is in use, and say WHY, or say that the answer
+# could not be determined.
 #
-# CRITICAL: must resolve /dev/mapper/<wwid> symlinks to dm-N before
-# accessing /sys/block/. The previous implementation used
-# basename('/dev/mapper/3624a9370...') which returned the wwid, then looked
-# at /sys/block/<wwid>/holders — a path that does not exist. The function
-# always returned 0 (not in use) for any multipath device, which meant
-# free_image() would happily delete a Pure volume that had an LVM volume
-# group, dm-crypt container, or other holder on top of it. **DATA LOSS**.
-sub is_device_in_use {
+# Returns ($state, $reason):
+#   'in-use'  - something is demonstrably using it (mount, real holder, swap,
+#               open file descriptor)
+#   'idle'    - every check completed and none of them found a user
+#   'unknown' - at least one check could NOT be completed (sysfs read timed
+#               out, fuser was killed by its watchdog, a path would not
+#               resolve). NOT the same as 'idle'.
+#
+# The distinction matters because this is the last line of defence before
+# free_image() disconnects and destroys a volume, before
+# volume_snapshot_rollback() overwrites one, and before create_base()
+# converts one. The previous implementation collapsed 'unknown' into "not in
+# use": every internal failure fell through to `return 0`.
+#
+# That is backwards. For a raw Pure LUN handed to a VM there is no mount and
+# no real holder — the kpartx partitions are deliberately ignored — so
+# `fuser` is the ONLY positive signal that a running VM has the device open.
+# A `fuser` call killed by its own 5s watchdog therefore turned "a VM is
+# using this disk" into "nothing is using this disk", precisely when the node
+# was unhealthy enough for that watchdog to fire. Callers must be able to
+# tell "safe to destroy" apart from "I could not find out".
+#
+# CRITICAL (unchanged): must resolve /dev/mapper/<wwid> symlinks to dm-N
+# before touching /sys/block/. basename('/dev/mapper/3624a9370...') returns
+# the wwid, and /sys/block/<wwid>/holders does not exist, so the function
+# once reported every multipath device as unused — free_image() would then
+# destroy a Pure volume carrying an LVM VG or dm-crypt container. DATA LOSS.
+sub device_usage_state {
     my ($device, %opts) = @_;
 
-    return 0 unless $device && -b $device;
+    return ('idle', 'no device path supplied') unless $device;
+
+    # No local block device means there is nothing on THIS node that could be
+    # using it. This is a genuine 'idle', not an undetermined answer.
+    return ('idle', "no local block device at $device") unless -b $device;
 
     my $dev_name = _resolve_block_device_name($device);
-    return 0 unless $dev_name;
+    return ('unknown', "cannot resolve '$device' to a kernel block device name")
+        unless $dev_name;
 
-    # Check 1: Is device mounted? Use timeout-protected read because
-    # /proc/mounts can stall on a wedged kernel namespace. Match against
-    # both the original $device path (could be /dev/mapper/<wwid>) and the
-    # resolved kernel name (dm-N) — different mount(8) versions record
-    # different forms.
+    # Check 1: mounted? Match both the path we were given (may be
+    # /dev/mapper/<wwid>) and the resolved kernel name (dm-N) — different
+    # mount(8) versions record different forms.
     my $mounts = sysfs_read_with_timeout('/proc/mounts', 5);
-    if (defined $mounts) {
-        for my $line (split /\n/, $mounts) {
-            if ($line =~ /^\Q$device\E\s/ || $line =~ /^\/dev\/\Q$dev_name\E\s/) {
-                return 1;  # Device is mounted
-            }
+    return ('unknown', "/proc/mounts could not be read within 5s")
+        unless defined $mounts;
+    for my $line (split /\n/, $mounts) {
+        if ($line =~ /^\Q$device\E\s/ || $line =~ /^\/dev\/\Q$dev_name\E\s/) {
+            my (undef, $mp) = split /\s+/, $line;
+            return ('in-use', "mounted at " . ($mp // 'unknown mount point'));
         }
     }
 
-    # Check 2: Does device have holders (e.g., LVM, dm-crypt)?
+    # Check 2: holders (LVM PV, dm-crypt, dm-raid, bcache, ...).
     #
-    # IMPORTANT: bare kpartx partition holders must be IGNORED. The Linux
-    # kernel automatically scans every block device for partition tables.
-    # When a multipath device appears, the kernel reads the first sectors
-    # and if it finds GPT/MBR (which EVERY VM with an OS installed has),
-    # it creates partition dm devices via kpartx. These show up as
-    # "holders" in /sys/block/<dm-N>/holders/. If we treat them as "in
-    # use" we block deletion of every single VM disk with an OS — which
-    # is the normal case, not an edge case.
+    # Bare kpartx partition holders MUST be ignored. The kernel scans every
+    # block device for a partition table; any LUN carrying GPT/MBR — i.e.
+    # every VM disk with an OS on it — gets partition dm devices created
+    # automatically, and those appear as holders. Treating them as "in use"
+    # blocks deletion of the normal case, not an edge case (see v1.1.7).
     #
-    # A partition is SAFE to ignore if:
-    #   - Its dm-name matches a known kpartx pattern (e.g. <wwid>-part1)
-    #   - It has NO sub-holders (no LVM/dm-crypt/mdadm on top)
-    #   - It is NOT mounted (/proc/mounts)
-    #   - It is NOT swap (/proc/swaps)
-    #
-    # If ANY holder is NOT a partition, or any partition has sub-holders
-    # or is mounted/swapped, we return 1 (in use) as before.
-    my $holders_dir = "/sys/block/$dev_name/holders";
+    # A partition is safe to ignore only when it has no sub-holders, is not
+    # mounted and is not swap. Anything else, or anything we cannot read,
+    # stops us.
+    my $sysblock = "/sys/block/$dev_name";
+    return ('unknown', "$sysblock does not exist, cannot enumerate holders")
+        unless -d $sysblock;
+
+    my $holders_dir = "$sysblock/holders";
     if (-d $holders_dir) {
-        opendir(my $dh, $holders_dir);
+        opendir(my $dh, $holders_dir)
+            or return ('unknown', "cannot read $holders_dir: $!");
         my @holders = grep { !/^\./ } readdir($dh);
         closedir($dh);
 
         if (@holders) {
-            # Read /proc/swaps once for swap check
-            my $swaps = sysfs_read_with_timeout('/proc/swaps', 5) // '';
+            my $swaps = sysfs_read_with_timeout('/proc/swaps', 5);
+            return ('unknown', "/proc/swaps could not be read within 5s")
+                unless defined $swaps;
 
             for my $h (@holders) {
-                # Read dm-name if available
                 my $dm_name = '';
                 my $dm_name_file = "/sys/block/$h/dm/name";
-                if (-r $dm_name_file) {
-                    $dm_name = sysfs_read_with_timeout($dm_name_file, 3) // '';
+                if (-e $dm_name_file) {
+                    $dm_name = sysfs_read_with_timeout($dm_name_file, 3);
+                    return ('unknown', "cannot read dm name of holder /dev/$h")
+                        unless defined $dm_name;
                     chomp $dm_name;
                 }
 
-                # Is this holder a kpartx partition?
-                # Formats: <wwid>-part1, <wwid>p1, <wwid>1, mpath0-part1, sdf1
+                # kpartx partition name forms: <wwid>-part1, <wwid>p1,
+                # <wwid>1, mpath0-part1, sdf1.
                 my $is_partition = (
-                    $dm_name =~ /part\d+$/                  # <wwid>-part1, mpath0-part1
-                    || $dm_name =~ /^[0-9a-f]{20,}p?\d+$/   # <wwid>p1 or <wwid>1
-                    || $dm_name =~ /^sd[a-z]+\d+$/           # sdf1
-                    || (-e "/sys/block/$h/partition")         # kernel partition flag
+                    $dm_name =~ /part\d+$/
+                    || $dm_name =~ /^[0-9a-f]{20,}p?\d+$/
+                    || $dm_name =~ /^sd[a-z]+\d+$/
+                    || (-e "/sys/block/$h/partition")
                 );
 
                 if (!$is_partition) {
-                    # Real holder (LVM, dm-crypt, etc.) — block deletion
-                    return 1;
+                    my $label = $dm_name ? "/dev/$h (dm-name: $dm_name)" : "/dev/$h";
+                    return ('in-use', "held by $label (LVM, dm-crypt or similar)");
                 }
 
-                # It IS a partition — check if it has sub-holders on top
+                # It IS a partition. Does anything sit on top of it?
                 my $sub_holders_dir = "/sys/block/$h/holders";
                 if (-d $sub_holders_dir) {
-                    opendir(my $sdh, $sub_holders_dir);
+                    opendir(my $sdh, $sub_holders_dir)
+                        or return ('unknown', "cannot read $sub_holders_dir: $!");
                     my @sub = grep { !/^\./ } readdir($sdh);
                     closedir($sdh);
                     if (@sub) {
-                        return 1;  # Partition has LVM/dm-crypt on top
+                        return ('in-use',
+                            "partition /dev/$h has its own holder(s): " . join(', ', @sub));
                     }
                 }
 
-                # Check if partition itself is mounted (check both /dev/dm-N
-                # and /dev/mapper/<dm_name> because /proc/mounts records
-                # whichever path was used for mount())
                 my $part_dev    = "/dev/$h";
                 my $part_mapper = $dm_name ? "/dev/mapper/$dm_name" : '';
-                if (defined $mounts) {
-                    if ($mounts =~ /^\Q$part_dev\E\s/m ||
-                        ($part_mapper && $mounts =~ /^\Q$part_mapper\E\s/m)) {
-                        return 1;  # Partition is mounted
-                    }
+                if ($mounts =~ /^\Q$part_dev\E\s/m
+                    || ($part_mapper && $mounts =~ /^\Q$part_mapper\E\s/m)) {
+                    return ('in-use', "partition $part_dev is mounted");
                 }
-
-                # Check if partition is used as swap
-                if ($swaps =~ /^\Q$part_dev\E\s/m ||
-                    ($part_mapper && $swaps =~ /^\Q$part_mapper\E\s/m)) {
-                    return 1;  # Partition is swap
+                if ($swaps =~ /^\Q$part_dev\E\s/m
+                    || ($part_mapper && $swaps =~ /^\Q$part_mapper\E\s/m)) {
+                    return ('in-use', "partition $part_dev is active swap");
                 }
             }
-
-            # If we get here, ALL holders are bare kpartx partitions with
-            # no sub-holders, not mounted, not swapped. Safe to ignore.
+            # All holders are bare kpartx partitions: not mounted, not swap,
+            # nothing stacked on them. Safe to ignore.
         }
     }
 
-    # Check 3: Is device open by any process? Use timeout-protected _run_cmd
-    # rather than bare system('fuser') — fuser opens the device path, which on
-    # a wedged multipath device with queue_if_no_path can itself enter D state
-    # and never return, hanging the parent forever.
+    # Check 3: open by any process. For a raw LUN attached to a running VM
+    # this is the only signal that will fire, so a failure here must NOT be
+    # read as "idle". `fuser` comes from psmisc, which this package Depends
+    # on, so a failure means it timed out or was killed — not that it is
+    # missing.
     my $safe_device = _untaint_device_path($device);
-    if ($safe_device) {
-        my (undef, undef, $exit) = eval {
-            _run_cmd(['/bin/fuser', '-s', $safe_device],
-                timeout => 5, allow_nonzero => 1, ignore_errors => 1);
-        };
-        if (!$@ && defined $exit && $exit == 0) {
-            return 1;  # Device is open by a process
-        }
+    return ('unknown', "device path '$device' failed untainting")
+        unless $safe_device;
+
+    my ($stdout, $exit);
+    my $ran = eval {
+        (my $out, undef, my $rc) = _run_cmd(['/bin/fuser', $safe_device],
+            timeout => 5, allow_nonzero => 1, ignore_errors => 1);
+        ($stdout, $exit) = ($out, $rc);
+        1;
+    };
+    if (!$ran) {
+        my $err = $@ || 'unknown error';
+        $err =~ s/\s+$//;
+        return ('unknown', "the 'fuser' open-file-descriptor check did not "
+            . "complete ($err); a running VM holding this device open would "
+            . "look idle");
+    }
+    if (defined $exit && $exit == 0) {
+        my $pids = $stdout // '';
+        $pids =~ s/\s+/ /g;
+        $pids =~ s/^\s+|\s+$//g;
+        return ('in-use', "open by process(es): " . ($pids || 'yes'));
     }
 
-    return 0;  # Device is not in use
+    return ('idle', 'not mounted, no real holders, not swap, not open by any process');
+}
+
+# Boolean wrapper. FAILS CLOSED: an undetermined answer counts as in use.
+# Callers that need to tell the two apart (and produce a better error) should
+# call device_usage_state() directly.
+sub is_device_in_use {
+    my ($device, %opts) = @_;
+
+    my ($state) = device_usage_state($device, %opts);
+    return $state eq 'idle' ? 0 : 1;
 }
 
 1;

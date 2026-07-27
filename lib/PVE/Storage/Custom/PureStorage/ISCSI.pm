@@ -60,6 +60,16 @@ sub _write_file {
     return 1;
 }
 
+# NOTE on alarm(): this module arms alarm() in several places and clears it
+# with alarm(0). A bare alarm(0) also cancels any alarm the CALLER had armed,
+# silently disarming their watchdog. PVE's own PVE::Tools::run_with_timeout
+# avoids that with `my $prev = alarm 0; ... alarm $prev`, and the three
+# funnels below (_run_cmd, sysfs_read_with_timeout) now do the same, so the
+# hot paths are safe. Proxmox VE does not currently invoke storage plugins
+# from inside an alarm — lock_file_full() arms one only around acquiring the
+# lock, not around the callback — so the remaining sites are latent rather
+# than live. Any NEW alarm use should save and restore.
+
 # Reap a child that blew through its alarm budget, WITHOUT ever blocking.
 #
 # `kill('TERM'); waitpid($pid, 0);` blocks forever when the child is stuck in
@@ -96,6 +106,7 @@ sub _run_cmd {
     my $err = gensym;
     my $pid;
 
+    my $prev_alarm = alarm(0);   # suspend and remember any caller alarm
     eval {
         local $SIG{ALRM} = sub { die "timeout\n" };
         alarm($timeout);
@@ -122,18 +133,22 @@ sub _run_cmd {
             }
         }
 
+        # Covered by the alarm armed above: SIGALRM interrupts waitpid and
+        # the handler dies, landing us in the timeout branch below, which
+        # reaps without blocking. Do not "fix" this into WNOHANG polling.
         waitpid($pid, 0);
         alarm(0);
     };
 
     if ($@) {
-        alarm(0);
+        alarm($prev_alarm);
         if ($@ eq "timeout\n") {
             _reap_timed_out_child($pid, $cmd);
             croak "Command timed out after ${timeout}s: @$cmd";
         }
         croak "Command failed: $@";
     }
+    alarm($prev_alarm);
 
     my $exit_code = $? >> 8;
 

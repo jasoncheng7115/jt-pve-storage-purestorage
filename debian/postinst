@@ -363,7 +363,7 @@ verify_required_binaries() {
     # paths in the user-facing error. Catch this at install time
     # instead and direct the operator at the canonical fix.
     local missing=()
-    local needed_bin=(multipathd multipath kpartx iscsiadm sg_inq blockdev)
+    local needed_bin=(multipathd multipath kpartx iscsiadm sg_inq blockdev fuser)
     local b
 
     for b in "${needed_bin[@]}"; do

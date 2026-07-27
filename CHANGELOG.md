@@ -8,6 +8,179 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.23] - 2026-07-27
+
+Data-safety release. Every finding here is one variant of the same design
+mistake: a safety check that, when it could not complete, answered "safe to
+proceed" instead of "I do not know". Nothing in this release changes normal
+operation on a healthy node — it changes what happens on an unhealthy one.
+
+### CRITICAL — The in-use guard now fails CLOSED
+
+`is_device_in_use()` collapsed "I could not determine the answer" into "not in
+use". Every internal failure — a `/proc/mounts` read that timed out, a `fuser`
+call killed by its own 5-second watchdog, a device path that would not
+resolve — fell through to `return 0`.
+
+Why that is severe: for a raw Pure LUN attached to a running VM there is no
+mount point and no real holder (the kpartx partitions are deliberately ignored
+since v1.1.7), so **`fuser` is the only positive signal that a guest has the
+device open**. A timed-out `fuser` therefore turned "a VM is using this disk"
+into "nothing is using this disk" — precisely when the node was unhealthy
+enough for that watchdog to fire — and `free_image()` would go on to
+disconnect the volume from every host and destroy it.
+
+New `device_usage_state()` returns `in-use` / `idle` / `unknown` together with
+a human-readable reason. `is_device_in_use()` is now a wrapper that treats
+`unknown` as in use. Callers report the reason, so an operator sees *why* the
+plugin refused rather than a bare failure.
+
+### CRITICAL — A failed WWID lookup no longer disables the guard
+
+`free_image()`, `volume_snapshot_rollback()` and `create_base()` each did:
+
+```perl
+my $wwid = eval { $api->volume_get_wwid($pure_volname); };
+if ($wwid) { ... the entire in-use check ... }
+... destroy / overwrite anyway ...
+```
+
+so a single transient REST error skipped the check and ran the destructive
+operation unprotected. Rollback was the worst case: `volume_overwrite()`
+replaces the volume's contents outright and, unlike a destroy, has **no
+eradication-delay recovery window**.
+
+All three now go through `_require_wwid_for_guard()`, which retries once and
+then refuses with an actionable message. A failure to *look up* the local
+device is likewise an error rather than being read as "there is no local
+device".
+
+### HIGH — No automated path performs an unrecoverable eradication
+
+The orphaned temp-clone reaper and the per-session temp-clone cleanup called
+`volume_delete()` without `skip_eradicate`, i.e. `DELETE /volumes` —
+permanent, with no recovery window, issued from a background reaper. Both now
+soft-destroy, so all 15 delete call sites in the plugin are recoverable within
+the array's eradication delay.
+
+Note this reaper only began running at all in 1.1.22: before the millisecond
+timestamp fix its age test could never be true on an API 2.x array.
+
+### HIGH — The temp-clone reaper verifies candidates locally
+
+Pure's array-side filter has no anchoring, so the glob
+`pve-<storage>-*-temp-snap-access-*` is looser than the names the plugin
+actually generates. The reaper now re-matches every candidate against the
+exact form `path()` produces —
+`pve-<storage>-...-temp-snap-access-<unix-ts>-<pid>` — and skips anything else
+with a warning. It also requires **two independent age sources** to agree
+before deleting: the array's `created` timestamp and the unix timestamp baked
+into the name at creation. They come from different clocks and different code
+paths, so a bug or unit mix-up in either one cannot on its own authorise a
+deletion.
+
+### HIGH — `alloc_image()` checks before replacing a state/cloudinit volume
+
+This was the only destructive path in the plugin with no in-use check at all:
+on finding an existing `vm-<id>-state-<snap>` or `vm-<id>-cloudinit` volume it
+disconnected and destroyed it, with a `warn()` as the only trace. A volume
+holding a live suspended guest's RAM image would be discarded. It now applies
+the same guard every other destroy path uses.
+
+### HIGH — Two mirrored `volume_list()` calls that cancelled each other out
+
+`volume_list()` takes one positional argument, but two call sites passed named
+arguments, so `$pattern` bound to the literal string `"pattern"` and the array
+was asked for a volume with that exact name:
+
+- `_cleanup_vm_config_volumes()` therefore never deleted anything.
+- `free_image()`'s "is this the VM's last disk?" test was always true.
+
+The two bugs cancelled out into "config backup volumes leak". **Fixing only one
+side would have started destroying config backups on the first disk deletion of
+a multi-disk VM, while snapshots of the remaining disks still referenced
+them** — so both are fixed together. `free_image()` now skips the cleanup
+entirely rather than guessing when the disk list cannot be retrieved.
+
+### HIGH — Fibre Channel: no more LIP on every rescan
+
+A Loop Initialization Primitive is a **link reset**, not a lookup. It forces
+every device behind that HBA port to re-login, including LUNs belonging to
+other storage on the same HBA. It is not needed to discover a newly mapped
+LUN — the SCSI host scan does that via `REPORT_LUNS` on the existing session.
+
+`rescan_fc_hosts()` issued one unconditionally, and it is called from tight
+loops: `path()`'s retry loop (every 2s), `alloc_image()`'s wait loop (every
+3s), `wait_for_multipath_device()`'s FC callback (every round), and — before
+v1.1.22 — `activate_storage()` on every pvestatd poll. That is a repeated
+fabric-wide link reset in exchange for nothing. LIP is now opt-in
+(`rescan_fc_hosts(lip => 1)`) and is not used anywhere by default.
+
+`FC.pm` also now reads sysfs through `sysfs_read_with_timeout()` instead of a
+bare `open()`. Reading `/sys/class/fc_host/*/port_state` blocks indefinitely
+on a wedged HBA, and `get_fc_targets()` runs from `activate_storage()` on the
+pvestatd path.
+
+### HIGH — `pve-pure-config-get` cannot hang any more
+
+The disaster-recovery tool used bare `system('mount', ...)` / `system('umount',
+...)` with no timeout. A mount against a multipath device whose paths are gone
+enters uninterruptible sleep and never returns — and this tool only ever runs
+when storage is already in trouble, so that is the expected state, not an edge
+case. Ctrl-C does not help. Every external command now goes through
+`PVE::Tools::run_command` with an explicit timeout, matching the rule the rest
+of the plugin has followed all along.
+
+It also now uses `PVE::INotify::nodename()` rather than `hostname -s`, so it
+connects volumes to the same Pure host object the plugin registered, and wraps
+device cleanup so a refusal cannot abort a restore whose config has already
+been written.
+
+### HIGH — Restore picks the newest destroyed generation
+
+A disk deleted and recreated several times leaves several tombstones, all of
+which strip back to the same original name. Sorting them lexically selected
+the **oldest** generation; the newer ones then hit a rename-back conflict that
+aborted the entire restore. Selection now uses the unix timestamp embedded in
+the tombstone suffix, and the tool prints which generation it chose and what
+else was available.
+
+### HIGH — The temp-clone reaper respects ownership
+
+A temp clone is connected only to the node that created it, but every node
+runs the reaper. Node A's own reaper is stopped by `is_device_in_use()`; node
+B has no local device for the clone, sails past that check, disconnects it
+from **all** hosts and destroys it. A snapshot-source operation running longer
+than an hour on node A — a `qemu-img convert` of a large disk routinely is —
+had its device pulled out from under it. The reaper now skips any temp clone
+still connected to another node; orphans left by a crashed node are reaped by
+that node when it returns, which is the correct owner anyway.
+
+### MEDIUM — Other hardening
+
+- `remove_scsi_device()` verifies the device still carries the expected WWID
+  before deleting it. `free_image()` captures the multipath slave list before
+  the array-side disconnect and deletes those slaves afterwards; the kernel
+  reuses `/dev/sdX` names, so a concurrent rescan could hand the same name to
+  an unrelated LUN whose path would then be removed.
+- `volume_get_connections()` distinguishes "no connections" from "the query
+  failed". Returning an empty list for both made `free_image()` skip the
+  disconnect and destroy anyway, leaving orphaned host connections — the ghost
+  LUNs behind the v1.1.3/v1.1.4 incident. `free_image()` now refuses to delete
+  when connections cannot be listed.
+- The last unbounded waits are gone: the intermediate child in `status()` and
+  the success path of `sysfs_read_with_timeout()` reap with `WNOHANG` on a
+  bounded poll.
+- `_run_cmd()` and `sysfs_read_with_timeout()` save and restore any alarm the
+  caller had armed instead of clearing it with a bare `alarm(0)`.
+
+### LOW
+
+- `postinst` adds `fuser` to its required-binary check. It is the load-bearing
+  check for a running guest, and `psmisc` is already a hard dependency.
+
+---
+
 ## [1.1.22] - 2026-07-26
 
 Host-side stability release. Removes a standing SAN-rescan load that Proxmox VE

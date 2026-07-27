@@ -8,6 +8,151 @@
 
 ---
 
+## [1.1.23] - 2026-07-27
+
+資料安全釋出。本次每一項發現都是同一個設計錯誤的變形：安全檢查在自己無法完成時，
+回答的是「可以繼續」而不是「我不知道」。在健康的節點上，本次變更不影響任何正常
+操作；它改變的是節點不健康時會發生什麼事。
+
+### 嚴重——使用中檢查改為 fail-closed
+
+`is_device_in_use()` 把「我無法判斷」歸類成「沒有在使用」。任何內部失敗——
+`/proc/mounts` 讀取逾時、`fuser` 被自己的 5 秒看門狗殺掉、裝置路徑無法解析——
+都會落到 `return 0`。
+
+為什麼嚴重：對一顆交給執行中 VM 使用的 raw Pure LUN 而言，沒有掛載點，也沒有
+真正的 holder（kpartx 分割自 v1.1.7 起就被刻意忽略），因此
+**`fuser` 是唯一會回報「guest 正持有此裝置」的訊號**。`fuser` 一旦逾時，
+「有 VM 正在使用這顆磁碟」就變成「沒有任何東西在用這顆磁碟」——而且恰好發生在
+節點不健康到足以觸發該看門狗的時候——接著 `free_image()` 會把該 Volume 從所有
+主機斷線並銷毀。
+
+新增的 `device_usage_state()` 回傳 `in-use`／`idle`／`unknown` 並附上可讀的
+理由。`is_device_in_use()` 現在只是包裝，把 `unknown` 視為使用中。呼叫端會把
+理由一併回報，操作者看得到外掛「為什麼」拒絕，而不是只看到一個失敗。
+
+### 嚴重——WWID 查詢失敗不再讓安全檢查失效
+
+`free_image()`、`volume_snapshot_rollback()` 與 `create_base()` 原本都是：
+
+```perl
+my $wwid = eval { $api->volume_get_wwid($pure_volname); };
+if ($wwid) { ... 整段使用中檢查 ... }
+... 照樣銷毀／覆寫 ...
+```
+
+因此一次短暫的 REST 錯誤就會跳過檢查，讓破壞性操作在無保護的狀態下執行。
+rollback 是最糟的情況：`volume_overwrite()` 會直接取代 Volume 的全部內容，
+而且與銷毀不同，**沒有 eradication delay 的復原窗口**。
+
+三者現在都改走 `_require_wwid_for_guard()`，重試一次後即拒絕並給出可據以行動的
+訊息。**查詢本機裝置**失敗同樣視為錯誤，不再被解讀成「本機沒有裝置」。
+
+### 高——不再有任何自動路徑執行不可復原的 eradicate
+
+殘留暫存複製回收與逐 session 的暫存複製清理，原本呼叫 `volume_delete()` 時未帶
+`skip_eradicate`，也就是 `DELETE /volumes`——永久刪除、沒有任何復原窗口，而且是
+由背景回收程序發出的。兩者現在都改為軟銷毀，因此外掛中全部 15 個刪除呼叫點都可
+在陣列的 eradication delay 內復原。
+
+請注意這個回收器其實是到 1.1.22 才開始真正運作：在毫秒時間戳記修正之前，它的
+年齡判斷在 API 2.x 陣列上永遠不成立。
+
+### 高——暫存複製回收改為在本機二次驗證
+
+Pure 陣列端的 filter 沒有錨定能力，因此
+`pve-<storage>-*-temp-snap-access-*` 這個 glob 比外掛實際產生的名稱寬鬆。回收器
+現在會把每個候選對象重新比對 `path()` 產生的精確格式——
+`pve-<storage>-...-temp-snap-access-<unix-ts>-<pid>`——不符者跳過並記錄警告。
+刪除前還要求**兩個互相獨立的年齡來源**都同意：陣列回報的 `created` 時間戳記，
+以及建立當下寫進名稱裡的 unix 時間戳記。兩者來自不同時鐘、不同程式路徑，因此
+任一方的 bug 或單位錯置都無法單獨授權一次刪除。
+
+### 高——`alloc_image()` 取代 state／cloudinit Volume 前會先檢查
+
+這是外掛中唯一完全沒有使用中檢查的破壞性路徑：一旦發現同名的
+`vm-<id>-state-<snap>` 或 `vm-<id>-cloudinit` Volume，就直接斷線並銷毀，唯一的
+痕跡只有一行 `warn()`。若該 Volume 保存的是執行中暫停 guest 的 RAM 映像，就會被
+丟棄。現在改為套用其他銷毀路徑一致的保護。
+
+### 高——兩個互相抵消的 `volume_list()` 呼叫
+
+`volume_list()` 只接受一個位置參數，但有兩處以具名參數呼叫，導致 `$pattern` 綁到
+字串常值 `"pattern"`，等於去向陣列詢問一顆名稱正好是 `pattern` 的 Volume：
+
+- `_cleanup_vm_config_volumes()` 因此從未刪除過任何東西。
+- `free_image()` 的「這是這台 VM 的最後一顆磁碟嗎」判斷永遠為真。
+
+兩個 bug 互相抵消，結果只表現為「config 備份 Volume 洩漏」。**若只修好其中一邊，
+多磁碟 VM 在刪除第一顆磁碟時就會開始銷毀 config 備份，而其餘磁碟的快照還在引用
+它們**——因此兩者一併修正。`free_image()` 在無法取得磁碟清單時改為直接跳過清理，
+不再用猜的。
+
+### 高——Fibre Channel：不再每次 rescan 都發 LIP
+
+LIP（Loop Initialization Primitive）是**鏈路重置**，不是查詢。它會強迫該 HBA
+port 後面所有裝置重新登入，包含同一張 HBA 上屬於其他儲存的 LUN。而探索新對應的
+LUN 根本不需要它——SCSI host 掃描透過既有 session 的 `REPORT_LUNS` 就能做到。
+
+`rescan_fc_hosts()` 原本無條件發送 LIP，而它被呼叫的位置都是緊密迴圈：
+`path()` 的重試迴圈（每 2 秒）、`alloc_image()` 的等待迴圈（每 3 秒）、
+`wait_for_multipath_device()` 的 FC callback（每一輪），以及 v1.1.22 之前的
+`activate_storage()`（每次 pvestatd 輪詢）。等於反覆對整個 fabric 做鏈路重置，
+卻換不到任何東西。LIP 現在改為選用（`rescan_fc_hosts(lip => 1)`），預設不啟用。
+
+`FC.pm` 也改用 `sysfs_read_with_timeout()` 讀 sysfs，不再用裸 `open()`。在卡住的
+HBA 上讀 `/sys/class/fc_host/*/port_state` 會無限期阻塞，而 `get_fc_targets()`
+正是在 pvestatd 路徑上的 `activate_storage()` 裡被呼叫。
+
+### 高——`pve-pure-config-get` 不會再卡死
+
+這支災難復原工具原本用裸 `system('mount', ...)`／`system('umount', ...)`，完全
+沒有逾時。對一個路徑已經全斷的 multipath 裝置做 mount 會進入不可中斷睡眠而永遠
+不返回——而這支工具本來就只在儲存已經出問題時才會被執行，所以那是預期狀態而非
+邊角案例，連 Ctrl-C 都沒用。現在所有外部指令都走
+`PVE::Tools::run_command` 並帶明確逾時，與外掛其餘部分一貫的規則一致。
+
+它同時改用 `PVE::INotify::nodename()` 而非 `hostname -s`，確保連線到的是外掛
+實際註冊在陣列上的那個 Pure Host 物件；裝置清理也包了保護，避免在設定檔已經
+寫入之後才因清理被拒而中止。
+
+### 高——還原時挑選最新的一代
+
+一顆被刪除又重建多次的磁碟會留下多個 tombstone，strip 之後全部指向同一個原始
+名稱。原本以字典序排序會挑到**最舊**的一代，較新的幾代接著撞名衝突，導致整個
+還原中止。現在改用 tombstone 後綴裡內嵌的 unix 時間戳記來挑選，並且明確印出
+選了哪一代、還有哪些其他世代可用。
+
+### 高——暫存複製回收器尊重歸屬
+
+暫存複製只會連線到建立它的節點，但每個節點都在跑回收器。節點 A 自己的回收器會被
+`is_device_in_use()` 擋下；節點 B 本機沒有這顆裝置，因此直接越過該檢查，把它從
+**所有**主機斷線並銷毀。在節點 A 上執行超過一小時的快照來源操作——大磁碟的
+`qemu-img convert` routinely 就會超過——裝置就這樣被抽走。回收器現在會跳過仍連線
+到其他節點的暫存複製；崩潰節點留下的殘留由該節點回來時自行清理，那本來就是比較
+正確的歸屬模型。
+
+### 中——其他強化
+
+- `remove_scsi_device()` 刪除前會驗證裝置仍帶有預期的 WWID。`free_image()` 是在
+  陣列端斷線**之前**擷取 multipath slave 清單、在之後才刪除；kernel 會重用
+  `/dev/sdX` 名稱，因此併發的 rescan 可能把同一個名稱給了不相干的 LUN，導致該
+  LUN 的路徑被移除。
+- `volume_get_connections()` 區分「沒有連線」與「查詢失敗」。兩者都回傳空清單，
+  會讓 `free_image()` 跳過斷線直接刪除，留下殘留的主機連線——也就是 v1.1.3／
+  v1.1.4 事故背後的 ghost LUN。`free_image()` 現在在無法列出連線時拒絕刪除。
+- 最後幾個無上限的等待也移除了：`status()` 的中介子行程，以及
+  `sysfs_read_with_timeout()` 的成功路徑，都改用 `WNOHANG` 有界輪詢回收。
+- `_run_cmd()` 與 `sysfs_read_with_timeout()` 會保存並還原呼叫端原本設定的
+  alarm，而不是用裸 `alarm(0)` 把它清掉。
+
+### 低
+
+- `postinst` 將 `fuser` 加入必要 binary 檢查。它是判斷執行中 guest 的關鍵檢查，
+  而 `psmisc` 本來就是硬相依。
+
+---
+
 ## [1.1.22] - 2026-07-26
 
 主機端穩定性釋出。移除 Proxmox VE 每次狀態輪詢都會觸發的常態 SAN 重新掃描
