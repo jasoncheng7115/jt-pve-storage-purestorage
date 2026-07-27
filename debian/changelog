@@ -1,3 +1,51 @@
+jt-pve-storage-purestorage (1.1.26-1) stable; urgency=medium
+
+  * [MEDIUM] Cut the steady-state REST load on the array's management gateway
+    roughly in half. Counting the calls a single pvestatd poll makes per node
+    per storage found four avoidable ones:
+    - get_managed_capacity() fetched the pod object, then called
+      pod_get_quota_limit() which fetched the SAME pod object again. The
+      already-fetched object is now passed in.
+    - _detect_api_version() ran for every new client, costing at least one
+      unauthenticated GET /api/api_version and up to nine more probes on
+      failure. The plugin's client cache expires after 300s and the
+      background reaper forks and therefore always builds a fresh client, so
+      this repeated constantly. The detected version is now cached per array
+      for the life of the process. A fallback guess is deliberately not
+      cached.
+    - A forked reaper pass logged in again. A Pure x-auth-token is a bearer
+      token, so a new client can be seeded with an existing session; what
+      must not be shared across a fork is the keep-alive socket, and each
+      client still builds its own. A stale token costs one 401, after which
+      the existing retry path re-logs in.
+    - activate_storage() asked for the iSCSI port list and re-verified the
+      host object on every poll, though neither changes in normal operation.
+      Both are now cached per process for API_CACHE_TTL (300s). The host
+      entry is recorded only after the check actually succeeds, so a
+      transient failure cannot silence the check for a whole TTL.
+    Measured over three consecutive polls in a harness with a counting API
+    stub: 15 calls before, 8 after.
+  * [MEDIUM] Never retry a rename. volume_rename() and snapshot_rename() are
+    PATCH requests, and _request() only excluded POST from its 5xx retry -
+    while LWP reports a read timeout as a synthetic 500. If the array
+    performed the rename and the response was lost, the retry addressed a name
+    that no longer existed, came back 404, and the caller concluded the rename
+    had failed. In volume_delete()'s tombstone path that meant destroying
+    under the ORIGINAL name (404), reporting the delete as failed, and leaving
+    a renamed-but-alive volume on the array; the operator's retry then found
+    nothing under the original name and reported success, stranding the volume
+    permanently. Both renames now use a new no_retry option and, on failure,
+    verify against the array whether the rename actually took effect before
+    believing the error.
+  * [MEDIUM] A 'pure-pod' naming a pod that does not exist is now a hard
+    error. The capacity lookup fell back to the array total, so a typo made
+    the storage report the whole array as free while every volume create
+    failed because the pod was missing.
+  * Documented that two storages sharing one pod double-count capacity in
+    Proxmox VE (volume names stay isolated; only the figures overlap).
+
+ -- Jason Cheng <jason@jason.tools>  Mon, 27 Jul 2026 18:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.25-1) stable; urgency=medium
 
   * [MEDIUM] Stop storing the Pure API token and password in

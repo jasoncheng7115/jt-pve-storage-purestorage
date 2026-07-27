@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.25-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.26-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -363,7 +363,7 @@ pvesm set <storeid> --pure-api-token <token>
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.25-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.26-1_all.deb
 ```
 
 > ⚠ 首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件
@@ -463,6 +463,17 @@ Pod 是陣列上的命名空間。在 Pod 設定 `quota_limit` 並讓外掛指�
 >
 > 當 Pod 達到或超過配額時，外掛每小時會記錄一次說明，內含陣列回傳的
 > 原始 Pod 空間數值：`journalctl -t pvestatd | grep pure-storage`。
+
+> **若你依賴容量數字，兩個 storage 不應共用同一個 Pod。**
+> 每個 storage 都會把該 Pod 的配額回報為自己的 total、Pod 的 provisioned 回報為
+> 自己的 used，因此兩者顯示完全相同的數字，Proxmox VE 會把容量重複計算。Volume
+> 名稱仍然正確隔離（每個 storage 只會看到 `pve-<自己的 storage>-*`），所以功能不
+> 會壞——但兩邊的「可用空間」都是錯的，據此配置會超額使用該 Pod。請讓每個 storage
+> 各用一個 Pod，或者理解那些數字是「每個 Pod」而非「每個 storage」的。
+>
+> **`pure-pod` 指向不存在的 Pod 現在會直接失敗。** 先前容量查詢會回退到整台陣列
+> 的數字，因此一個打錯的名稱會讓 storage 回報整台陣列都可用，而每次建立 Volume
+> 卻都因為 Pod 不存在而失敗。
 
 Proxmox VE 端：
 ```bash

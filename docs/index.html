@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.25 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.26 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.25-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.26-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.25-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.26-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.26 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-07-27</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Roughly half the steady-state REST calls were avoidable (MEDIUM):</strong> counting what one pvestatd poll costs per node per storage found four unnecessary calls. The pod object was fetched twice per poll (<code>get_managed_capacity()</code> and then <code>pod_get_quota_limit()</code> again); every new client re-ran REST version detection, which the forking background reaper triggers constantly; every forked reaper pass logged in again, though a Pure <code>x-auth-token</code> is a bearer token that a new client can be seeded with; and <code>activate_storage()</code> re-fetched the iSCSI port list and re-verified the host object on every poll though neither changes in normal operation. Measured over three consecutive polls with a counting API stub: 15 calls before, 8 after — for a five-node cluster with two Pure storages, from about nine REST calls per second at complete idle to under four.</span>
+            <span class="lang-zh"><strong>穩態下約有一半的 REST 呼叫可以省掉（中）：</strong>實際計算一次 pvestatd 輪詢在每個節點、每個 storage 的成本，找出四個不必要的呼叫。同一顆 pod 每次輪詢被抓兩次（<code>get_managed_capacity()</code> 之後 <code>pod_get_quota_limit()</code> 又抓一次）；每個新用戶端都重新偵測 REST 版本，而會 fork 的背景回收讓這件事不斷發生；每次 fork 出來的回收都重新登入一次，儘管 Pure 的 <code>x-auth-token</code> 是可以帶給新用戶端的 bearer token；<code>activate_storage()</code> 每次輪詢都重新取得 iSCSI 埠清單並重新驗證 Host 物件，而兩者在正常運作下都不會變。以附計數器的 API stub 連續三次輪詢實測：修正前 15 次、修正後 8 次——以五節點、兩個 Pure storage 的叢集換算，等於完全閒置時從每秒約九次 REST 降到四次以下。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.25 <span class="changelog-tag changelog-tag--fix">Security</span></div>

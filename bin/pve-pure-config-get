@@ -65,7 +65,7 @@ use PVE::Storage::Custom::PureStorage::ISCSI qw(
     rescan_sessions
 );
 
-my $VERSION = '1.1.25';
+my $VERSION = '1.1.26';
 
 # Strip the tombstone suffix that volume_delete (plugin v1.1.15+) adds
 # before destroying a volume. Tombstone names look like

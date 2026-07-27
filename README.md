@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.25-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.26-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -381,7 +381,7 @@ which writes the secret file and removes the old line in one command.
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.25-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.26-1_all.deb
 ```
 
 > ⚠ Avoid `dpkg -i` for the first install: it does **not** auto-install
@@ -490,6 +490,20 @@ cannot collide with anything outside the Pod.
 > The plugin logs an explanation with the array's raw Pod space figures
 > once per hour while a Pod is at or over its quota:
 > `journalctl -t pvestatd | grep pure-storage`.
+
+> **Two storages must not share one Pod if you rely on the capacity figures.**
+> Each reports the Pod's quota as its total and the Pod's provisioned size as
+> its used, so both show the same numbers and Proxmox VE double-counts the
+> capacity across them. Volume names stay correctly isolated (each storage
+> only ever sees `pve-<its own storage>-*`), so nothing breaks — but
+> "available" is wrong on both, and provisioning against it over-commits the
+> Pod. Give each storage its own Pod, or accept that the figures are
+> per-Pod rather than per-storage.
+>
+> **A `pure-pod` that does not exist is now a hard error.** Previously the
+> capacity lookup fell back to the array total, so a typo made the storage
+> report the whole array as free while every volume create failed because the
+> Pod was missing.
 
 On Proxmox VE:
 ```bash

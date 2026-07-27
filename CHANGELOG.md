@@ -8,6 +8,82 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.26] - 2026-07-27
+
+Management-plane load release, continuing the work started in v1.1.21.
+
+### MEDIUM — Roughly half the steady-state REST calls were avoidable
+
+Counting what a single pvestatd poll costs — per node, per storage, every ~10
+seconds — turned up four calls that did not need to be made:
+
+- **The pod was fetched twice.** `get_managed_capacity()` fetched the pod
+  object and then called `pod_get_quota_limit()`, which fetched the same pod
+  object again. The already-fetched object is now passed in.
+- **Every new client re-detected the REST version.** `_detect_api_version()`
+  costs at least one unauthenticated `GET /api/api_version`, and up to nine
+  more probes if that fails. It ran for every client object: the plugin's
+  client cache expires after 300s, and the background reaper forks and so
+  always builds a fresh one. An array does not change its REST version while
+  pvedaemon is running, so the result is now cached per array for the life of
+  the process. A fallback guess made because the array did not answer is
+  deliberately **not** cached — the next client should detect properly rather
+  than inherit the guess.
+- **Every forked reaper pass logged in again.** A Pure `x-auth-token` is a
+  bearer token, so a new client can be seeded with a session another client
+  already established. What must not be shared across a fork is the
+  keep-alive socket, and each client still builds its own UA. A stale token
+  costs exactly one 401, after which the existing retry path re-logs in.
+- **`activate_storage()` re-asked for things that do not change.** It fetched
+  the iSCSI port list and re-verified the host object on every poll. Both are
+  now cached per process for `API_CACHE_TTL` (300s). The host entry is
+  recorded only *after* the check actually succeeds, so a transient failure
+  cannot silence the check for a whole TTL; and if the host object is removed
+  on the array mid-window, `volume_connect_host()` still fails with a clear
+  error.
+
+Measured in a harness with a counting API stub, over three consecutive polls
+of `activate_storage()` + the foreground of `status()`: **15 calls before, 8
+after.**
+
+For a five-node cluster with two Pure storages that is a drop from roughly
+nine REST calls per second at complete idle to under four.
+
+### MEDIUM — A rename could be retried, stranding a volume forever
+
+`volume_rename()` and `snapshot_rename()` are `PATCH` requests, and
+`_request()` only excluded `POST` from its 5xx retry — while LWP reports a
+read timeout as a synthetic 500. So a rename whose response was lost got
+retried, the retry addressed a name that no longer existed, it came back 404,
+and the caller concluded the rename had failed.
+
+In `volume_delete()`'s tombstone path that meant: destroy under the
+**original** name → 404 → report the delete as failed → leave a
+renamed-but-alive volume on the array. The operator's retry then found nothing
+under the original name, reported "may have been already deleted", and the
+volume was stranded permanently — still consuming capacity and the array's
+volume count, with nothing left that would ever find it again.
+
+Both renames now use a new `no_retry` option, and on failure verify against
+the array whether the rename actually took effect before believing the error.
+Idempotent operations keep their retry resilience.
+
+### MEDIUM — A `pure-pod` that does not exist is now a hard error
+
+The capacity lookup fell back to the array total, so a typo in `pure-pod` made
+the storage report the whole array as free while every volume create failed
+because the pod was missing — two symptoms that contradict each other, with
+only a generic warning in the pvestatd log to connect them.
+
+### Documentation
+
+Two storages sharing one Pod double-count capacity in Proxmox VE: each reports
+the Pod's quota as its own total and the Pod's provisioned size as its own
+used. Volume names stay correctly isolated, so nothing breaks, but "available"
+is wrong on both. Documented in the Pod section of both READMEs.
+
+---
+
 ## [1.1.25] - 2026-07-27
 
 Credential-storage release. The array credentials no longer live in

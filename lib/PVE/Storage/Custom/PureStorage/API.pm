@@ -30,6 +30,16 @@ use constant {
 # Supported API versions in order of preference (prefer 2.x)
 my @SUPPORTED_API_VERSIONS = ('2.26', '2.21', '2.16', '2.11', '2.4', '2.0', '1.19', '1.17', '1.16');
 
+# Detected REST version per array, cached for the life of the process.
+#
+# _detect_api_version() costs at least one unauthenticated GET /api/api_version
+# and, if that fails, up to nine more probes. It ran for EVERY new client
+# object: the plugin's own client cache expires after 300s, and the background
+# reaper forks and therefore always builds a fresh one. An array does not
+# change its REST version while pvedaemon is running, so probing repeatedly is
+# pure overhead on the array's management gateway.
+my %api_version_cache;
+
 # Constructor
 sub new {
     my ($class, %opts) = @_;
@@ -52,7 +62,12 @@ sub new {
         retry_delay => $opts{retry_delay} // DEFAULT_RETRY_DELAY,
         api_version => $opts{api_version},  # Will be auto-detected if not specified
         _ua         => undef,
-        _session_token => undef,
+        # A caller may seed an existing session token. A Pure x-auth-token is
+        # a bearer token, so several processes may hold the same one - what
+        # must NOT be shared across a fork is the keep-alive socket, which is
+        # why a forked worker still builds its own UA. Seeding the token saves
+        # a POST /login per forked reaper pass.
+        _session_token => $opts{session_token},
         _api_major  => undef,  # 1 or 2, set after version detection
     };
 
@@ -72,6 +87,11 @@ sub new {
 sub _detect_api_version {
     my ($self) = @_;
 
+    if (my $cached = $api_version_cache{ $self->{host} }) {
+        $self->{api_version} = $cached;
+        return;
+    }
+
     # First check what versions are supported via api_version endpoint
     my $url = "https://$self->{host}:$self->{port}/api/api_version";
     my $req = HTTP::Request->new(GET => $url);
@@ -85,6 +105,7 @@ sub _detect_api_version {
             for my $version (@SUPPORTED_API_VERSIONS) {
                 if ($supported{$version}) {
                     $self->{api_version} = $version;
+                    $api_version_cache{ $self->{host} } = $version;
                     return;
                 }
             }
@@ -104,14 +125,18 @@ sub _detect_api_version {
                 next;
             }
             $self->{api_version} = $version;
+            $api_version_cache{ $self->{host} } = $version;
             return;
         } elsif ($resp->code == 401 || $resp->code == 403) {
             $self->{api_version} = $version;
+            $api_version_cache{ $self->{host} } = $version;
             return;
         }
     }
 
-    # Fall back to 2.26 as default (modern)
+    # Fall back to 2.26 as default. Deliberately NOT cached: this is a guess
+    # made because the array did not answer, and the next client should try
+    # to detect properly rather than inherit the guess.
     $self->{api_version} = API_VERSION_2X;
 }
 
@@ -119,6 +144,13 @@ sub _detect_api_version {
 sub get_api_version {
     my ($self) = @_;
     return $self->{api_version};
+}
+
+# Current session token, if one has been established. Lets a parent process
+# hand its token to a forked child instead of the child logging in again.
+sub get_session_token {
+    my ($self) = @_;
+    return $self->{_session_token};
 }
 
 # Set API major version flag for conditional logic
@@ -276,11 +308,18 @@ sub _get_api_token_v1 {
 #                  slow operations like volume_destroy with snapshots, where
 #                  the array can take 30+ seconds to respond. The original UA
 #                  timeout is restored before returning, in every exit path.
+#   no_retry => 1  Never retry, not even on 5xx or 429. For operations that
+#                  are NOT idempotent, where a retry after a lost response
+#                  does something different from the first attempt. A rename
+#                  is the case: if the array performed it and the response was
+#                  lost, the retry addresses a name that no longer exists and
+#                  fails with 404, so the caller concludes the rename did not
+#                  happen when it did.
 sub _request {
     my ($self, $method, $endpoint, $data, %opts) = @_;
 
     my $url = $self->_build_url($endpoint);
-    my $retry_count = $self->{retry_count};
+    my $retry_count = $opts{no_retry} ? 1 : $self->{retry_count};
     my $last_error;
 
     # Per-call timeout override
@@ -646,11 +685,25 @@ sub get_managed_capacity {
         # --quota-limit` CLI, AND a Policy of type=quota whose `pod`
         # field references the pod) and only one of them shows up on
         # the pod object itself.
+        my $pod_err;
         $resp = eval { $self->pod_get($pod); };
         if ($@) {
-            warn "Pure pod '$pod': cannot fetch pod info: $@";
+            $pod_err = $@;
             $resp = undef;
         }
+
+        # A pod that does not exist is almost always a typo in `pure-pod`, and
+        # falling through to array capacity makes that very hard to see: the
+        # storage reports the WHOLE array as available while every volume
+        # create fails because the pod is missing. Say so unambiguously
+        # instead of leaving a generic warning in the pvestatd log.
+        if ($pod_err && $pod_err =~ /HTTP 404|not found|does not exist/i) {
+            die "Pure pod '$pod' does not exist on the array. Check the "
+              . "'pure-pod' setting for this storage — reporting the array's "
+              . "full capacity here would be misleading, because every volume "
+              . "create in a missing pod fails. Underlying error: $pod_err";
+        }
+        warn "Pure pod '$pod': cannot fetch pod info: $pod_err" if $pod_err;
 
         if (ref($resp) eq 'HASH' && $resp->{items}) {
             $space = $resp->{items}[0];
@@ -660,7 +713,10 @@ sub get_managed_capacity {
             $space = $resp;
         }
 
-        my $quota = $self->pod_get_quota_limit($pod);
+        # Reuse the pod object fetched above. pod_get_quota_limit() used to
+        # issue its own GET /pods for the same pod, so every status() poll on
+        # every node asked the array for the same object twice.
+        my $quota = $self->pod_get_quota_limit($pod, $space);
 
         my $metric = $opts{usage_metric} // 'provisioned';
         $metric = 'provisioned' unless $POD_USAGE_METRIC_FIELD{$metric};
@@ -779,22 +835,26 @@ sub pod_get {
 # Returns 0 when no cap is set, the pod does not exist, the array runs
 # API 1.x (pods are an API 2.x feature), or any error occurs. Never
 # croaks — status() polling must not fail because of quota lookup.
+# $pod_object is optional: pass an already-fetched pod to avoid a second
+# GET /pods for the same object. get_managed_capacity() always has one.
 sub pod_get_quota_limit {
-    my ($self, $podname) = @_;
+    my ($self, $podname, $pod_object) = @_;
 
     return 0 unless defined $podname && length $podname;
     return 0 unless $self->is_api_v2();
 
-    my $pod_resp = eval { $self->pod_get($podname); };
-    return 0 if $@ || !$pod_resp;
+    my $pod = $pod_object;
+    unless (ref($pod) eq 'HASH') {
+        my $pod_resp = eval { $self->pod_get($podname); };
+        return 0 if $@ || !$pod_resp;
 
-    my $pod;
-    if (ref($pod_resp) eq 'HASH' && ref($pod_resp->{items}) eq 'ARRAY') {
-        $pod = $pod_resp->{items}[0];
-    } elsif (ref($pod_resp) eq 'ARRAY') {
-        $pod = $pod_resp->[0];
-    } else {
-        $pod = $pod_resp;
+        if (ref($pod_resp) eq 'HASH' && ref($pod_resp->{items}) eq 'ARRAY') {
+            $pod = $pod_resp->{items}[0];
+        } elsif (ref($pod_resp) eq 'ARRAY') {
+            $pod = $pod_resp->[0];
+        } else {
+            $pod = $pod_resp;
+        }
     }
     return 0 unless ref($pod) eq 'HASH';
 
@@ -1213,17 +1273,53 @@ sub volume_resize {
 }
 
 # Rename a volume
+# Rename a volume.
+#
+# NOT idempotent, and therefore never retried: if the array performed the
+# rename but the response was lost (a read timeout is reported by LWP as a
+# synthetic 500, which the generic retry treats as retryable), the second
+# attempt addresses a name that no longer exists and comes back 404. The
+# caller would then believe the rename failed when it succeeded.
+#
+# volume_delete()'s tombstone path made that particularly expensive: it would
+# fall back to destroying under the ORIGINAL name, get 404, report the delete
+# as failed, and leave a renamed-but-alive volume on the array. A retry by the
+# operator then finds nothing under the original name and reports success, so
+# the volume is stranded permanently, still consuming capacity and the array's
+# volume count.
+#
+# On failure, check whether the rename actually took effect before believing
+# the error.
 sub volume_rename {
     my ($self, $old_name, $new_name) = @_;
 
     croak "old_name is required" unless $old_name;
     croak "new_name is required" unless $new_name;
 
-    if ($self->is_api_v2()) {
-        return $self->patch("volumes", { name => $new_name }, { names => $old_name });
-    } else {
-        return $self->put("volume/$old_name", { name => $new_name });
+    my $ok = eval {
+        if ($self->is_api_v2()) {
+            $self->patch("volumes", { name => $new_name }, { names => $old_name },
+                no_retry => 1);
+        } else {
+            $self->put("volume/$old_name", { name => $new_name }, no_retry => 1);
+        }
+        1;
+    };
+    return 1 if $ok;
+
+    my $err = $@;
+
+    # Ambiguous outcome: ask the array who exists now.
+    my $new_exists = eval { $self->volume_get($new_name) };
+    my $old_exists = eval { $self->volume_get($old_name) };
+    if ($new_exists && !$old_exists) {
+        warn "volume_rename: '$old_name' -> '$new_name' reported an error but "
+           . "the array shows the rename took effect; treating it as "
+           . "successful. Underlying error: $err";
+        return 1;
     }
+
+    die $err;
 }
 
 # Get volume serial number (for WWID)
@@ -1473,13 +1569,37 @@ sub snapshot_rename {
     croak "old_full_name is required" unless defined $old_full_name && length $old_full_name;
     croak "new_suffix is required" unless defined $new_suffix && length $new_suffix;
 
-    if ($self->is_api_v2()) {
-        return $self->patch("volume-snapshots", { name => $new_suffix }, { names => $old_full_name });
-    } else {
+    unless ($self->is_api_v2()) {
         # API 1.x: snapshot rename not exposed via REST in older releases;
         # caller must skip the tombstone path on API 1.x.
         croak "snapshot_rename is not supported on API 1.x";
     }
+
+    # Same non-idempotency as volume_rename: never retried, and an error is
+    # verified against the array before it is believed.
+    my $ok = eval {
+        $self->patch("volume-snapshots", { name => $new_suffix }, { names => $old_full_name },
+            no_retry => 1);
+        1;
+    };
+    return 1 if $ok;
+
+    my $err = $@;
+
+    my $dot = index($old_full_name, '.');
+    if ($dot > 0) {
+        my $new_full = substr($old_full_name, 0, $dot) . ".$new_suffix";
+        my $new_exists = eval { $self->snapshot_get($new_full) };
+        my $old_exists = eval { $self->snapshot_get($old_full_name) };
+        if ($new_exists && !$old_exists) {
+            warn "snapshot_rename: '$old_full_name' -> suffix '$new_suffix' "
+               . "reported an error but the array shows the rename took "
+               . "effect; treating it as successful. Underlying error: $err";
+            return 1;
+        }
+    }
+
+    die $err;
 }
 
 # Build the new (suffix-only) tombstone name for a snapshot pre-destroy

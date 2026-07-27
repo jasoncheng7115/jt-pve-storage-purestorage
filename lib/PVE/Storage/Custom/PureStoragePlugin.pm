@@ -1086,6 +1086,20 @@ sub _get_api {
         $client_opts{retry_count} = 1;
     }
 
+    # Inherit an already-established session from any other cached client for
+    # the same array. Building a client otherwise costs a GET /api/api_version
+    # plus a POST /login, and the background reaper builds a fresh one on
+    # every pass because it runs in a fork. The API version is cached inside
+    # API.pm per host; the token is passed here. A stale token simply yields
+    # one 401, after which _request() re-logs in and retries.
+    for my $other (values %api_cache) {
+        next unless $other->{host} && $other->{host} eq ($scfg->{'pure-portal'} // '');
+        my $tok = eval { $other->{api}->get_session_token(); };
+        next unless $tok;
+        $client_opts{session_token} = $tok;
+        last;
+    }
+
     my $api = PVE::Storage::Custom::PureStorage::API->new(%client_opts);
 
     $api_cache{$cache_key} = {
@@ -1498,11 +1512,40 @@ sub _get_initiators {
     }
 }
 
+# Per-process caches for two things activate_storage() asks the array on every
+# pvestatd poll but which change very rarely: the host object's existence and
+# the list of iSCSI ports. Each was one REST call per poll per node per
+# storage. TTL matches API_CACHE_TTL so the whole client is rebuilt on the
+# same cadence.
+#
+# The risk of caching is bounded: if the host object is deleted on the array
+# mid-window, volume_connect_host() fails with a clear error and the next
+# _ensure_host() (within the TTL) recreates it. A newly added iSCSI LIF is
+# picked up within the TTL rather than immediately.
+my %host_verified;
+my %iscsi_ports_cache;
+
+sub _cached_iscsi_ports {
+    my ($api, $portal) = @_;
+    my $c = $iscsi_ports_cache{$portal};
+    return $c->{ports} if $c && (time() - $c->{ts}) < API_CACHE_TTL && ($c->{pid} // 0) == $$;
+    my $ports = $api->iscsi_get_ports();
+    $iscsi_ports_cache{$portal} = { ports => $ports, ts => time(), pid => $$ };
+    return $ports;
+}
+
 # Ensure host exists and has current node's initiator
 sub _ensure_host {
-    my ($scfg, $api) = @_;
+    my ($scfg, $api, %opts) = @_;
 
     my $host_name = _get_host_name($scfg);
+
+    my $cache_key = ($scfg->{'pure-portal'} // '') . "\0$host_name";
+    unless ($opts{force}) {
+        my $c = $host_verified{$cache_key};
+        return $host_name
+            if $c && (time() - $c->{ts}) < API_CACHE_TTL && ($c->{pid} // 0) == $$;
+    }
     my ($initiator_type, @initiators) = _get_initiators($scfg);
 
     # Get or create host
@@ -1573,6 +1616,11 @@ sub _ensure_host {
             join(", ", @msgs) . ". " .
             "Please remove the conflicting host entries from Pure Storage before continuing.";
     }
+
+    # Only now, having actually confirmed the host and its initiators, record
+    # it as verified. Marking it before the work would turn a transient
+    # failure into a whole TTL of skipped checks.
+    $host_verified{$cache_key} = { ts => time(), pid => $$ };
 
     return $host_name;
 }
@@ -2179,7 +2227,7 @@ sub activate_storage {
 
     } else {
         # iSCSI: Get portals and login
-        my $ports = $api->iscsi_get_ports();
+        my $ports = _cached_iscsi_ports($api, $scfg->{'pure-portal'} // '');
         if (@$ports) {
             my $probe_timeout = $scfg->{'pure-portal-probe-timeout'} // 2;
             my $activate_deadline = $scfg->{'pure-activate-deadline'} // 30;
