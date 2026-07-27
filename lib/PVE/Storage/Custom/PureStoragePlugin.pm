@@ -117,6 +117,22 @@ sub plugindata {
             { raw => 1 },
             'raw',
         ],
+        # Keep the array credentials out of /etc/pve/storage.cfg.
+        #
+        # PVE reads this list in PVE::Storage::Plugin::sensitive_properties()
+        # and, in the storage-config API, pulls those keys out of the request
+        # before the config is written, handing them to on_add_hook /
+        # on_update_hook instead. Without it the list falls back to a
+        # hardcoded `encryption-key keyring master-pubkey password`, which
+        # covers neither of ours — so the API token sat in storage.cfg in
+        # cleartext and `GET /storage/<id>` returned it to anyone holding
+        # Datastore.Allocate on that storage, which is not root. A Pure API
+        # token is typically array-wide, so that is full control of the
+        # FlashArray, not just of this storage.
+        'sensitive-properties' => {
+            'pure-api-token' => 1,
+            'pure-password'  => 1,
+        },
     };
 }
 
@@ -307,6 +323,162 @@ sub options {
 #
 # Helper methods
 #
+
+
+#
+# Array credentials
+#
+# Stored under /etc/pve/priv/storage/, which pmxcfs keeps root-only, exactly
+# as PBSPlugin and CIFSPlugin store theirs. See plugindata() for why.
+#
+
+sub _secret_file {
+    my ($storeid, $kind) = @_;
+    # The storeid is used verbatim, as PBSPlugin does: PVE's pve-storage-id
+    # format permits only [a-z0-9-_.] and requires a leading letter, so it can
+    # never escape the directory. Sanitising it here would instead risk two
+    # distinct storeids ("a.b" and "a-b") colliding on one file.
+    return "/etc/pve/priv/storage/${storeid}.$kind";
+}
+
+sub _set_secret {
+    my ($storeid, $kind, $value) = @_;
+    mkdir '/etc/pve/priv/storage';
+    PVE::Tools::file_set_contents(_secret_file($storeid, $kind), "$value\n", 0600);
+    return 1;
+}
+
+sub _delete_secret {
+    my ($storeid, $kind) = @_;
+    my $file = _secret_file($storeid, $kind);
+    unlink($file) if -e $file;
+    return 1;
+}
+
+sub _get_secret {
+    my ($storeid, $kind) = @_;
+    my $file = _secret_file($storeid, $kind);
+    return undef unless -f $file;
+    my $val = eval { PVE::Tools::file_get_contents($file) };
+    return undef unless defined $val;
+    chomp $val;
+    return length($val) ? $val : undef;
+}
+
+# Resolve the credentials for a storage: the out-of-config secret wins, and
+# the value in $scfg is the fallback.
+#
+# The fallback is what makes this safe to roll out. An existing installation
+# has its token in storage.cfg and no secret file; nothing about it changes
+# until the operator next sets the token, at which point PVE routes the value
+# to on_update_hook and it moves to the file. A PVE storage update is a MERGE
+# (`$scfg->{$k} = $opts->{$k}` over the new keys only), so an unrelated
+# `pvesm set` can never drop the in-config token either.
+sub _resolve_credentials {
+    my ($scfg, $storeid) = @_;
+
+    return (
+        api_token => _get_secret($storeid, 'pure-token') // $scfg->{'pure-api-token'},
+        username  => $scfg->{'pure-username'},
+        password  => _get_secret($storeid, 'pure-pw') // $scfg->{'pure-password'},
+    );
+}
+
+# Called when a storage is added. %param holds ONLY the sensitive properties;
+# a key that is absent was not supplied. Any pre-existing file for this
+# storeid is a leftover from a storage of the same name that was removed, so
+# clearing it is correct here (same as PBSPlugin).
+sub on_add_hook {
+    my ($class, $storeid, $scfg, %param) = @_;
+
+    for my $p (['pure-api-token', 'pure-token'], ['pure-password', 'pure-pw']) {
+        my ($opt, $kind) = @$p;
+        if (defined(my $val = $param{$opt})) {
+            _set_secret($storeid, $kind, $val);
+        } else {
+            _delete_secret($storeid, $kind);
+        }
+    }
+
+    return;
+}
+
+# Called when a storage is updated. Here `exists` and `defined` mean different
+# things and both matter: extract_sensitive_params() sets the key to undef for
+# an explicit `--delete`, sets it to the value when one is given, and leaves
+# it absent when the property was not touched at all. Acting on an absent key
+# would wipe a credential the operator never mentioned.
+sub on_update_hook {
+    my ($class, $storeid, $scfg, %param) = @_;
+
+    for my $p (['pure-api-token', 'pure-token'], ['pure-password', 'pure-pw']) {
+        my ($opt, $kind) = @$p;
+        next unless exists $param{$opt};
+        if (defined $param{$opt}) {
+            _set_secret($storeid, $kind, $param{$opt});
+        } else {
+            _delete_secret($storeid, $kind);
+        }
+    }
+
+    return;
+}
+
+# The full form, which is what PVE actually calls for us (it picks
+# on_update_hook_full whenever the plugin's api() is >= 13, and ours is 13).
+#
+# Taking this form instead of the short one buys a one-command migration.
+# $scfg here is the LIVE existing config hashref that PVE writes out
+# immediately afterwards:
+#
+#     $plugin->on_update_hook_full($storeid, $scfg, $opts, $delete, $sensitive);
+#     if ($delete) { delete $scfg->{$k} for $delete->@* }
+#     $scfg->{$k} = $opts->{$k} for keys %$opts;
+#     PVE::Storage::write_config($cfg);
+#
+# so deleting the legacy in-config credential here removes it from
+# storage.cfg. Without that, an operator upgrading from a release that stored
+# the token in the config could not get rid of the cleartext copy:
+# `pvesm set <id> --pure-api-token <token>` writes the secret file but the old
+# line survives (an update is a merge), and `--delete pure-api-token` is
+# reported to us as an explicit deletion, so it would remove the secret file
+# too and lock them out of their own array.
+#
+# Order matters: write the secret first. _set_secret dies on failure, which
+# aborts the whole update before PVE writes the config, so we can never end up
+# having dropped the old credential without having stored the new one.
+sub on_update_hook_full {
+    my ($class, $storeid, $scfg, $update, $delete, $sensitive) = @_;
+
+    for my $p (['pure-api-token', 'pure-token'], ['pure-password', 'pure-pw']) {
+        my ($opt, $kind) = @$p;
+        next unless exists $sensitive->{$opt};
+
+        if (defined $sensitive->{$opt}) {
+            _set_secret($storeid, $kind, $sensitive->{$opt});
+            # Retire the cleartext copy a pre-1.1.25 release left behind.
+            if (defined $scfg->{$opt}) {
+                warn "Storage '$storeid': moved '$opt' out of storage.cfg into "
+                   . _secret_file($storeid, $kind) . " (root-only).\n";
+                delete $scfg->{$opt};
+            }
+        } else {
+            _delete_secret($storeid, $kind);
+            delete $scfg->{$opt};
+        }
+    }
+
+    return;
+}
+
+sub on_delete_hook {
+    my ($class, $storeid, $scfg) = @_;
+
+    _delete_secret($storeid, 'pure-token');
+    _delete_secret($storeid, 'pure-pw');
+
+    return;
+}
 
 # Get API client instance (cached per storage config)
 my %api_cache;
@@ -846,7 +1018,15 @@ sub _cleanup_orphaned_devices {
 }
 
 sub _get_api {
-    my ($scfg, %opts) = @_;
+    my ($scfg, $storeid, %opts) = @_;
+
+    # The storeid is REQUIRED: it is how we find the credentials, which now
+    # live outside storage.cfg. Die loudly rather than silently falling back
+    # to the in-config value, so a call site that forgot to pass it fails in
+    # testing instead of quietly working on legacy installs and breaking on
+    # new ones. tools/audit-invariants.pl enforces this statically too.
+    die "internal error: _get_api() called without a storeid\n"
+        unless defined $storeid && length $storeid;
 
     # The pvestatd health path (activate_storage + the foreground of status)
     # must fail fast so one slow array does not back up the whole sequential
@@ -863,10 +1043,12 @@ sub _get_api {
     # API tokens (or different pure-status-timeout values) would then share one
     # cached client, and whichever one built it first won for the whole TTL.
     # Key on everything that actually distinguishes a client.
+    my %creds = _resolve_credentials($scfg, $storeid);
+
     my $cache_key = join("\0",
-        $scfg->{'pure-portal'}   // '',
-        $scfg->{'pure-api-token'} // '',
-        $scfg->{'pure-username'} // '',
+        $scfg->{'pure-portal'}     // '',
+        $creds{api_token}          // '',
+        $creds{username}           // '',
         $scfg->{'pure-ssl-verify'} // 0,
         $status_path,
         $status_path ? ($scfg->{'pure-status-timeout'} // 5) : '',
@@ -885,11 +1067,18 @@ sub _get_api {
 
     my $ssl_verify = $scfg->{'pure-ssl-verify'} // 0;
 
+    unless ($creds{api_token} || ($creds{username} && $creds{password})) {
+        die "No Pure Storage credentials for '$storeid'. Set them with "
+          . "'pvesm set $storeid --pure-api-token <token>' (or "
+          . "--pure-username/--pure-password); they are stored outside "
+          . "storage.cfg in /etc/pve/priv/storage/.\n";
+    }
+
     my %client_opts = (
         host       => $scfg->{'pure-portal'},
-        api_token  => $scfg->{'pure-api-token'},
-        username   => $scfg->{'pure-username'},
-        password   => $scfg->{'pure-password'},
+        api_token  => $creds{api_token},
+        username   => $creds{username},
+        password   => $creds{password},
         ssl_verify => $ssl_verify,
     );
     if ($status_path) {
@@ -1527,6 +1716,15 @@ sub _parse_volname {
             type   => 'cloudinit',
             isBase => 0,
         };
+    # Backup fleecing image: vm-100-fleece-0
+    } elsif ($volname =~ /^vm-(\d+)-fleece-(\d+)$/) {
+        return {
+            vmid     => $1,
+            fleeceid => $2,
+            format   => 'raw',
+            type     => 'fleece',
+            isBase   => 0,
+        };
     # VM state: vm-100-state-snapname
     } elsif ($volname =~ /^vm-(\d+)-state-(.+)$/) {
         return {
@@ -1545,7 +1743,7 @@ sub _parse_volname {
 sub _find_free_diskid {
     my ($scfg, $storeid, $vmid) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $san_storage = storeid_to_pure_prefix($storeid);
 
     # List existing volumes for this VM
@@ -1932,7 +2130,7 @@ sub activate_storage {
     # Verify Pure Storage connectivity. activate_storage runs on the pvestatd
     # health path, so use the short-timeout, single-attempt client (status =>
     # 1): a slow array fails this fast instead of stalling the poll cycle.
-    my $api = _get_api($scfg, status => 1);
+    my $api = _get_api($scfg, $storeid, status => 1);
 
     # Verify we can connect to the array
     eval { $api->array_get(); };
@@ -2164,7 +2362,7 @@ sub activate_storage {
 sub deactivate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
 
-    my $api = eval { _get_api($scfg); };
+    my $api = eval { _get_api($scfg, $storeid); };
     unless ($api) {
         warn "Cannot connect to Pure Storage for cleanup: $@\n";
         return 1;  # Don't fail deactivation if API is unreachable
@@ -2285,7 +2483,7 @@ sub status {
     # short-timeout, single-attempt health client (status => 1) so a slow
     # array fails this poll quickly instead of backing up the sequential
     # pvestatd cycle and starving sibling storages on this node.
-    my $api = eval { _get_api($scfg, status => 1); };
+    my $api = eval { _get_api($scfg, $storeid, status => 1); };
     if (!$api) {
         my $err = $@ || 'API client init failed';
         warn "Failed to connect to Pure Storage: $err";
@@ -2345,7 +2543,7 @@ sub status {
                 # client the foreground used above. _get_api rebuilds a fresh
                 # client here anyway because the cached entry's pid no longer
                 # matches this forked process.
-                my $bg_api = eval { _get_api($scfg); };
+                my $bg_api = eval { _get_api($scfg, $storeid); };
                 if ($bg_api) {
                     eval { _cleanup_orphaned_temp_clones($scfg, $storeid, $bg_api); };
                     eval { _cleanup_orphaned_devices($bg_api, $storeid, $scfg); };
@@ -2382,7 +2580,7 @@ sub alloc_image {
 
     die "unsupported format '$fmt'" if $fmt ne 'raw';
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
 
     # Size is in kilobytes, convert to bytes
     my $size_bytes = $size * 1024;
@@ -2390,7 +2588,22 @@ sub alloc_image {
     my $pure_volname_base;
     my $pve_volname;
 
-    # Check if this is a special volume type (state, cloudinit)
+    # Check if this is a special volume type (state, cloudinit, fleece).
+    #
+    # PVE asks for a specific name in four places, and we must honour it in
+    # all of them — LVMPlugin and ZFSPoolPlugin accept any "vm-<vmid>-<...>"
+    # for the same reason:
+    #   QemuConfig.pm          "vm-<vmid>-state-<snap>"   RAM snapshot
+    #   API2/Qemu, Cloudinit   "vm-<vmid>-cloudinit"      cloud-init drive
+    #   VZDump/QemuServer.pm   "vm-<vmid>-fleece-<n>"     backup fleecing
+    #   API2/Storage/Content   whatever the operator typed to `pvesm alloc`
+    #
+    # Anything not recognised used to fall through to the regular-disk branch,
+    # which IGNORED the requested name and allocated "vm-<vmid>-disk-<N>"
+    # instead. Fleecing images therefore came back looking like ordinary VM
+    # disks and consumed a disk id. Refuse instead: a silent substitution
+    # would hide the next special name PVE invents, whereas an error names the
+    # problem on the first backup that hits it.
     if ($name && $name =~ /^vm-(\d+)-state-(.+)$/) {
         # VM state volume for RAM snapshot
         my ($state_vmid, $snapname) = ($1, $2);
@@ -2400,6 +2613,17 @@ sub alloc_image {
         # Cloud-init volume
         $pure_volname_base = pve_volname_to_pure($storeid, $name);
         $pve_volname = $name;
+    } elsif ($name && $name =~ /^vm-(\d+)-fleece-(\d+)$/) {
+        # Backup fleecing image
+        $pure_volname_base = pve_volname_to_pure($storeid, $name);
+        $pve_volname = $name;
+    } elsif ($name && $name !~ /^(?:vm|base)-\d+-disk-\d+$/) {
+        die "Cannot allocate volume '$name' on storage '$storeid': the "
+          . "purestorage plugin does not know how to name that on the array. "
+          . "It understands vm-<vmid>-disk-<n>, vm-<vmid>-cloudinit, "
+          . "vm-<vmid>-state-<snapshot> and vm-<vmid>-fleece-<n>. Allocating "
+          . "under a different name would silently give you a volume called "
+          . "something else.\n";
     } else {
         # Regular disk volume
         my $diskid;
@@ -2419,7 +2643,8 @@ sub alloc_image {
     my $existing = eval { $api->volume_get($pure_volname); };
     if ($existing) {
         # For state/cloudinit volumes, try to cleanup orphaned volumes from previous failed attempts
-        if ($name && ($name =~ /^vm-\d+-state-/ || $name =~ /^vm-\d+-cloudinit$/)) {
+        if ($name && ($name =~ /^vm-\d+-state-/ || $name =~ /^vm-\d+-cloudinit$/
+                      || $name =~ /^vm-\d+-fleece-\d+$/)) {
             warn "Found orphaned state/cloudinit volume '$pure_volname', attempting cleanup...\n";
 
             # This was the ONLY destructive path in the plugin with no in-use
@@ -2505,7 +2730,8 @@ sub alloc_image {
 
     # For state/cloudinit volumes, we need to ensure the device is available immediately
     # because PVE will try to use it right after alloc_image returns
-    if ($name && ($name =~ /^vm-\d+-state-/ || $name =~ /^vm-\d+-cloudinit$/)) {
+    if ($name && ($name =~ /^vm-\d+-state-/ || $name =~ /^vm-\d+-cloudinit$/
+                  || $name =~ /^vm-\d+-fleece-\d+$/)) {
         my $protocol = $scfg->{'pure-protocol'} // 'iscsi';
 
         # Longer delay for Pure Storage to propagate the connection to all controllers
@@ -2645,7 +2871,7 @@ sub alloc_image {
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase, $format) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname_base = pve_volname_to_pure($storeid, $volname);
     my $pure_volname = _get_full_volname($scfg, $pure_volname_base);
 
@@ -2837,7 +3063,7 @@ sub _linked_clone_base {
 sub list_images {
     my ($class, $storeid, $scfg, $vmid, $vollist, $cache) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
 
     my @res;
 
@@ -2977,7 +3203,7 @@ sub list_images {
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
 
     my $vol = $api->volume_get($pure_volname);
@@ -2998,7 +3224,7 @@ sub volume_resize {
     # Pure Storage supports online resize, no need to check $running
     # Note: $running parameter is kept for API compatibility
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
 
     # Get current size to prevent shrinking
@@ -3133,7 +3359,7 @@ sub _refresh_local_capacity {
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
     my $protocol = $scfg->{'pure-protocol'} // 'iscsi';
 
@@ -3293,7 +3519,7 @@ sub activate_volume {
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
 
     # If this was a snapshot access, cleanup the temporary clone
@@ -3326,7 +3552,7 @@ sub path {
     my $parsed = _parse_volname($volname);
     die "Cannot parse volume name: $volname" unless $parsed;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
 
     my $target_vol;
@@ -3490,7 +3716,7 @@ sub _cleanup_temp_snap_clone {
     my $temp_vol = $_temp_snap_clones{$cache_key};
     return unless $temp_vol;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
 
     # Get WWID for device cleanup
     my $wwid = eval { $api->volume_get_wwid($temp_vol); };
@@ -3626,7 +3852,7 @@ sub filesystem_path {
 sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
     my $snap_suffix = encode_snapshot_name($snap);
     my $full_snap_name = "${pure_volname}.${snap_suffix}";
@@ -3683,7 +3909,7 @@ sub volume_snapshot {
 sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snap, $running) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
     my $snap_suffix = encode_snapshot_name($snap);
     my $full_snap_name = "${pure_volname}.${snap_suffix}";
@@ -3736,7 +3962,7 @@ sub volume_snapshot_delete {
 sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
     my $snap_suffix = encode_snapshot_name($snap);
     my $full_snap_name = "${pure_volname}.${snap_suffix}";
@@ -3803,7 +4029,7 @@ sub volume_snapshot_rollback {
 sub volume_snapshot_list {
     my ($class, $scfg, $storeid, $volname) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
 
     my $snapshots = $api->snapshot_list($pure_volname, "${pure_volname}.pve-snap-*");
@@ -3874,6 +4100,8 @@ sub parse_volname {
         return ('images', $volname, $parsed->{vmid}, undef, undef, 0, $parsed->{format});
     } elsif ($parsed->{type} eq 'state') {
         return ('images', $volname, $parsed->{vmid}, undef, undef, 0, $parsed->{format});
+    } elsif ($parsed->{type} eq 'fleece') {
+        return ('images', $volname, $parsed->{vmid}, undef, undef, 0, $parsed->{format});
     }
 
     return undef;
@@ -3892,7 +4120,7 @@ sub create_base {
     die "create_base on wrong vtype '$vtype'\n" if $vtype ne 'images';
     die "create_base not possible with base image\n" if $isBase;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
 
     # Verify volume exists on Pure Storage
@@ -3941,7 +4169,7 @@ sub rename_volume {
 
     die "rename_volume on wrong vtype '$vtype'\n" if $vtype ne 'images';
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
 
     # Determine target volume name if not provided
     if (!$target_volname) {
@@ -4017,7 +4245,7 @@ sub find_free_diskname {
 sub clone_image {
     my ($class, $scfg, $storeid, $volname, $vmid, $snap) = @_;
 
-    my $api = _get_api($scfg);
+    my $api = _get_api($scfg, $storeid);
 
     # Parse source volume name
     my $parsed = _parse_volname($volname);

@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.24-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.25-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -338,6 +338,32 @@ at all. Individual features have their own floors:
 | Snapshot tombstone rename on delete | REST 2.x (1.x has no REST snapshot rename) |
 | Paginated listing beyond one page of volumes | REST 2.x (1.x returns the full set in one response) |
 
+### Credential storage
+
+The API token and password are **not** kept in `/etc/pve/storage.cfg`. Proxmox
+VE extracts them from the request and the plugin writes them to
+`/etc/pve/priv/storage/<storeid>.pure-token` and `<storeid>.pure-pw`
+(mode 0600, in a directory pmxcfs keeps root-only) — the same place the
+built-in PBS and CIFS plugins keep theirs.
+
+This matters because `GET /storage/<id>` returns the storage configuration to
+anyone holding `Datastore.Allocate` on it, which is not root. A Pure API token
+is normally array-wide, so leaking it means full control of the FlashArray.
+
+**Upgrading from a release before 1.1.25** needs no action — the plugin falls
+back to the value still in `storage.cfg`. To remove that cleartext copy, run
+once per storage:
+
+```bash
+pvesm set <storeid> --pure-api-token <token>
+```
+
+which writes the secret file and removes the old line in one command.
+
+> Do **not** use `--delete pure-api-token` for this. Proxmox VE reports a
+> deletion to the plugin as an explicit removal, so it deletes the secret file
+> too and leaves the storage with no credentials.
+
 ### For iSCSI
 - `open-iscsi` package
 - `multipath-tools` package
@@ -355,7 +381,7 @@ at all. Individual features have their own floors:
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.24-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.25-1_all.deb
 ```
 
 > ⚠ Avoid `dpkg -i` for the first install: it does **not** auto-install

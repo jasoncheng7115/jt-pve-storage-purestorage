@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.24-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.25-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -324,6 +324,29 @@ FlashArray 產品線都在支援範圍內——//M、//X、//XR、//C、//XL、/
 | 刪除 Snapshot 時的 tombstone rename | REST 2.x（1.x 的 REST 沒有 snapshot rename） |
 | Volume 超過單頁的分頁列舉 | REST 2.x（1.x 一次回傳完整清單，不需分頁） |
 
+### 憑證儲存位置
+
+API token 與密碼**不會**存放在 `/etc/pve/storage.cfg`。Proxmox VE 會把它們從請求中
+抽出，外掛再寫入 `/etc/pve/priv/storage/<storeid>.pure-token` 與
+`<storeid>.pure-pw`（權限 0600，目錄由 pmxcfs 維持只有 root 可讀）——與內建的 PBS、
+CIFS 外掛存放位置相同。
+
+這件事之所以重要，是因為 `GET /storage/<id>` 會把 storage 設定回傳給任何在該
+storage 上持有 `Datastore.Allocate` 的人，而那不需要 root。Pure 的 API token 通常
+是整台陣列的權限，外洩等於整台 FlashArray 的控制權。
+
+**從 1.1.25 之前的版本升級**不需要任何動作——外掛會回退使用仍留在
+`storage.cfg` 裡的值。若要移除該明文副本，每個 storage 執行一次：
+
+```bash
+pvesm set <storeid> --pure-api-token <token>
+```
+
+這一道指令會寫入機密檔並移除舊行。
+
+> **請勿**用 `--delete pure-api-token` 來做這件事。Proxmox VE 會把刪除當成明確的
+> 移除指令傳給外掛，因此連機密檔也會一併刪掉，該 storage 將沒有憑證可用。
+
 ### iSCSI 需求
 - `open-iscsi` 套件
 - `multipath-tools` 套件
@@ -340,7 +363,7 @@ FlashArray 產品線都在支援範圍內——//M、//X、//XR、//C、//XL、/
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.24-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.25-1_all.deb
 ```
 
 > ⚠ 首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件

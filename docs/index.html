@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.24 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.25 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.24-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.25-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.24-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.25-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.25 <span class="changelog-tag changelog-tag--fix">Security</span></div>
+        <div class="changelog-date">2026-07-27</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>The API token is no longer stored in cleartext (MEDIUM):</strong> PVE 9 lets a plugin declare which of its properties are sensitive via <code>plugindata()-&gt;{'sensitive-properties'}</code>, so the config API can keep them out of <code>/etc/pve/storage.cfg</code>. We never declared it, so the list fell back to PVE's hardcoded set — which covers neither <code>pure-api-token</code> nor <code>pure-password</code>. Both sat in <code>storage.cfg</code> in cleartext and <code>GET /storage/&lt;id&gt;</code> returned them to anyone holding <code>Datastore.Allocate</code> on that storage, which is not root; a Pure API token is normally array-wide. Credentials now live in <code>/etc/pve/priv/storage/&lt;id&gt;.pure-token</code> (mode 0600, root-only directory), the same place the built-in PBS and CIFS plugins keep theirs. <strong>Upgrading needs no action</strong> — the plugin falls back to the value still in the config. To remove the cleartext copy, run <code>pvesm set &lt;id&gt; --pure-api-token &lt;token&gt;</code> once, which writes the secret file and drops the old line in one command. Do <em>not</em> use <code>--delete pure-api-token</code>: PVE reports that as an explicit removal, so the secret file goes too.</span>
+            <span class="lang-zh"><strong>API token 不再以明文儲存（中）：</strong>PVE 9 允許外掛透過 <code>plugindata()-&gt;{'sensitive-properties'}</code> 宣告哪些設定屬於機密，設定 API 便會把它們排除在 <code>/etc/pve/storage.cfg</code> 之外。我們一直沒有宣告，清單因此回退到 PVE 硬編的那一組——兩個都不涵蓋 <code>pure-api-token</code> 與 <code>pure-password</code>。兩者都以明文留在 <code>storage.cfg</code>，而 <code>GET /storage/&lt;id&gt;</code> 會回傳給任何在該 storage 上持有 <code>Datastore.Allocate</code> 的人，那不需要 root；Pure 的 API token 通常是整台陣列的權限。憑證現在存放於 <code>/etc/pve/priv/storage/&lt;id&gt;.pure-token</code>（權限 0600，目錄只有 root 可讀），與內建 PBS、CIFS 外掛相同。<strong>升級不需要任何動作</strong>——外掛會回退使用仍在設定檔裡的值。若要移除明文副本，執行一次 <code>pvesm set &lt;id&gt; --pure-api-token &lt;token&gt;</code>，該指令會寫入機密檔並移除舊行。請<em>不要</em>用 <code>--delete pure-api-token</code>：PVE 會把它當成明確移除，連機密檔也會一併刪掉。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.24 <span class="changelog-tag changelog-tag--critical">Critical</span></div>

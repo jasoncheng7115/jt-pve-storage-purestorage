@@ -8,6 +8,87 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.25] - 2026-07-27
+
+Credential-storage release. The array credentials no longer live in
+`/etc/pve/storage.cfg`.
+
+### MEDIUM — The API token was stored in cleartext and returned by the config API
+
+PVE 9 lets a plugin declare which of its properties are sensitive, through
+`plugindata()->{'sensitive-properties'}`. The storage-config API pulls those
+keys out of the request before the config is written and hands them to
+`on_add_hook` / `on_update_hook` instead, so the plugin can put them
+somewhere protected.
+
+We never declared it. The list therefore fell back to PVE's hardcoded
+`encryption-key keyring master-pubkey password`, which covers neither
+`pure-api-token` nor `pure-password`. Both sat in `storage.cfg` in cleartext,
+and `GET /storage/<id>` returned them — an endpoint that needs
+`Datastore.Allocate` on that storage, not root. A Pure API token is typically
+array-wide, so that is full control of the FlashArray rather than of one
+storage.
+
+Credentials now live in `/etc/pve/priv/storage/<id>.pure-token` and
+`<id>.pure-pw`, mode 0600, in a directory pmxcfs keeps root-only — the same
+place `PBSPlugin` and `CIFSPlugin` keep theirs.
+
+### Upgrading
+
+**No action is required.** An existing storage keeps working unchanged:
+`_resolve_credentials()` prefers the out-of-config secret and falls back to
+the value in `storage.cfg`, and a PVE storage update is a merge, so an
+unrelated `pvesm set` cannot drop the in-config token either.
+
+**To complete the migration** and remove the cleartext copy, run once per
+storage:
+
+```bash
+pvesm set <storeid> --pure-api-token <token>
+```
+
+That writes the secret file **and** removes the old line from `storage.cfg`,
+in one command.
+
+> Do **not** use `pvesm set <storeid> --delete pure-api-token` for this. PVE
+> reports a deletion to the plugin as an explicit removal, so it deletes the
+> secret file as well and leaves the storage with no credentials at all.
+
+### MEDIUM — The volume name PVE asks for is now honoured
+
+PVE requests a specific name in four places:
+
+| Caller | Name |
+|---|---|
+| `QemuConfig.pm` | `vm-<vmid>-state-<snap>` (RAM snapshot) |
+| `API2/Qemu.pm`, `Cloudinit.pm` | `vm-<vmid>-cloudinit` |
+| `VZDump/QemuServer.pm` | `vm-<vmid>-fleece-<n>` (backup fleecing) |
+| `API2/Storage/Content.pm` | whatever the operator types to `pvesm alloc` |
+
+Anything the plugin did not recognise fell through to the regular-disk
+branch, which **ignored the requested name** and allocated
+`vm-<vmid>-disk-<N>` instead. Backup fleecing images therefore came back
+looking like ordinary VM disks and consumed a disk id in the guest's
+numbering. (Backups still worked, because PVE records and reuses whatever
+volid the plugin returns.)
+
+Fleecing is now a first-class volume type — `pve-<storage>-<vmid>-fleece<n>`
+on the array, excluded from disk-id allocation — and an unrecognised explicit
+name is refused with a message naming the four supported forms instead of
+being silently substituted. `LVMPlugin` and `ZFSPoolPlugin` accept any
+`vm-<vmid>-<...>` for the same reason.
+
+### Also
+
+- `_get_api()` now requires the storeid, since that is how the credentials are
+  located. All 21 call sites pass it, and `tools/audit-invariants.pl` enforces
+  it statically so a future call site cannot silently omit it and fall back to
+  the legacy path.
+- A storage with no resolvable credentials fails with a message naming the
+  command to fix it, rather than a generic constructor error.
+
+---
+
 ## [1.1.24] - 2026-07-27
 
 Correctness release. Three of these are silent: the plugin and Proxmox VE
@@ -72,6 +153,14 @@ size it has already fetched against `blockdev --getsize64`, rescanning only
 when they disagree. The whole refresh is best-effort: the array-side resize
 has already succeeded by then, so a local failure must not be reported as a
 failed resize (a retry would be rejected as a shrink).
+
+This also fixes container resize, which had never worked on this plugin.
+`PVE::API2::LXC` always calls `volume_resize(..., $running = 0)` — its own
+comment says the parameter only makes sense for QEMU — so the gated refresh
+never ran for a container at all. PVE then maps the volume and runs
+`resize2fs` against a device still reporting the old capacity, and the
+failure surfaces only as a `warn`. The array volume grew, the CT config
+recorded the new size, and the filesystem did not change.
 
 ### MEDIUM — `$vollist` was matched by prefix
 

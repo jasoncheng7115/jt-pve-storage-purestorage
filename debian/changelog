@@ -1,3 +1,48 @@
+jt-pve-storage-purestorage (1.1.25-1) stable; urgency=medium
+
+  * [MEDIUM] Stop storing the Pure API token and password in
+    /etc/pve/storage.cfg. PVE 9 lets a plugin declare which of its properties
+    are sensitive, via plugindata()->{'sensitive-properties'}; the storage
+    config API then pulls those out of the request before the config is
+    written and hands them to on_add_hook / on_update_hook instead. We never
+    declared it, so the list fell back to PVE's hardcoded
+    "encryption-key keyring master-pubkey password", which covers neither of
+    ours. The token therefore sat in storage.cfg in cleartext and
+    `GET /storage/<id>` returned it to anyone holding Datastore.Allocate on
+    that storage - which is not root. A Pure API token is typically
+    array-wide, so that is full control of the FlashArray rather than of one
+    storage. Credentials now live in /etc/pve/priv/storage/<id>.pure-token
+    and .pure-pw (mode 0600, in a directory pmxcfs keeps root-only), the same
+    place PBSPlugin and CIFSPlugin keep theirs.
+  * Existing installations keep working with no action required:
+    _resolve_credentials() prefers the out-of-config secret and falls back to
+    the value in storage.cfg, and a PVE storage update is a merge, so an
+    unrelated `pvesm set` can never drop the in-config token.
+  * To complete the migration and remove the cleartext copy, run once per
+    storage: `pvesm set <id> --pure-api-token <token>`. That writes the
+    secret file AND removes the old line from storage.cfg in a single
+    command. Do NOT use `--delete pure-api-token` for this: PVE reports a
+    deletion to the plugin as an explicit removal, so it would delete the
+    secret file as well and leave the storage with no credentials.
+  * [MEDIUM] Honour the volume name PVE asks for. PVE requests a specific
+    name in four places - vm-<vmid>-state-<snap> (RAM snapshot),
+    vm-<vmid>-cloudinit, vm-<vmid>-fleece-<n> (backup fleecing) and whatever
+    the operator types to `pvesm alloc`. Anything not recognised fell through
+    to the regular-disk branch, which ignored the requested name and
+    allocated vm-<vmid>-disk-<N> instead. Backup fleecing images therefore
+    came back looking like ordinary VM disks and consumed a disk id in the
+    guest's numbering. Fleecing is now a first-class volume type
+    (pve-<storage>-<vmid>-fleece<n> on the array, excluded from disk-id
+    allocation), and an unrecognised explicit name is refused with a message
+    naming the four supported forms rather than silently substituted -
+    LVMPlugin and ZFSPoolPlugin accept any vm-<vmid>-<...> for the same
+    reason.
+  * _get_api() now requires the storeid, since that is how the credentials
+    are located. All 21 call sites pass it, and tools/audit-invariants.pl
+    enforces this statically so a future call site cannot omit it.
+
+ -- Jason Cheng <jason@jason.tools>  Mon, 27 Jul 2026 16:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.24-1) stable; urgency=medium
 
   * [CRITICAL] Report linked clones as "base-X-disk-N/vm-Y-disk-M" from

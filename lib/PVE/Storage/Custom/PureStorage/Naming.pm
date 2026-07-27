@@ -44,6 +44,9 @@ use constant {
 my $RE_VOLUME_NAME = qr/^pve-(.+?)-(\d+)-disk(\d+)$/;
 my $RE_CLOUDINIT   = qr/^pve-(.+?)-(\d+)-cloudinit$/;
 my $RE_VMSTATE     = qr/^pve-(.+?)-(\d+)-state-(.+)$/;
+# Backup fleecing image: PVE asks for "vm-<vmid>-fleece-<n>" (see
+# PVE::VZDump::QemuServer::allocate_fleecing_images).
+my $RE_FLEECE      = qr/^pve-(.+?)-(\d+)-fleece(\d+)$/;
 # Snapshot: {volume}.pve-snap-{snapname}
 my $RE_SNAPSHOT    = qr/^(.+)\.pve-snap-(.+)$/;
 # VM Config backup: pve-{storage}-{vmid}-vmconf-{snapname}
@@ -146,6 +149,16 @@ sub decode_volume_name {
             vmid     => int($2),
             snapname => $3,
             type     => 'state',
+        };
+    }
+
+    # Backup fleecing image
+    if ($volname =~ $RE_FLEECE) {
+        return {
+            storage  => $1,
+            vmid     => int($2),
+            fleeceid => int($3),
+            type     => 'fleece',
         };
     }
 
@@ -330,6 +343,13 @@ sub pve_volname_to_pure {
         return "pve-${san_storage}-${vmid}-cloudinit";
     }
 
+    # Backup fleecing image: vm-{vmid}-fleece-{n}
+    if ($pve_volname =~ /^vm-(\d+)-fleece-(\d+)$/) {
+        my ($vmid, $n) = ($1, $2);
+        my $san_storage = storeid_to_pure_prefix($storage);
+        return "pve-${san_storage}-${vmid}-fleece${n}";
+    }
+
     # VM state: vm-{vmid}-state-{snapname}
     if ($pve_volname =~ /^vm-(\d+)-state-(.+)$/) {
         my ($vmid, $snapname) = ($1, $2);
@@ -354,6 +374,8 @@ sub pure_to_pve_volname {
         return "vm-$decoded->{vmid}-cloudinit";
     } elsif ($decoded->{type} eq 'state') {
         return "vm-$decoded->{vmid}-state-$decoded->{snapname}";
+    } elsif ($decoded->{type} eq 'fleece') {
+        return "vm-$decoded->{vmid}-fleece-$decoded->{fleeceid}";
     }
 
     return undef;

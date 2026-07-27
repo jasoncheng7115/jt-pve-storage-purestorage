@@ -8,6 +8,75 @@
 
 ---
 
+## [1.1.25] - 2026-07-27
+
+憑證儲存釋出。陣列憑證不再存放於 `/etc/pve/storage.cfg`。
+
+### 中——API token 以明文儲存，且會被設定 API 回傳
+
+PVE 9 允許外掛透過 `plugindata()->{'sensitive-properties'}` 宣告哪些設定屬於機密。
+storage 設定 API 會在寫入設定檔之前把這些鍵抽出來，改交給 `on_add_hook`／
+`on_update_hook`，讓外掛自行存放到受保護的位置。
+
+我們一直沒有宣告。清單因此回退到 PVE 硬編的
+`encryption-key keyring master-pubkey password`，兩個都不涵蓋 `pure-api-token`
+與 `pure-password`。兩者都以明文留在 `storage.cfg`，而 `GET /storage/<id>` 會把它們
+回傳——該端點只需要該 storage 上的 `Datastore.Allocate`，不需要 root。Pure 的 API
+token 通常是整台陣列的權限，因此外洩的是整台 FlashArray 的控制權，而不只是這個
+storage。
+
+憑證現在存放於 `/etc/pve/priv/storage/<id>.pure-token` 與 `<id>.pure-pw`，權限
+0600，目錄由 pmxcfs 維持只有 root 可讀——與 `PBSPlugin`、`CIFSPlugin` 存放位置相同。
+
+### 升級
+
+**不需要任何動作。** 既有 storage 會照常運作：`_resolve_credentials()` 優先使用
+設定檔外的機密，找不到時回退到 `storage.cfg` 裡的值；而 PVE 的 storage 更新是
+合併操作，因此無關的 `pvesm set` 也不會把設定檔裡的 token 弄丟。
+
+**若要完成遷移**、移除明文副本，每個 storage 執行一次：
+
+```bash
+pvesm set <storeid> --pure-api-token <token>
+```
+
+這一道指令會寫入機密檔**並且**移除 `storage.cfg` 裡的舊行。
+
+> **請勿**用 `pvesm set <storeid> --delete pure-api-token` 來做這件事。PVE 會把
+> 刪除當成明確的移除指令傳給外掛，因此連機密檔也會一併刪掉，該 storage 將完全
+> 沒有憑證可用。
+
+### 中——現在會遵照 PVE 要求的 Volume 名稱
+
+PVE 會在四個地方指定名稱：
+
+| 呼叫者 | 名稱 |
+|---|---|
+| `QemuConfig.pm` | `vm-<vmid>-state-<snap>`（記憶體快照） |
+| `API2/Qemu.pm`、`Cloudinit.pm` | `vm-<vmid>-cloudinit` |
+| `VZDump/QemuServer.pm` | `vm-<vmid>-fleece-<n>`（備份 fleecing） |
+| `API2/Storage/Content.pm` | 操作者在 `pvesm alloc` 打的任何字串 |
+
+外掛認不得的名稱會落到一般磁碟分支，該分支**忽略要求的名稱**，改為配置
+`vm-<vmid>-disk-<N>`。因此備份 fleecing 映像回來時看起來就是一顆普通的 VM 磁碟，
+並且佔用了 guest 磁碟編號中的一格。（備份仍然可用，因為 PVE 會記錄並沿用外掛回傳
+的 volid。）
+
+fleecing 現在是一級 Volume 類型——陣列上為 `pve-<storage>-<vmid>-fleece<n>`，且不
+納入磁碟編號配置——而無法辨識的明確名稱會被拒絕，並在訊息中列出四種支援的形式，
+不再默默替換掉。`LVMPlugin` 與 `ZFSPoolPlugin` 基於同樣理由接受任何
+`vm-<vmid>-<...>`。
+
+### 其他
+
+- `_get_api()` 現在必須傳入 storeid，因為那是定位憑證的依據。21 個呼叫點全部已
+  傳入，且 `tools/audit-invariants.pl` 會靜態檢查，未來的呼叫點無法無聲地漏傳而
+  退回舊路徑。
+- 完全找不到憑證的 storage 會以「明確指出該執行哪道指令」的訊息失敗，而不是丟出
+  一個泛用的建構子錯誤。
+
+---
+
 ## [1.1.24] - 2026-07-27
 
 正確性釋出。其中三項是無聲的：外掛與 Proxmox VE 對某件事的認知不一致，而兩邊都
@@ -60,6 +129,13 @@ multipath map 仍維持舊容量；啟動 guest 後 qemu 交給它的就是舊�
 `activate_volume()` 會用它本來就已取得的陣列端大小與 `blockdev --getsize64` 對帳，
 只在不一致時才重掃。整段刷新都是 best-effort：此時陣列端的 resize 已經成功，本機
 失敗不能被回報成 resize 失敗（重試會被當成縮小而拒絕）。
+
+這同時修好了容器的 resize——它在本外掛上從來沒有真正生效過。
+`PVE::API2::LXC` 呼叫 `volume_resize(..., $running = 0)` 時 `$running` 恆為 0
+（它自己的註解說明該參數只對 QEMU 有意義），因此被判斷式包住的刷新對容器完全
+不會執行。PVE 接著對應該 Volume 並執行 `resize2fs`，面對的是仍回報舊容量的裝置，
+而失敗只會以一行 `warn` 呈現。陣列上的 Volume 變大了、CT 設定記下了新大小，
+檔案系統卻沒有任何改變。
 
 ### 中——`$vollist` 用前綴比對
 
