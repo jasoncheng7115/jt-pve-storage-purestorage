@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.23-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.24-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -340,7 +340,7 @@ FlashArray 產品線都在支援範圍內——//M、//X、//XR、//C、//XL、/
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.23-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.24-1_all.deb
 ```
 
 > ⚠ 首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件

@@ -136,7 +136,8 @@ sub _run_cmd {
         # Covered by the alarm armed above: SIGALRM interrupts waitpid and
         # the handler dies, landing us in the timeout branch below, which
         # reaps without blocking. Do not "fix" this into WNOHANG polling.
-        waitpid($pid, 0);
+        waitpid($pid, 0);  ## audit-ok: A6 - bounded by the alarm armed above; the
+                           ## handler routes to _reap_timed_out_child, which uses WNOHANG.
         alarm(0);
     };
 

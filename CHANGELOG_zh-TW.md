@@ -8,6 +8,67 @@
 
 ---
 
+## [1.1.24] - 2026-07-27
+
+正確性釋出。其中三項是無聲的：外掛與 Proxmox VE 對某件事的認知不一致，而兩邊都
+不會報錯。
+
+### 嚴重——Linked clone 可能多出指向使用中 Volume 的幽靈「未使用」磁碟
+
+`clone_image()` 對 linked clone 回傳 `base-102-disk-0/vm-104-disk-0`，guest 設定
+存的也是這個。但 `list_images()` 回報的是單純的 `vm-104-disk-0`。
+
+`PVE::QemuServer::update_disk_config`——`qm rescan` 實際執行的程式——會用設定檔裡的
+volid 標記「已被引用」，再拿這組去比對外掛回報的 volid。兩種形式不一致時，該
+Volume 看起來就是沒被引用，PVE 於是呼叫 `add_unused_volume()`。guest 因此多出一個
+`unusedN`，**指向它 `scsi0` 正在使用的同一顆 Pure Volume**；操作者在 GUI 移除這個
+「未使用磁碟」，就會銷毀使用中的磁碟。
+
+`list_images()` 現在會從 Pure 的 `source` 欄位推導 base，並輸出 `base/clone` 形式。
+只接受 `.pve-base` 快照作為來源，因此 full clone 與從使用者快照建立的複製仍維持
+單純名稱——比對到其他來源會憑空製造一個不存在的相依關係，產生這個 bug 的鏡像版本。
+當陣列未回報 `source` 時，行為與先前相同。`RBDPlugin::list_images` 是以 rbd parent
+snapshot 做同樣的事。
+
+### 高——容器備份每次洩漏一顆 Pure Volume，且無限累積
+
+`PVE::VZDump::LXC` 呼叫 `activate_volumes($cfg, $volids, 'vzdump')`，落到我們的
+`path()`，在陣列上建立一顆快照存取用的複製、連線到主機、等待它的 multipath 裝置。
+接著掛載、rsync、卸載、刪除 `vzdump` 快照——然後**完全不會呼叫 `deactivate_volume`**
+（`grep -c deactivate_volume VZDump/LXC.pm` 回傳 0），因此
+`_cleanup_temp_snap_clone()` 從未被觸發。
+
+也就是每個容器 mountpoint、每次備份，洩漏一顆 Pure Volume、一條主機連線、一個本機
+multipath 裝置。唯一的後備是那個一小時的殘留回收器，而依 v1.1.22 修正的毫秒時間戳記
+問題，它在 API 2.x 陣列上根本從未執行過——因此有排程容器備份的站點，從安裝外掛以來
+就一直在累積這些。
+
+清理改由 `volume_snapshot_delete()` 觸發，那是 PVE 確實會呼叫的位置，並套用與背景
+回收器相同的歸屬、年齡與使用中三道閘門。
+
+升級後**檢查是否已有累積**：`journalctl -t pvestatd | grep 'temp-clone'`，或在 Pure
+UI 搜尋符合 `pve-<storage>-*-temp-snap-access-*` 的 Volume。
+
+### 高——調整磁碟大小不會傳達到本機裝置
+
+`volume_resize()` 的本機刷新被 `$running` 判斷包住。在 VM 停機時調整大小，本機
+multipath map 仍維持舊容量；啟動 guest 後 qemu 交給它的就是舊容量，而且任何地方
+都不會報錯。在某個節點調整、在另一個節點啟動也是同樣結果，那是再怎麼加判斷都涵蓋
+不到的。
+
+刷新現在無條件執行——本節點沒有該 Volume 的裝置時它就是 no-op——並且
+`activate_volume()` 會用它本來就已取得的陣列端大小與 `blockdev --getsize64` 對帳，
+只在不一致時才重掃。整段刷新都是 best-effort：此時陣列端的 resize 已經成功，本機
+失敗不能被回報成 resize 失敗（重試會被當成縮小而拒絕）。
+
+### 中——`$vollist` 用前綴比對
+
+`$vollist` 裝的是完整 volid，base plugin 是精確比對。前綴比對在查詢
+`vm-10-disk-1` 時會一併回傳 `vm-10-disk-10` 與 `vm-10-disk-11`。目前 PVE 沒有呼叫者
+會傳 vollist，但回傳呼叫端沒有要求的 Volume，正是「遷移搬走了我沒選的磁碟」的成因。
+
+---
+
 ## [1.1.23] - 2026-07-27
 
 資料安全釋出。本次每一項發現都是同一個設計錯誤的變形：安全檢查在自己無法完成時，

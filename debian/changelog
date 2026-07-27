@@ -1,3 +1,45 @@
+jt-pve-storage-purestorage (1.1.24-1) stable; urgency=medium
+
+  * [CRITICAL] Report linked clones as "base-X-disk-N/vm-Y-disk-M" from
+    list_images(), matching what clone_image() returns and what the guest
+    config stores. Reporting the bare "vm-Y-disk-M" made
+    PVE::QemuServer::update_disk_config (which `qm rescan` drives) see the
+    volume as unreferenced, because it compares the config's volid against
+    the volid the plugin reports. PVE then called add_unused_volume(), so the
+    guest gained an "unusedN" entry pointing at the SAME Pure volume its
+    scsi0 was running on - and removing that "unused disk" in the GUI
+    destroys the live disk. The base volume is derived from Pure's `source`
+    field, accepting only a ".pve-base" snapshot source so that full clones
+    and clones from user snapshots keep their bare name.
+    RBDPlugin::list_images does the equivalent from the rbd parent snapshot.
+  * [HIGH] Release the snapshot-access clone that container backups leave
+    behind. PVE::VZDump::LXC calls activate_volumes($cfg, $volids, 'vzdump'),
+    which creates a clone on the array through our path(), then mounts,
+    rsyncs, umounts and deletes the snapshot - and never calls
+    deactivate_volume at all, so _cleanup_temp_snap_clone() was never
+    invoked. That leaked one Pure volume, one host connection and one local
+    multipath device per container mountpoint per backup. The one-hour orphan
+    reaper was the only backstop, and it never ran at all on an API 2.x array
+    before 1.1.22, so sites with scheduled container backups have been
+    accumulating these since installation. Cleanup is now triggered from
+    volume_snapshot_delete(), which PVE does reliably call, with the same
+    ownership, age and in-use gates as the background reaper.
+  * [HIGH] Propagate capacity changes to the local device. The refresh in
+    volume_resize() was gated on $running, so resizing a stopped VM's disk
+    left the local multipath map at the old size - start the guest and qemu
+    presents the old capacity, silently. The same applied to resizing on one
+    node and starting the guest on another, which no gating could have
+    covered. The refresh now runs unconditionally (a no-op without a local
+    device) and activate_volume() reconciles the array size it already
+    fetched against blockdev --getsize64, rescanning only on a mismatch. The
+    whole refresh is best-effort: the array-side resize has already
+    succeeded, so a local failure must not be reported as a failed resize.
+  * [MEDIUM] Match $vollist exactly in list_images(). $vollist holds complete
+    volids and the base plugin compares them exactly; a prefix match returned
+    "vm-10-disk-10" and "vm-10-disk-11" when asked for "vm-10-disk-1".
+
+ -- Jason Cheng <jason@jason.tools>  Mon, 27 Jul 2026 14:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.23-1) stable; urgency=medium
 
   * [CRITICAL] Make the in-use safety guard fail CLOSED. is_device_in_use()

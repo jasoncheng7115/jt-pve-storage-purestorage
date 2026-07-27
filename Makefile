@@ -1,5 +1,5 @@
 PACKAGE = jt-pve-storage-purestorage
-VERSION = 1.1.23
+VERSION = 1.1.24
 
 DESTDIR =
 PREFIX = /usr
@@ -38,6 +38,12 @@ test:
 	@echo "Checking bin/pve-pure-config-get..."
 	@perl -Ilib -c bin/pve-pure-config-get || exit 1
 	@echo "All syntax checks passed."
+	@echo ""
+	@if [ -f tools/audit-invariants.pl ]; then \
+		perl tools/audit-invariants.pl . || exit 1; \
+	else \
+		echo "(tools/audit-invariants.pl not present - skipping audit invariants)"; \
+	fi
 
 clean:
 	rm -rf debian/jt-pve-storage-purestorage/

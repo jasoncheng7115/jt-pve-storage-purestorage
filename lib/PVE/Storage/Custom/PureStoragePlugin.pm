@@ -2802,6 +2802,38 @@ sub free_image {
     return undef;
 }
 
+
+# If this volume is a linked clone of one of our templates, return the base
+# volume's PVE volname ("base-102-disk-0"); otherwise undef.
+#
+# Pure records a cloned volume's origin in the `source` field. We only accept
+# a source that is specifically a ".pve-base" snapshot, because that is the
+# exact and only thing clone_image() clones from when it produces the
+# "base/clone" volid form. A source pointing at a plain volume or at a
+# ".pve-snap-*" snapshot is a full clone or a clone from a user snapshot, and
+# those correctly carry the bare volname — matching on them would invent a
+# dependency that does not exist and produce the mirror-image of the bug this
+# is here to fix.
+#
+# Returns undef when the array does not report `source` at all, which is the
+# safe direction: no change from previous behaviour.
+sub _linked_clone_base {
+    my ($scfg, $vol) = @_;
+
+    my $src = $vol->{source};
+    $src = $src->{name} if ref($src) eq 'HASH';
+    return undef unless defined $src && length $src;
+
+    $src = _strip_pod_prefix($scfg, $src);
+    return undef unless $src =~ /^(.+)\.pve-base$/;
+
+    my $base_pure = $1;
+    my $decoded = decode_volume_name($base_pure);
+    return undef unless $decoded && ($decoded->{type} // '') eq 'disk';
+
+    return "base-$decoded->{vmid}-disk-$decoded->{diskid}";
+}
+
 sub list_images {
     my ($class, $storeid, $scfg, $vmid, $vollist, $cache) = @_;
 
@@ -2888,18 +2920,41 @@ sub list_images {
         }
         next unless $pve_volname;
 
+        # Linked clones must be reported in the "base-X-disk-N/vm-Y-disk-M"
+        # form, exactly as clone_image() returned it and as it is stored in
+        # the guest config. RBDPlugin does the same thing from the rbd
+        # image's parent snapshot; this is the Pure equivalent, keyed off the
+        # volume's clone source.
+        #
+        # Reporting the bare "vm-Y-disk-M" instead is not cosmetic. In
+        # PVE::QemuServer::update_disk_config (which `qm rescan` drives), the
+        # config's volid marks the volume referenced, and the volid WE report
+        # is what gets checked against that set. If they disagree, the volume
+        # looks unreferenced and PVE calls add_unused_volume() — the guest
+        # ends up with an "unusedN" entry pointing at the very same Pure
+        # volume its scsi0 is running on, and removing that unused disk in
+        # the GUI destroys the live disk.
+        if ($decoded->{type} eq 'disk' && !$is_template{$vol->{name}}) {
+            if (my $base = _linked_clone_base($scfg, $vol)) {
+                $pve_volname = "$base/$pve_volname";
+            }
+        }
+
         my $volid = "$storeid:$pve_volname";
 
-        # Filter by vollist if provided
+        # Filter by vollist if provided.
+        #
+        # $vollist holds complete volids — PVE::Storage::vdisk_list() runs
+        # each entry through parse_volume_id() before handing them down — so
+        # the comparison must be exact, which is what the base plugin does.
+        # This used to be a PREFIX match, which silently returned extra
+        # volumes as soon as one disk id was a prefix of another: filtering
+        # for "store:vm-10-disk-1" also matched "store:vm-10-disk-10" and
+        # "store:vm-10-disk-11". No current PVE caller passes a vollist, but
+        # returning volumes the caller did not ask for is the kind of thing
+        # that turns into "migration moved a disk I did not select".
         if ($vollist) {
-            my $dominated = 0;
-            foreach my $match_pattern (@$vollist) {
-                if ($volid =~ /^\Q$match_pattern\E/) {
-                    $dominated = 1;
-                    last;
-                }
-            }
-            next unless $dominated;
+            next unless grep { $_ eq $volid } @$vollist;
         }
 
         # API 2.x uses 'provisioned' for size, API 1.x uses 'size'
@@ -2983,10 +3038,23 @@ sub volume_resize {
     # Also: after refreshing each underlying SCSI path, the multipath
     # layer above still reports the old size until you tell multipathd
     # explicitly. multipath_resize_map() does that.
-    if ($running) {
+    #
+    # This is deliberately NOT gated on $running. It used to be, and that left
+    # a stopped VM's device at its old size: resize while stopped, start the
+    # VM, and qemu opens /dev/mapper/<wwid> which still reports the old
+    # capacity, so the guest sees the old disk. The refresh is cheap and is a
+    # no-op when this node has no local device for the volume, so there is no
+    # reason to skip it. _refresh_local_capacity() in activate_volume covers
+    # the other half of the problem: a resize performed on a different node.
+    #
+    # The whole block is best-effort: the array-side resize has ALREADY
+    # succeeded by this point, so a local refresh failure must not make PVE
+    # report the resize as failed — it would then show the old size while the
+    # array shows the new one, and a retry would be rejected as a shrink.
+    eval {
         my $wwid = eval { $api->volume_get_wwid($pure_volname); };
         if ($wwid) {
-            my $device = get_device_by_wwid($wwid);
+            my $device = eval { get_device_by_wwid($wwid); };
             if ($device && -b $device) {
                 # 1. Per-slave SCSI rescan (re-reads capacity from each path)
                 my $slaves = eval { get_multipath_slaves($device) } // [];
@@ -3002,7 +3070,10 @@ sub volume_resize {
                 _udev_refresh();
             }
         }
-    }
+    };
+    warn "Volume '$volname' was resized on the array, but refreshing the local "
+       . "device capacity failed. The guest may see the old size until this "
+       . "node rescans (starting the guest triggers a rescan): $@" if $@;
 
     return 1;
 }
@@ -3010,6 +3081,54 @@ sub volume_resize {
 #
 # Volume activation
 #
+
+
+# Make the local block device agree with the array about this volume's size.
+#
+# Capacity changes do not propagate to a host on their own in any way we can
+# rely on. volume_resize() refreshes the node it runs on, but a Proxmox VE
+# cluster can resize a disk on node A and start the guest on node B, and node
+# B has then never been told. The multipath map there keeps reporting the old
+# capacity, qemu opens it at that size, and the guest sees the old disk —
+# silently, with no error anywhere.
+#
+# activate_volume() already fetches the volume object (to check existence), so
+# the array-side size is in hand for free. Compare it against what the kernel
+# thinks and only do the (more expensive) per-path rescan when they disagree,
+# which is almost never. Purely corrective: never shrinks anything, and any
+# failure is a warning, because a size mismatch must not block starting a
+# guest that would otherwise work.
+sub _refresh_local_capacity {
+    my ($device, $expected_bytes, $volname) = @_;
+
+    return unless $device && defined $expected_bytes && $expected_bytes > 0;
+
+    my $actual;
+    eval {
+        my $out = '';
+        PVE::Tools::run_command(['/sbin/blockdev', '--getsize64', $device],
+            timeout => 10, outfunc => sub { $out .= shift });
+        $out =~ s/\s+//g;
+        $actual = $out =~ /^\d+$/ ? $out + 0 : undef;
+    };
+    return unless defined $actual;
+    return if $actual == $expected_bytes;
+
+    warn "Volume '$volname': local device $device reports $actual bytes but the "
+       . "array reports $expected_bytes. Refreshing the local capacity — the "
+       . "volume was most likely resized from another node.\n";
+
+    eval {
+        my $slaves = get_multipath_slaves($device) // [];
+        for my $slave (@$slaves) {
+            eval { rescan_scsi_device($slave); };
+        }
+        multipath_resize_map($device);
+        _udev_refresh();
+    };
+    warn "Volume '$volname': capacity refresh failed (the guest may see the "
+       . "old size until this node rescans): $@" if $@;
+}
 
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
@@ -3066,6 +3185,8 @@ sub activate_volume {
     {
         my $existing = eval { get_device_by_wwid($wwid); };
         if ($existing && -b $existing) {
+            _refresh_local_capacity($existing,
+                $vol->{provisioned} // $vol->{size}, $volname);
             eval { _track_wwid($storeid, $wwid); };
             return 1;
         }
@@ -3162,6 +3283,8 @@ sub activate_volume {
     # activate a volume without path() being called on it, and an untracked
     # WWID is invisible to the orphan reaper once the volume is gone from the
     # array (Phase 1 can only re-import WWIDs that still exist there).
+    _refresh_local_capacity($device, $vol->{provisioned} // $vol->{size}, $volname);
+
     eval { _track_wwid($storeid, $wwid); };
 
     return 1;
@@ -3392,6 +3515,83 @@ sub _cleanup_temp_snap_clone {
     delete $_temp_snap_clones{$cache_key};
 }
 
+# Sweep temporary snapshot-access clones belonging to one volume.
+#
+# Why this exists: Proxmox VE gives the plugin no reliable hook to release a
+# snapshot-access clone. Container backup is the clear case —
+# PVE::VZDump::LXC calls activate_volumes($cfg, $volids, 'vzdump'), which
+# lands in our path() and creates a clone on the array, connects it to this
+# host and waits for its multipath device. It then mounts it, rsyncs, umounts,
+# and deletes the 'vzdump' snapshot. It never calls deactivate_volume() at
+# all — grep VZDump/LXC.pm for it and you get zero hits — so
+# _cleanup_temp_snap_clone() is never invoked and the clone survives the
+# backup. That is one leaked Pure volume, one host connection and one local
+# multipath device per container mountpoint per backup run.
+#
+# The orphan reaper does eventually collect them, but it only starts counting
+# at one hour, and on any API 2.x array it never fired at all before v1.1.22
+# (its age test read millisecond timestamps as seconds). Sites doing nightly
+# container backups have therefore been accumulating these since the plugin
+# was first installed.
+#
+# volume_snapshot_delete() is the deterministic trigger PVE does give us: the
+# backup deletes its 'vzdump' snapshot when it finishes, and a user deleting a
+# snapshot has equally finished with any clone taken from it.
+#
+# Safety gates, same as the background reaper:
+#   - the name must match exactly what path() generates
+#   - min_age seconds must have passed (a clone created seconds ago may belong
+#     to a concurrent operation in another process on this node)
+#   - it must not be connected to any host other than this one
+#   - cleanup_lun_devices() croaks if the local device is in use, which aborts
+#     before the delete
+sub _sweep_temp_snap_clones {
+    my ($scfg, $storeid, $api, $pure_volname, %opts) = @_;
+
+    my $min_age = $opts{min_age} // 60;
+    my $my_host = _get_host_name($scfg);
+
+    my $bare_vol = _strip_pod_prefix($scfg, $pure_volname);
+    my $pattern  = "${bare_vol}-temp-snap-access-*";
+    $pattern = "$scfg->{'pure-pod'}::$pattern" if $scfg->{'pure-pod'};
+
+    my $vols = eval { $api->volume_list($pattern); };
+    return 0 if $@ || !$vols;
+
+    my $strict_re = qr/^\Q$bare_vol\E-temp-snap-access-(\d+)-(\d+)$/;
+    my $removed = 0;
+
+    for my $vol (@$vols) {
+        next unless $vol->{name};
+        my ($ts) = _strip_pod_prefix($scfg, $vol->{name}) =~ $strict_re;
+        next unless defined $ts;
+        next if (time() - $ts) < $min_age;
+
+        my $conns = eval { $api->volume_get_connections($vol->{name}); };
+        next if $@;
+        next if grep { ($_->{name} // '') ne $my_host } @{ $conns // [] };
+
+        eval {
+            my $wwid = $vol->{serial}
+                ? $api->serial_to_wwid($vol->{serial})
+                : $api->volume_get_wwid($vol->{name});
+            cleanup_lun_devices($wwid) if $wwid;
+
+            for my $conn (@{ $conns // [] }) {
+                $api->volume_disconnect_host($vol->{name}, $conn->{name});
+            }
+            $api->volume_delete($vol->{name}, skip_eradicate => 1);
+            $removed++;
+        };
+        if ($@) {
+            warn "temp-clone sweep: could not release $vol->{name} "
+               . "(will be retried by the background reaper): $@";
+        }
+    }
+
+    return $removed;
+}
+
 sub filesystem_path {
     my ($class, $scfg, $volname, $snapname) = @_;
 
@@ -3407,7 +3607,8 @@ sub filesystem_path {
     # (activate_volume, volume_size_info) are all overridden here, and
     # PVE::Storage::abs_filesystem_path goes through PVE::Storage::path, which
     # does pass the storeid. Fail loudly and legibly if a future caller shows up.
-    my $storeid = $scfg->{storage};
+    my $storeid = $scfg->{storage};  ## audit-ok: A9 - read deliberately, only to
+                                     ## produce the actionable error below.
     die "filesystem_path is not supported by the purestorage plugin "
         . "(volume '$volname'): Pure volume names are derived from the storage "
         . "id, which is not available in this call. Use "
@@ -3506,6 +3707,18 @@ sub volume_snapshot_delete {
         }
         die "Failed to delete snapshot '$snap' for volume '$volname': $@";
     }
+
+    # Release any snapshot-access clone taken from this volume. Deleting the
+    # snapshot means the caller is done with it, and for container backups
+    # this is the ONLY hook PVE gives us — VZDump::LXC never calls
+    # deactivate_volume(), so without this the clone leaks until the
+    # background reaper picks it up an hour later (and, before v1.1.22 on an
+    # API 2.x array, never). See _sweep_temp_snap_clones.
+    eval {
+        my $n = _sweep_temp_snap_clones($scfg, $storeid, $api, $pure_volname);
+        warn "Released $n temporary snapshot-access clone(s) for '$volname'\n" if $n;
+    };
+    warn "Temporary snapshot-clone sweep failed (non-fatal): $@\n" if $@;
 
     # Delete corresponding config backup volume
     # Extract VMID from volname (vm-{vmid}-disk-{n} or base-{vmid}-disk-{n})

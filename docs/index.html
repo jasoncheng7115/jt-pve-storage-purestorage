@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.23 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.24 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.23-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.24-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.23-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.24-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1979,6 +1979,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.24 <span class="changelog-tag changelog-tag--critical">Critical</span></div>
+        <div class="changelog-date">2026-07-27</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Linked clones could gain a phantom "unused" disk pointing at the live volume (CRITICAL):</strong> <code>clone_image()</code> returns <code>base-102-disk-0/vm-104-disk-0</code> and the guest config stores that, but <code>list_images()</code> reported the bare <code>vm-104-disk-0</code>. <code>qm rescan</code> compares the two by string, saw the volume as unreferenced and called <code>add_unused_volume()</code> — so the guest gained an <code>unusedN</code> entry pointing at the same Pure volume its <code>scsi0</code> was running on, and removing that "unused disk" in the GUI destroys the live disk. Now derived from Pure's <code>source</code> field, accepting only a <code>.pve-base</code> snapshot source. <strong>Container backups leaked a Pure volume per mountpoint, indefinitely (HIGH):</strong> <code>VZDump::LXC</code> creates a snapshot-access clone through our <code>path()</code> and never calls <code>deactivate_volume</code> at all, so nothing released it; the one-hour reaper was the only backstop and it never ran on an API 2.x array before v1.1.22. Cleanup now hooks <code>volume_snapshot_delete()</code>. <strong>Resizing a disk did not reach the local device (HIGH):</strong> the refresh was gated on <code>$running</code>, so resizing a stopped VM — or resizing on one node and starting the guest on another — left the multipath map at the old size and the guest saw the old disk, silently. <strong>$vollist is now matched exactly (MEDIUM)</strong> instead of by prefix, which returned <code>vm-10-disk-10</code> when asked for <code>vm-10-disk-1</code>.</span>
+            <span class="lang-zh"><strong>Linked clone 可能多出指向使用中 Volume 的幽靈「未使用」磁碟（嚴重）：</strong><code>clone_image()</code> 回傳 <code>base-102-disk-0/vm-104-disk-0</code>，guest 設定存的也是這個，但 <code>list_images()</code> 回報的是單純的 <code>vm-104-disk-0</code>。<code>qm rescan</code> 以字串比對兩者，判定該 Volume 未被引用而呼叫 <code>add_unused_volume()</code>——guest 因此多出一個 <code>unusedN</code>，指向它 <code>scsi0</code> 正在使用的同一顆 Pure Volume，在 GUI 移除該「未使用磁碟」就會銷毀使用中的磁碟。現在改由 Pure 的 <code>source</code> 欄位推導，且只接受 <code>.pve-base</code> 快照來源。<strong>容器備份每次洩漏一顆 Pure Volume 且無限累積（高）：</strong><code>VZDump::LXC</code> 透過我們的 <code>path()</code> 建立快照存取用的複製，卻完全不會呼叫 <code>deactivate_volume</code>，因此無人釋放；唯一後備是一小時的回收器，而它在 API 2.x 陣列上直到 v1.1.22 之前從未執行過。清理改由 <code>volume_snapshot_delete()</code> 觸發。<strong>調整磁碟大小不會傳達到本機裝置（高）：</strong>刷新被 <code>$running</code> 包住，因此在 VM 停機時調整、或在某節點調整而在另一節點啟動，multipath map 都會停留在舊容量，guest 無聲地看到舊磁碟。<strong>$vollist 改為精確比對（中）</strong>，前綴比對在查詢 <code>vm-10-disk-1</code> 時會一併回傳 <code>vm-10-disk-10</code>。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.23 <span class="changelog-tag changelog-tag--critical">Critical</span></div>
