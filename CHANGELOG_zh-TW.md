@@ -8,6 +8,38 @@
 
 ---
 
+## [1.1.27] - 2026-08-06
+
+文件釋出：外掛指向哪一個管理位址，決定了控制器 failover 是完全透明，還是讓
+storage 直接離線。
+
+### `pure-portal` 必須是陣列的虛擬管理 IP
+
+FlashArray 在建置時會配置三個管理位址：兩顆控制器各一個（`ct0.eth0`、
+`ct1.eth0`），加上一個虛擬 IP（`vir0`），綁定在當下擔任管理主控角色的那顆控制器
+上。
+
+若指向某顆控制器自己的位址，該控制器一旦 failover，外掛立刻失去 REST API：
+`activate_storage()` 連不到陣列，storage 在連續三次輪詢失敗後（約 30 秒）轉為
+`inactive`。
+
+**不會**壞的部分同樣值得知道：執行中的 guest 照常運作。`status()` 失敗時不會碰任何
+裝置，因此 multipath 對應維持不變，I/O 沿資料路徑繼續。停止運作的是所有需要陣列
+API 的事——建立、刪除、調整大小、快照、複製、遷移——以及 UI 上的容量數字。
+
+這與 Pure 對自家其他整合的要求一致。Pure 的 OpenStack Cinder 驅動文件寫明
+「the Management VIP address is required to properly configure the FlashArray
+driver」，而 FlashArray 的 vSphere Plugin 在未設定虛擬 IP 時會以
+「No virtual IP configured」錯誤拒絕安裝。
+
+已寫入兩份 README（含移除重建的操作步驟，因為 `pure-portal` 是 fixed 參數，無法用
+`pvesm set` 修改）、文件網站，以及 `pure-portal` 屬性說明本身，因此
+`pvesm set --help` 與 storage API schema 也看得到。
+
+無行為變更。
+
+---
+
 ## [1.1.26] - 2026-07-27
 
 管理平面負載釋出，延續 v1.1.21 開始的工作。

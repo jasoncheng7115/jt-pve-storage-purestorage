@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.26-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.27-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -291,6 +291,66 @@ QEMU block device               passed to qemu           (raw, no FS layer
 - Pure Storage API Token 或使用者帳號密碼
 - 可連線至 Pure Storage 管理介面
 
+### 管理位址：必須用虛擬 IP
+
+`pure-portal` 必須指向陣列的**虛擬管理 IP**（`vir0`），或指向它的主機名稱。
+**不要**指向 `ct0.eth0` 或 `ct1.eth0`——那是個別控制器自己的管理位址。
+
+FlashArray 在建置時會配置三個管理位址：兩顆控制器各一個，加上一個虛擬 IP，
+綁定在當下擔任管理主控角色的那顆控制器上。若外掛指向的是某顆控制器自己的位址，
+而該控制器發生 failover，那個位址會隨之消失，外掛就完全失去 REST API。
+
+這與 Pure 對自家其他整合的要求一致。Pure 的 OpenStack Cinder 驅動文件明確寫著
+「the Management VIP address is required to properly configure the FlashArray
+driver」，而 FlashArray 的 vSphere Plugin 在未設定虛擬 IP 時會直接以
+「No virtual IP configured」錯誤拒絕安裝。
+
+**兩種設定下，控制器 failover 的實際差異：**
+
+| | 資料路徑（iSCSI／FC） | 管理路徑（REST） |
+|---|---|---|
+| `pure-portal` = `vir0` | multipath 切換到存活控制器的路徑 | VIP 隨管理主控角色移動，外掛完全無感 |
+| `pure-portal` = 控制器 IP | 同上，不受影響 | **REST API 變成無法連線**，約 30 秒後 storage 轉為 `inactive` |
+
+第二種情況下**不會**壞的是：執行中的 guest 照常運作。`status()` 失敗時
+不會碰任何裝置——multipath 對應維持不變，I/O 沿資料路徑繼續。停止運作的是所有需要
+陣列 API 的事：建立、刪除、調整大小、快照、複製、遷移，以及 UI 上的容量數字。
+
+**確認目前用的是哪一個位址：**
+
+```bash
+# 在陣列上——找 vir0 那一列
+purenetwork list
+
+# 從 Proxmox VE 節點——VIP 會回應，失效控制器的 IP 不會
+for ip in <ct0-ip> <ct1-ip> <vir0-ip>; do
+    echo -n "$ip: "
+    curl -sk --max-time 3 "https://$ip/api/api_version" || echo unreachable
+done
+```
+
+**若需要修改**，`pure-portal` 是 fixed 參數，無法用 `pvesm set` 更新，必須移除
+storage 再重新加入。這件事可以在 guest 執行中進行，但請先讀完以下幾點：
+
+1. 先把 API token 準備好。移除 storage 會觸發 `on_delete_hook`，它會刪除
+   `/etc/pve/priv/storage/<storeid>.pure-token`。
+2. 必須重用**完全相同的 storage ID**。Volume 名稱把它編碼在裡面
+   （`pve-<storeid>-<vmid>-disk<n>`），換了 ID 等於讓所有既有磁碟失去對應。
+3. `pvesm remove` 只刪除設定條目。它不會動陣列上的 Volume，也不會 deactivate
+   storage——multipath 裝置維持對應，執行中的 guest I/O 不中斷。
+4. 移除到重新加入的空窗期內，Proxmox VE 無法解析那些 volid。這段時間請不要啟動
+   guest，也不要執行任何儲存操作。
+
+```bash
+pvesm remove <storeid>
+pvesm add purestorage <storeid> \
+    --pure-portal <vir0-ip> \
+    --pure-api-token <token> \
+    --pure-protocol iscsi \
+    --content images,rootdir
+pvesm status <storeid>
+```
+
 ### 平台支援範圍
 
 外掛只依賴以下三件事，而這三件都不隨 FlashArray 型號改變，因此整條
@@ -363,7 +423,7 @@ pvesm set <storeid> --pure-api-token <token>
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.26-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.27-1_all.deb
 ```
 
 > ⚠ 首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件
@@ -562,7 +622,7 @@ PVE 本身擋下。
 
 | 選項 | 必填 | 預設值 | 說明 |
 |------|------|--------|------|
-| `pure-portal` | 是 | - | Pure Storage 陣列管理 IP 或主機名稱 |
+| `pure-portal` | 是 | - | 陣列的**虛擬**管理 IP（`vir0`）或指向它的主機名稱——**不是**單一控制器自己的 IP。見「管理位址：必須用虛擬 IP」一節。此為 fixed 參數，無法用 `pvesm set` 修改 |
 | `pure-api-token` | 否* | - | API Token 認證 |
 | `pure-username` | 否* | - | API 使用者名稱 |
 | `pure-password` | 否* | - | API 密碼 |

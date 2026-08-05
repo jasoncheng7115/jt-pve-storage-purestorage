@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.26 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.27 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.26-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.27-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.26-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.27-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -723,6 +723,11 @@
         <span class="lang-en">Required Options</span>
         <span class="lang-zh">必要選項</span>
     </h3>
+    <div class="alert alert--warning">
+        <span class="lang-en"><strong>Use the array's virtual management IP.</strong> A FlashArray has three management addresses: one per controller, plus a virtual IP (<code>vir0</code>) bound to whichever controller currently holds the management primary role. <code>pure-portal</code> must point at the virtual IP. Pointed at <code>ct0.eth0</code> or <code>ct1.eth0</code>, the plugin loses the REST API the moment that controller fails over and the storage goes <code>inactive</code> — running guests keep running, but every operation that needs the array's API stops. This is the same requirement Pure places on its other integrations: the OpenStack Cinder driver documentation states that "the Management VIP address is required to properly configure the FlashArray driver", and the vSphere Plugin refuses to install with a "No virtual IP configured" error. Check with <code>purenetwork list</code> on the array.</span>
+        <span class="lang-zh"><strong>請使用陣列的虛擬管理 IP。</strong>FlashArray 有三個管理位址：兩顆控制器各一個，加上一個綁定在當下管理主控控制器上的虛擬 IP（<code>vir0</code>）。<code>pure-portal</code> 必須指向虛擬 IP。若指向 <code>ct0.eth0</code> 或 <code>ct1.eth0</code>，該控制器一旦 failover，外掛立刻失去 REST API，storage 轉為 <code>inactive</code>——執行中的 guest 照常運作，但所有需要陣列 API 的操作都會停止。這與 Pure 對自家其他整合的要求一致：OpenStack Cinder 驅動文件寫明「the Management VIP address is required to properly configure the FlashArray driver」，vSphere Plugin 則會以「No virtual IP configured」錯誤拒絕安裝。可用陣列上的 <code>purenetwork list</code> 確認。</span>
+    </div>
+
     <div class="table-wrap">
         <table>
             <thead><tr>
@@ -741,8 +746,8 @@
             </tr></thead>
             <tbody>
                 <tr><td><code>pure-portal</code></td><td>
-                    <span class="lang-en">Pure Storage array management IP or hostname</span>
-                    <span class="lang-zh">Pure Storage 陣列管理 IP 或主機名稱</span>
+                    <span class="lang-en">The array's <strong>virtual</strong> management IP (<code>vir0</code>), or a hostname resolving to it — <strong>not</strong> a controller's own IP (<code>ct0.eth0</code> / <code>ct1.eth0</code>). Fixed property: it cannot be changed with <code>pvesm set</code>.</span>
+                    <span class="lang-zh">陣列的<strong>虛擬</strong>管理 IP（<code>vir0</code>），或指向它的主機名稱——<strong>不是</strong>單一控制器自己的 IP（<code>ct0.eth0</code>／<code>ct1.eth0</code>）。此為 fixed 參數，無法用 <code>pvesm set</code> 修改。</span>
                 </td><td><code>192.168.1.100</code></td></tr>
                 <tr><td><code>pure-api-token</code><br><span class="lang-en">OR</span><span class="lang-zh">或</span></td><td>
                     <span class="lang-en">API token (preferred). One of token or username/password is required.</span>
@@ -1979,6 +1984,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.27 <span class="changelog-tag changelog-tag--fix">Docs</span></div>
+        <div class="changelog-date">2026-08-06</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>`pure-portal` must be the array's virtual management IP (DOC):</strong> a FlashArray is assigned three management addresses — one per controller plus a virtual IP (<code>vir0</code>) bound to whichever controller holds the management primary role. Pointed at a controller's own address (<code>ct0.eth0</code> / <code>ct1.eth0</code>), the plugin loses the REST API the moment that controller fails over and the storage goes <code>inactive</code> after about 30 seconds. Running guests are unaffected — <code>status()</code> failing touches no device, so multipath maps stay mapped and I/O continues — but every operation needing the array's API stops. Same requirement Pure places on its other integrations. Documented in both READMEs with the remove-and-re-add procedure, since <code>pure-portal</code> is a fixed property. No behaviour change.</span>
+            <span class="lang-zh"><strong>`pure-portal` 必須是陣列的虛擬管理 IP（文件）：</strong>FlashArray 會配置三個管理位址——兩顆控制器各一個，加上一個綁定在管理主控控制器上的虛擬 IP（<code>vir0</code>）。若指向控制器自己的位址（<code>ct0.eth0</code>／<code>ct1.eth0</code>），該控制器一旦 failover，外掛立刻失去 REST API，storage 約 30 秒後轉為 <code>inactive</code>。執行中的 guest 不受影響——<code>status()</code> 失敗時不碰任何裝置，multipath 對應維持不變、I/O 繼續——但所有需要陣列 API 的操作都會停止。這與 Pure 對自家其他整合的要求一致。已寫入兩份 README 並附移除重建步驟，因為 <code>pure-portal</code> 是 fixed 參數。無行為變更。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.26 <span class="changelog-tag changelog-tag--fix">Fix</span></div>

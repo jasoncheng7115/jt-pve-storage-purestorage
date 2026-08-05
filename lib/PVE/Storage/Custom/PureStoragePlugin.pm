@@ -139,7 +139,20 @@ sub plugindata {
 sub properties {
     return {
         'pure-portal' => {
-            description => "Pure Storage FlashArray management IP address or hostname.",
+            description => "Pure Storage FlashArray management address. Use the"
+                . " array's VIRTUAL management IP (vir0), or a hostname that"
+                . " resolves to it — NOT the address of an individual"
+                . " controller (ct0.eth0 / ct1.eth0). A FlashArray has three"
+                . " management addresses: one per controller plus a virtual IP"
+                . " bound to whichever controller currently holds the"
+                . " management primary role. Pointed at a controller's own"
+                . " address, the plugin loses the REST API the moment that"
+                . " controller fails over, and the storage goes inactive"
+                . " (running guests keep running — only operations needing the"
+                . " array's API stop). This is a fixed property and cannot be"
+                . " changed with 'pvesm set'; see the README section"
+                . " 'Management address: use the virtual IP' for the"
+                . " remove-and-re-add procedure.",
             type => 'string',
         },
         'pure-api-token' => {

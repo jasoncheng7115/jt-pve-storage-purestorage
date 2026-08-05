@@ -1,3 +1,28 @@
+jt-pve-storage-purestorage (1.1.27-1) stable; urgency=medium
+
+  * [DOC] Document that pure-portal must be the array's VIRTUAL management IP
+    (vir0), not the address of an individual controller (ct0.eth0 /
+    ct1.eth0). A FlashArray is assigned three management addresses at setup:
+    one per controller, plus a virtual IP bound to whichever controller
+    currently holds the management primary role. Pointed at a controller's own
+    address, the plugin loses the REST API the moment that controller fails
+    over: activate_storage() cannot reach the array and the storage goes
+    inactive after three consecutive failed polls. Running guests are
+    unaffected - status() failing does not touch any device, so multipath maps
+    stay mapped and I/O continues on the data path - but every operation
+    needing the array's API stops, along with the capacity figures.
+    This is the same requirement Pure places on its other integrations: the
+    OpenStack Cinder driver documentation states that "the Management VIP
+    address is required to properly configure the FlashArray driver", and the
+    FlashArray vSphere Plugin refuses to install with a "No virtual IP
+    configured" error.
+    Added to both READMEs (with the remove-and-re-add procedure, since
+    pure-portal is a fixed property that cannot be changed with `pvesm set`),
+    to the documentation site, and to the pure-portal property description
+    itself so it appears in `pvesm set --help` and the API schema.
+
+ -- Jason Cheng <jason@jason.tools>  Thu, 06 Aug 2026 11:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.26-1) stable; urgency=medium
 
   * [MEDIUM] Cut the steady-state REST load on the array's management gateway

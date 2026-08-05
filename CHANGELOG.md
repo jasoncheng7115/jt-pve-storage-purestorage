@@ -8,6 +8,42 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.27] - 2026-08-06
+
+Documentation release: the management address the plugin is pointed at
+determines whether a controller failover is transparent or takes the storage
+offline.
+
+### `pure-portal` must be the array's virtual management IP
+
+A FlashArray is assigned three management addresses at setup: one per
+controller (`ct0.eth0`, `ct1.eth0`), plus a virtual IP (`vir0`) bound to
+whichever controller currently holds the management primary role.
+
+Pointed at a controller's own address, the plugin loses the REST API the
+moment that controller fails over: `activate_storage()` cannot reach the array
+and the storage goes `inactive` after three consecutive failed polls (~30s).
+
+What does **not** break is worth knowing: running guests keep running.
+`status()` failing does not touch any device, so the multipath maps stay
+mapped and I/O continues on the data path. What stops is everything that needs
+the array's API — create, delete, resize, snapshot, clone, migrate — plus the
+capacity figures in the UI.
+
+This is the same requirement Pure places on its other integrations. Pure's
+OpenStack Cinder driver documentation states that "the Management VIP address
+is required to properly configure the FlashArray driver", and the FlashArray
+vSphere Plugin refuses to install with a "No virtual IP configured" error.
+
+Documented in both READMEs — including the remove-and-re-add procedure, since
+`pure-portal` is a fixed property that cannot be changed with `pvesm set` — on
+the documentation site, and in the `pure-portal` property description itself,
+so it also appears in `pvesm set --help` and the storage API schema.
+
+No behaviour change.
+
+---
+
 ## [1.1.26] - 2026-07-27
 
 Management-plane load release, continuing the work started in v1.1.21.

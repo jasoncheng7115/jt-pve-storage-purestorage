@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.26-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.27-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -304,6 +304,75 @@ QEMU block device               passed to qemu           (raw, no FS layer
 - API Token or user credentials for Pure Storage API
 - Network connectivity to Pure Storage management interface
 
+### Management address: use the virtual IP
+
+`pure-portal` must point at the array's **virtual management IP** (`vir0`), or
+at a hostname that resolves to it. Do **not** point it at `ct0.eth0` or
+`ct1.eth0` — the individual controllers' own management addresses.
+
+A FlashArray is assigned three management addresses at setup: one per
+controller, plus a virtual IP that is bound to whichever controller is
+currently primary for management. If the plugin is pointed at a controller's
+own address and that controller fails over, its address goes away with it,
+and the plugin loses the REST API entirely.
+
+This is the same requirement Pure places on its other integrations. Pure's
+OpenStack Cinder driver documentation states plainly that "the Management VIP
+address is required to properly configure the FlashArray driver", and the
+FlashArray vSphere Plugin refuses to install with a "No virtual IP configured"
+error.
+
+**What a controller failover looks like with each setting:**
+
+| | Data path (iSCSI/FC) | Management path (REST) |
+|---|---|---|
+| `pure-portal` = `vir0` | multipath fails over to the surviving controller's paths | the VIP moves with the primary role; the plugin never notices |
+| `pure-portal` = a controller IP | the same — unaffected | **the REST API becomes unreachable**; storage goes `inactive` after ~30s |
+
+Note what does *not* break in the second case: running guests keep running.
+`status()` failing does not touch any device — the multipath maps stay mapped
+and I/O continues on the data path. What stops working is everything that
+needs the array's API: creating, deleting, resizing, snapshotting, cloning and
+migrating, plus the capacity figures in the UI.
+
+**Check which address you are using:**
+
+```bash
+# On the array — look for the vir0 row
+purenetwork list
+
+# From a Proxmox VE node — the VIP answers, a failed controller's IP does not
+for ip in <ct0-ip> <ct1-ip> <vir0-ip>; do
+    echo -n "$ip: "
+    curl -sk --max-time 3 "https://$ip/api/api_version" || echo unreachable
+done
+```
+
+**If you need to change it**, `pure-portal` is a fixed property and cannot be
+updated with `pvesm set`; the storage has to be removed and re-added. That is
+safe to do with guests running, but read this first:
+
+1. Have the API token to hand. Removing the storage runs `on_delete_hook`,
+   which deletes `/etc/pve/priv/storage/<storeid>.pure-token`.
+2. Reuse **exactly the same storage ID**. Volume names encode it
+   (`pve-<storeid>-<vmid>-disk<n>`), so a different ID orphans every existing
+   disk.
+3. `pvesm remove` only deletes the configuration entry. It does not touch
+   volumes on the array, and it does not deactivate the storage — multipath
+   devices stay mapped and running guests keep their I/O.
+4. Between the remove and the add, Proxmox VE cannot resolve those volids. Do
+   not start a guest or run any storage operation in that window.
+
+```bash
+pvesm remove <storeid>
+pvesm add purestorage <storeid> \
+    --pure-portal <vir0-ip> \
+    --pure-api-token <token> \
+    --pure-protocol iscsi \
+    --content images,rootdir
+pvesm status <storeid>
+```
+
 ### Platform support
 
 The plugin depends on three things, none of which vary by FlashArray model,
@@ -381,7 +450,7 @@ which writes the secret file and removes the old line in one command.
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.26-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.27-1_all.deb
 ```
 
 > ⚠ Avoid `dpkg -i` for the first install: it does **not** auto-install
@@ -598,7 +667,7 @@ amending the `nodes` line, or by re-creating the entry.
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
-| `pure-portal` | Yes | - | Pure Storage array management IP or hostname |
+| `pure-portal` | Yes | - | The array's **virtual** management IP (`vir0`) or a hostname resolving to it — **not** a controller's own IP. See [Management address](#management-address-use-the-virtual-ip). Fixed: it cannot be changed with `pvesm set`. |
 | `pure-api-token` | No* | - | API token for authentication |
 | `pure-username` | No* | - | Username for API authentication |
 | `pure-password` | No* | - | Password for API authentication |
