@@ -1,3 +1,17 @@
+jt-pve-storage-purestorage (1.1.33-1) stable; urgency=medium
+
+  * Fix snapshot access failing on any storage whose id is longer than ten
+    characters. The clone name added 36 characters to a volume name already
+    derived from the storage id, and Pure rejects a volume name over 63
+    characters outright rather than truncating it, so backing up from a
+    snapshot, qemu-img convert out of one and container backup all failed.
+    The marker is now -tsa- instead of -temp-snap-access-, which raises the
+    workable storage id from 10 to 23, and the length is asserted where the
+    name is built with a message naming the storage id as the cause. Both
+    reapers recognise the old marker as well, so existing clones are still
+    collected.
+
+ -- Jason Cheng <jason@jason.tools>  Fri, 07 Aug 2026 07:26:17 +0800
 jt-pve-storage-purestorage (1.1.32-1) stable; urgency=medium
 
   * Do not tear down a temp snapshot clone that this node cannot prove it

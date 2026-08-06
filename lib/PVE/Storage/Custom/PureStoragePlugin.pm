@@ -714,6 +714,12 @@ use constant STATUS_FAIL_THRESHOLD => 3;     # consecutive failed polls => outag
 # of guessing, wait out any plausible operation. A day is far longer than a
 # qemu-img convert or a container backup and still bounds the leak.
 use constant TEMP_CLONE_UNOWNED_MIN_AGE => 86400;
+
+# Pure rejects a volume name longer than this outright; it does not truncate.
+# Confirmed by the array's own error text: "Volume name must be between 1 and
+# 63 characters (alphanumeric, '_' and '-') in length and begin and end with a
+# letter or number."
+use constant MAX_PURE_VOLUME_NAME => 63;
 use constant OUTAGE_REEMIT_SECONDS => 30;    # re-emit outage ERROR at most this often
 use constant CAPACITY_WARN_PCT     => 90;
 use constant CAPACITY_CRIT_PCT     => 95;
@@ -2055,16 +2061,26 @@ sub _cleanup_orphaned_temp_clones {
 
     my $san_storage = storeid_to_pure_prefix($storeid);
 
-    # Find all temp-snap-access volumes for this storage
-    my $pattern = "pve-${san_storage}-*-temp-snap-access-*";
+    # Find all snapshot-access clones for this storage. Two globs because the
+    # marker was shortened from "-temp-snap-access-" to "-tsa-" (the old one
+    # pushed the name past the array's 63-character limit); clones created
+    # before that change still have to be collected.
+    my @patterns = ("pve-${san_storage}-*-tsa-*",
+                    "pve-${san_storage}-*-temp-snap-access-*");
     # Add pod prefix if configured
     my $pod = $scfg->{'pure-pod'};
-    if ($pod) {
-        $pattern = "${pod}::${pattern}";
-    }
+    @patterns = map { "${pod}::$_" } @patterns if $pod;
 
-    my $temp_vols = eval { $api->volume_list($pattern); };
-    return unless $temp_vols && @$temp_vols;
+    # One list call per marker. A single wider glob would work too, but it
+    # would drag in every volume whose name merely starts the same way, and
+    # this runs against the array.
+    my %by_name;
+    for my $pattern (@patterns) {
+        my $found = eval { $api->volume_list($pattern); } // [];
+        $by_name{ $_->{name} } = $_ for grep { $_->{name} } @$found;
+    }
+    my $temp_vols = [ values %by_name ];
+    return unless @$temp_vols;
 
     # Exact shape of the names path() generates:
     #   [<pod>::]pve-<storage>-...-temp-snap-access-<unix-ts>-<pid>
@@ -2073,7 +2089,7 @@ sub _cleanup_orphaned_temp_clones {
     # touching anything. This reaper is the only place in the plugin that
     # ERADICATES rather than soft-destroys, so "it looked a bit like ours"
     # is not a good enough reason to act on a volume.
-    my $strict_re = qr/^pve-\Q$san_storage\E-.+-temp-snap-access-(\d+)-(\d+)$/;
+    my $strict_re = qr/^pve-\Q$san_storage\E-.+-(?:tsa|temp-snap-access)-(\d+)-(\d+)$/;
     my $my_host = _get_host_name($scfg);
 
     for my $vol (@$temp_vols) {
@@ -3867,24 +3883,30 @@ sub path {
 
         # Create temporary clone name with timestamp for uniqueness
         my $timestamp = time();
-        my $temp_clone_name = "${pure_volname}-temp-snap-access-${timestamp}-$$";
+        # The marker is "-tsa-", not the "-temp-snap-access-" this used to
+        # generate. Pure rejects a volume name over 63 characters outright --
+        # "Volume name must be between 1 and 63 characters (alphanumeric, '_'
+        # and '-') in length and begin and end with a letter or number" -- and
+        # the old 36-character suffix left room for a storage id of only 10.
+        # `purestorage` is 11, so the most obvious name anyone would pick
+        # already broke snapshot access: backing up from a snapshot, qemu-img
+        # convert out of one, a container backup. The shorter marker raises the
+        # workable storage id to 23, one below the 24 the schema allows.
+        #
+        # Both reapers recognise the old marker as well, so clones created
+        # before this release are still collected.
+        my $temp_clone_name = "${pure_volname}-tsa-${timestamp}-$$";
 
-        # Pure caps volume names at 63 characters (MAX_VOLUME_NAME_LENGTH in
-        # Naming.pm). The suffix above adds 36, so a storage id longer than
-        # about 13 characters pushes the clone name past the cap even though
-        # the disk volume itself fits comfortably. The array rejects the clone
-        # and snapshot access fails -- backing up from a snapshot, qemu-img
-        # convert out of one, a container backup. Say why before the array
-        # answers with something that does not mention the storage id.
-        if (length($temp_clone_name) > 63) {
-            warn "Snapshot access volume name is "
-               . length($temp_clone_name) . " characters, over the 63 the "
-               . "array allows: '$temp_clone_name'.\n"
-               . "  It is built as <volume>-temp-snap-access-<timestamp>-<pid>, "
-               . "and the volume name comes from the storage id, so a long "
-               . "storage id is what pushes it over. If the array rejects the "
-               . "clone, the fix is a storage with a shorter id (the disk "
-               . "volumes themselves are unaffected).\n";
+        if (length($temp_clone_name) > MAX_PURE_VOLUME_NAME) {
+            die "Cannot create the snapshot access volume for '$volname': the "
+              . "name would be " . length($temp_clone_name) . " characters "
+              . "and the array accepts at most " . MAX_PURE_VOLUME_NAME . ".\n"
+              . "  Name: $temp_clone_name\n"
+              . "  It is the volume name plus 23 characters, and the volume "
+              . "name is derived from the storage id, so the storage id is "
+              . "what pushes it over. Use a storage id of at most 23 "
+              . "characters; the disk volumes themselves are unaffected and "
+              . "need no change.\n";
         }
 
         # Check if we already have a temp clone for this snapshot
@@ -4098,13 +4120,20 @@ sub _sweep_temp_snap_clones {
         if $unowned && $min_age < TEMP_CLONE_UNOWNED_MIN_AGE;
 
     my $bare_vol = _strip_pod_prefix($scfg, $pure_volname);
-    my $pattern  = "${bare_vol}-temp-snap-access-*";
-    $pattern = "$scfg->{'pure-pod'}::$pattern" if $scfg->{'pure-pod'};
+    # Both markers, old and new -- see _cleanup_orphaned_temp_clones().
+    my @patterns = ("${bare_vol}-tsa-*", "${bare_vol}-temp-snap-access-*");
+    @patterns = map { "$scfg->{'pure-pod'}::$_" } @patterns
+        if $scfg->{'pure-pod'};
 
-    my $vols = eval { $api->volume_list($pattern); };
-    return 0 if $@ || !$vols;
+    my %by_name;
+    for my $pattern (@patterns) {
+        my $found = eval { $api->volume_list($pattern); } // [];
+        $by_name{ $_->{name} } = $_ for grep { $_->{name} } @$found;
+    }
+    my $vols = [ values %by_name ];
+    return 0 unless @$vols;
 
-    my $strict_re = qr/^\Q$bare_vol\E-temp-snap-access-(\d+)-(\d+)$/;
+    my $strict_re = qr/^\Q$bare_vol\E-(?:tsa|temp-snap-access)-(\d+)-(\d+)$/;
     my $removed = 0;
 
     for my $vol (@$vols) {

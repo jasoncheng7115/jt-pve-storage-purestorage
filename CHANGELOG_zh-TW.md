@@ -8,6 +8,22 @@
 
 ---
 
+## [1.1.33] - 2026-08-07
+
+### 修正
+- 只要 storage id 超過十個字元，快照存取就會失敗。快照存取用的複製名稱是
+  Volume 名稱（本身又由 storage id 推導）再加上 36 個字元的字尾，而沒有任何地方
+  檢查總長度是否超過 Pure 允許的 63 個字元。陣列對過長的名稱是**直接拒絕**，
+  不會截斷：*"Volume name must be between 1 and 63 characters (alphanumeric,
+  '_' and '-') in length and begin and end with a letter or number."* 因此受影響
+  的 storage 全部失去了「從快照備份」、「對快照執行 `qemu-img convert`」與
+  容器備份的能力，而陣列回報的錯誤完全不會提到 storage id。`purestorage` 是
+  十一個字元，也就是說最直覺的命名早就已經超標。標記現在由
+  `-temp-snap-access-` 改為 `-tsa-`，可用的 storage id 長度從 10 提高到 23——
+  比 schema 允許的 24 只少一個——並且在組出名稱的地方就檢查長度，訊息中直接
+  指出 storage id 是原因。兩個回收器同時認得舊標記、也會查詢兩種名稱樣式，
+  因此本次釋出之前建立的複製仍然會被回收。
+
 ## [1.1.32] - 2026-08-06
 
 ### 修正

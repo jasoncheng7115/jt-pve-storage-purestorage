@@ -8,6 +8,26 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.33] - 2026-08-07
+
+### Fixed
+- Snapshot access failed on any storage whose id is longer than ten characters.
+  The snapshot-access clone name was the volume name -- itself derived from the
+  storage id -- plus a 36-character suffix, and nothing checked the total
+  against the 63 characters Pure allows. The array **rejects** an over-long
+  name rather than truncating it: *"Volume name must be between 1 and 63
+  characters (alphanumeric, '_' and '-') in length and begin and end with a
+  letter or number."* So every affected storage lost backup-from-snapshot,
+  `qemu-img convert` out of a snapshot, and container backup, with an array
+  error that never mentioned the storage id. `purestorage` is eleven
+  characters, so the most obvious name anyone would choose was already over.
+  The marker is now `-tsa-` rather than `-temp-snap-access-`, which raises the
+  workable storage id from 10 to 23 -- one below the 24 the schema allows --
+  and the length is now asserted where the name is assembled, with a message
+  naming the storage id as the cause. Both reapers match the old marker as
+  well and query both name patterns, so clones created before this release are
+  still collected.
+
 ## [1.1.32] - 2026-08-06
 
 ### Fixed
