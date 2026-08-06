@@ -9,10 +9,21 @@ name: Publish Releases
 # repeatable, and it means the notes live under review in the repository
 # rather than only in the web UI.
 #
-# Runs when the notes or the packages change, on a version tag, and on demand.
+# Runs when the notes or the packages change under release-notes/ or
+# releases/, and on demand. There is deliberately NO tag trigger: combining a
+# tags filter with a paths filter has semantics worth not guessing at, and the
+# ordering below removes the need for one.
+#
+# PUSH THE TAG BEFORE PUSHING main. `gh release create` needs the tag to
+# already exist, and this workflow fires on the main push. Pushing main first
+# leaves the run racing the tag push: it skips the version, nothing fires
+# again, and the release is silently never created. v1.1.31 was published only
+# because the runner happened to check out after the tag arrived.
+#
 # The job is idempotent: an existing release has its body, title and asset
-# replaced; a version whose tag does not exist yet is skipped with a note, so
-# whichever of "push main" / "push tag" happens second completes the job.
+# replaced. A version whose tag is missing is skipped with a warning that is
+# visible in the run summary, and can be published afterwards with
+# workflow_dispatch.
 on:
   push:
     branches: [main]
@@ -83,7 +94,7 @@ jobs:
               skipped=$((skipped+1)); continue
             fi
             if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-              echo "::notice::$v: tag $tag does not exist yet - skipped"
+              echo "::warning::$v: tag $tag does not exist - skipped. Push the tag, then re-run this workflow (Actions -> Publish Releases -> Run workflow)."
               skipped=$((skipped+1)); continue
             fi
 
