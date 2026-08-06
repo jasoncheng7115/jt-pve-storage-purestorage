@@ -698,6 +698,22 @@ sub _cleanup_lock_file {
 # `journalctl -t pvestatd | grep pure-storage`. Severity is carried in the
 # message text ([ERROR]/[WARNING]/[INFO]) for monitoring pickup.
 use constant STATUS_FAIL_THRESHOLD => 3;     # consecutive failed polls => outage
+
+# How old a temp snapshot clone must be before a node that CANNOT prove it
+# owns it will tear it down.
+#
+# Ownership is normally decided by "is this clone connected to a host other
+# than mine?", because a temp clone is connected only to the node that made
+# it. With pure-host-mode = shared every node reports the SAME host name, so
+# that question answers "it is mine" for a clone made anywhere in the cluster
+# -- and the creating node's own is_device_in_use() protects only itself. A
+# second node would then disconnect and destroy a clone the first node is
+# reading from, which is the incident the ownership check was added for.
+#
+# There is no signal in shared mode that distinguishes the nodes, so instead
+# of guessing, wait out any plausible operation. A day is far longer than a
+# qemu-img convert or a container backup and still bounds the leak.
+use constant TEMP_CLONE_UNOWNED_MIN_AGE => 86400;
 use constant OUTAGE_REEMIT_SECONDS => 30;    # re-emit outage ERROR at most this often
 use constant CAPACITY_WARN_PCT     => 90;
 use constant CAPACITY_CRIT_PCT     => 95;
@@ -1744,7 +1760,6 @@ sub _ensure_host {
     my ($scfg, $api, %opts) = @_;
 
     my $host_name = _get_host_name($scfg);
-    _warn_host_name_collision($scfg, $host_name);
 
     my $cache_key = ($scfg->{'pure-portal'} // '') . "\0$host_name";
     unless ($opts{force}) {
@@ -1752,6 +1767,12 @@ sub _ensure_host {
         return $host_name
             if $c && (time() - $c->{ts}) < API_CACHE_TTL && ($c->{pid} // 0) == $$;
     }
+
+    # Below the cache on purpose. activate_storage() calls this on every
+    # pvestatd poll, and the whole point of the check above is that the poll
+    # path does no work when nothing has changed. The collision cannot appear
+    # without a node joining or being renamed, so once per TTL is plenty.
+    _warn_host_name_collision($scfg, $host_name);
     my ($initiator_type, @initiators) = _get_initiators($scfg);
 
     # Get or create host
@@ -2090,7 +2111,13 @@ sub _cleanup_orphaned_temp_clones {
         my $age_seconds      = time() - $created;
         my $age_from_name    = time() - $name_ts;
 
-        if ($age_seconds > 3600 && $age_from_name > 3600) {  # 1 hour
+        # Same reasoning as the sweep: with pure-host-mode = shared the
+        # foreign-connection check below cannot tell whose clone this is, so
+        # age is the only signal left and one hour is not enough of it.
+        my $min_age = (($scfg->{'pure-host-mode'} // 'per-node') eq 'shared')
+            ? TEMP_CLONE_UNOWNED_MIN_AGE : 3600;
+
+        if ($age_seconds > $min_age && $age_from_name > $min_age) {
             warn "Cleaning up orphaned temporary clone: $vol->{name} (age: ${age_seconds}s)\n";
 
             # Ownership check: a temp clone is connected only to the node
@@ -3842,6 +3869,24 @@ sub path {
         my $timestamp = time();
         my $temp_clone_name = "${pure_volname}-temp-snap-access-${timestamp}-$$";
 
+        # Pure caps volume names at 63 characters (MAX_VOLUME_NAME_LENGTH in
+        # Naming.pm). The suffix above adds 36, so a storage id longer than
+        # about 13 characters pushes the clone name past the cap even though
+        # the disk volume itself fits comfortably. The array rejects the clone
+        # and snapshot access fails -- backing up from a snapshot, qemu-img
+        # convert out of one, a container backup. Say why before the array
+        # answers with something that does not mention the storage id.
+        if (length($temp_clone_name) > 63) {
+            warn "Snapshot access volume name is "
+               . length($temp_clone_name) . " characters, over the 63 the "
+               . "array allows: '$temp_clone_name'.\n"
+               . "  It is built as <volume>-temp-snap-access-<timestamp>-<pid>, "
+               . "and the volume name comes from the storage id, so a long "
+               . "storage id is what pushes it over. If the array rejects the "
+               . "clone, the fix is a storage with a shorter id (the disk "
+               . "volumes themselves are unaffected).\n";
+        }
+
         # Check if we already have a temp clone for this snapshot
         my $cache_key = "${storeid}:${volname}:${snapname}";
         if ($_temp_snap_clones{$cache_key}) {
@@ -4044,6 +4089,13 @@ sub _sweep_temp_snap_clones {
 
     my $min_age = $opts{min_age} // 60;
     my $my_host = _get_host_name($scfg);
+
+    # In shared host mode the connection tells us nothing about which node
+    # made this clone, so the host check below cannot establish ownership.
+    # Fall back to age alone, at a threshold no live operation reaches.
+    my $unowned = ($scfg->{'pure-host-mode'} // 'per-node') eq 'shared';
+    $min_age = TEMP_CLONE_UNOWNED_MIN_AGE
+        if $unowned && $min_age < TEMP_CLONE_UNOWNED_MIN_AGE;
 
     my $bare_vol = _strip_pod_prefix($scfg, $pure_volname);
     my $pattern  = "${bare_vol}-temp-snap-access-*";

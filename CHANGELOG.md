@@ -8,6 +8,35 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.32] - 2026-08-06
+
+### Fixed
+- A node could destroy a temp snapshot clone belonging to another node when
+  `pure-host-mode = shared`. A temp clone is connected only to the node that
+  created it, so both reapers establish ownership by asking whether the clone
+  is connected to a host other than this node's. In shared mode every node
+  reports the same Pure host name, so that question answers "it is mine" for a
+  clone created anywhere in the cluster -- and the creating node's own in-use
+  check protects only itself. A second node could therefore disconnect and
+  destroy a clone the first was actively reading, which is exactly the
+  incident the ownership check was added for. Where ownership cannot be
+  established the reapers now wait out any plausible operation: 24 hours in
+  shared mode, instead of 60 seconds for the fast sweep and 1 hour for the
+  background reaper. `per-node` mode is unchanged, and a genuinely stale clone
+  is still collected in shared mode.
+- The host-name collision check added in 1.1.31 ran ahead of the
+  host-verification cache, so it repeated on every pvestatd poll instead of
+  once per cache interval. Negligible in measurement, but `activate_storage()`
+  is a hot path and the cache exists precisely to keep it empty.
+
+### Added
+- A warning when a snapshot-access clone name exceeds the 63 characters Pure
+  allows. The name is the volume name plus 36 characters, so a storage id
+  longer than about 13 characters pushes it over even though the disk volume
+  itself fits. If the array rejects it, snapshot access fails -- backing up
+  from a snapshot, `qemu-img convert` out of one, a container backup -- with
+  an error that never mentions the storage id.
+
 ## [1.1.31] - 2026-08-06
 
 ### Fixed

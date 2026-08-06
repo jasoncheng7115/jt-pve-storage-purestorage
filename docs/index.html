@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.31 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.32 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.31-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.32-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.31-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.32-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1984,6 +1984,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.32 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-08-06</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>A node could destroy another node's snapshot clone in shared host mode:</strong> reading from a snapshot creates a temp clone connected only to the node doing the reading, and the reapers use that to decide ownership. With <code>pure-host-mode = shared</code> every node reports the same Pure host name, so the check answered &ldquo;it is mine&rdquo; for a clone created anywhere in the cluster &mdash; and the creating node's own in-use check protects only itself. Where ownership cannot be established the reapers now wait 24 hours instead of 60 seconds; <code>per-node</code> mode is unchanged. Also warns when a snapshot-access clone name exceeds the array's 63-character limit, which a storage id longer than about 13 characters causes.</span>
+            <span class="lang-zh"><strong>shared host 模式下，某節點可能銷毀另一節點的快照複製：</strong>從快照讀取會建立暫存複製，且只連線到執行讀取的那個節點，回收器就是靠這一點判斷歸屬。但在 <code>pure-host-mode = shared</code> 之下每個節點回報的 Pure host 名稱都相同，因此對叢集中任何節點建立的複製，檢查的答案都是「是我的」&mdash;&mdash;而建立者自己的使用中檢查只保護得了自己。現在在無法確立歸屬時，回收器改為等待 24 小時而非 60 秒；<code>per-node</code> 模式維持不變。另外，當快照存取用的複製名稱超過陣列的 63 字元上限時會發出警告，storage id 超過約 13 個字元就會發生。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.31 <span class="changelog-tag changelog-tag--fix">Fix</span></div>

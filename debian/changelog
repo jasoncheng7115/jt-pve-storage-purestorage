@@ -1,3 +1,19 @@
+jt-pve-storage-purestorage (1.1.32-1) stable; urgency=medium
+
+  * Do not tear down a temp snapshot clone that this node cannot prove it
+    owns. With pure-host-mode = shared every node reports the same Pure host
+    name, so the ownership check ("is this connected to a host other than
+    mine?") answered "it is mine" for a clone created anywhere in the cluster,
+    and a second node could destroy a clone the creating node was reading from
+    during a backup. Both reapers now require 24 hours of age in shared mode
+    instead of 60 seconds and 1 hour; per-node mode is unchanged.
+  * Warn when a snapshot-access clone name exceeds the array's 63-character
+    limit. A storage id longer than about 13 characters pushes it over, and
+    the array's rejection does not mention the storage id.
+  * Move the host-name collision check below the host-verification cache so it
+    does not run on every pvestatd poll.
+
+ -- Jason Cheng <jason@jason.tools>  Thu, 06 Aug 2026 21:34:51 +0800
 jt-pve-storage-purestorage (1.1.31-1) stable; urgency=medium
 
   * Refuse a storage whose id produces the same Pure volume names as an
