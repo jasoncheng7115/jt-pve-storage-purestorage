@@ -55,12 +55,27 @@ jobs:
     name: Publish releases
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          # Tags are needed to tell "release not created yet" from
-          # "tag does not exist", which are handled differently.
-          fetch-depth: 0
+      # Deliberately NOT actions/checkout. Two consecutive runs (v1.1.32) died
+      # in "Set up job" with "Failed to resolve action download info" -- the
+      # runner could not fetch the action, so no step of ours executed and no
+      # release was created. This job needs nothing an action provides: git and
+      # gh are both preinstalled on GitHub-hosted runners, so cloning directly
+      # removes the only external dependency the job had, and with it that
+      # entire class of failure.
+      #
+      # Full history rather than a shallow clone, because the publish step
+      # tells "release not created yet" from "tag does not exist" by looking
+      # the tag up locally, and those are handled differently.
+      - name: Fetch repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git clone --quiet \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" .
+          git fetch --quiet --tags origin
+          git checkout --quiet --detach "${GITHUB_SHA}"
+          echo "checked out ${GITHUB_SHA} with $(git tag | wc -l) tags"
 
       - name: Publish releases from release-notes/
         env:
