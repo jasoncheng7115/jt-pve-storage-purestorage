@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.27-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.28-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -407,6 +407,15 @@ pvesm set <storeid> --pure-api-token <token>
 > **請勿**用 `--delete pure-api-token` 來做這件事。Proxmox VE 會把刪除當成明確的
 > 移除指令傳給外掛，因此連機密檔也會一併刪掉，該 storage 將沒有憑證可用。
 
+> **執行遷移前，請先把所有節點都升級完。** `/etc/pve` 會同步，機密檔立刻出現在
+> 每個節點——但仍在執行 1.1.25 之前版本的節點不知道要去讀它，而它原本在讀的明文
+> 副本剛剛被移除了。那個節點的 storage 會一直無法通過認證，直到它的套件升級為止。
+> 請先在每個節點確認 `dpkg -l jt-pve-storage-purestorage` 的版本。外掛在你實際
+> 執行遷移的那一刻也會印出同樣的警告。
+>
+> 升級本身不需要任何協調：安裝套件不會碰 storage 設定，因此尚未遷移的 storage
+> 在新舊節點上都會照常從 `storage.cfg` 讀值運作。
+
 ### iSCSI 需求
 - `open-iscsi` 套件
 - `multipath-tools` 套件
@@ -423,7 +432,7 @@ pvesm set <storeid> --pure-api-token <token>
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.27-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.28-1_all.deb
 ```
 
 > ⚠ 首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件

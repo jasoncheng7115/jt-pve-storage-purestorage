@@ -1,3 +1,23 @@
+jt-pve-storage-purestorage (1.1.28-1) stable; urgency=medium
+
+  * [MEDIUM] Warn, at the moment the credential migration runs, that every
+    node must already be on 1.1.25 or later. Installing the package is safe on
+    its own and needs no coordination - it does not touch storage
+    configuration, so an un-migrated storage keeps authenticating from the
+    value still in storage.cfg on old and new nodes alike. The hazard is the
+    migration command: /etc/pve is replicated, so the secret file reaches
+    every node immediately, but a node still running a pre-1.1.25 plugin does
+    not know to read it and the cleartext copy it WAS reading has just been
+    removed. That node's storage stops authenticating until its package is
+    upgraded. The warning is emitted from on_update_hook_full(), i.e. exactly
+    when the operator takes the risk, rather than at install time when the
+    decision is not yet in front of them. Both READMEs gained the same
+    ordering requirement, and state explicitly that the package upgrade itself
+    needs no coordination so the warning is not read more broadly than it
+    should be.
+
+ -- Jason Cheng <jason@jason.tools>  Thu, 06 Aug 2026 18:00:00 +0800
+
 jt-pve-storage-purestorage (1.1.27-1) stable; urgency=medium
 
   * [DOC] Document that pure-portal must be the array's VIRTUAL management IP

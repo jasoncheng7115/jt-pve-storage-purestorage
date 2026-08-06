@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.27 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.28 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.27-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.28-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.27-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.28-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1984,6 +1984,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.28 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-08-06</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Credential migration: upgrade every node first (MEDIUM):</strong> installing the package is safe on its own and needs no coordination — it does not touch storage configuration, so an un-migrated storage keeps authenticating from the value still in <code>storage.cfg</code> on old and new nodes alike. The hazard is the migration command: <code>/etc/pve</code> is replicated so the secret file reaches every node immediately, but a node still running a pre-1.1.25 plugin does not know to read it, and the cleartext copy it <em>was</em> reading has just been removed. The plugin now warns about this from <code>on_update_hook_full()</code> — at the moment the operator takes the risk, not at install time when the decision is not yet in front of them. Both READMEs gained the same ordering requirement.</span>
+            <span class="lang-zh"><strong>憑證遷移：請先升級所有節點（中）：</strong>安裝套件本身是安全的，不需要任何協調——它不會碰 storage 設定，因此尚未遷移的 storage 在新舊節點上都仍從 <code>storage.cfg</code> 裡的值通過認證。風險在於遷移指令：<code>/etc/pve</code> 會同步，機密檔立刻出現在每個節點，但仍在執行 1.1.25 之前版本的節點不知道要去讀它，而它原本在讀的明文副本剛剛被移除了。外掛現在會從 <code>on_update_hook_full()</code> 發出警告——在操作者實際承擔風險的當下，而不是在安裝時那個決定還沒擺在面前的時候。兩份 README 也補上了同樣的順序要求。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.27 <span class="changelog-tag changelog-tag--fix">Docs</span></div>

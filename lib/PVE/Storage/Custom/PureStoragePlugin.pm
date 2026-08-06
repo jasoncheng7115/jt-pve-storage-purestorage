@@ -470,9 +470,25 @@ sub on_update_hook_full {
         if (defined $sensitive->{$opt}) {
             _set_secret($storeid, $kind, $sensitive->{$opt});
             # Retire the cleartext copy a pre-1.1.25 release left behind.
+            #
+            # This is the one moment in the whole migration where a
+            # mixed-version cluster can bite, so say so here rather than only
+            # in the README. /etc/pve is replicated, so the secret file
+            # reaches every node immediately — but a node still running a
+            # pre-1.1.25 plugin does not know to read it, and the cleartext
+            # copy it WAS reading has just been removed. That node's storage
+            # stops authenticating until its package is upgraded.
             if (defined $scfg->{$opt}) {
                 warn "Storage '$storeid': moved '$opt' out of storage.cfg into "
-                   . _secret_file($storeid, $kind) . " (root-only).\n";
+                   . _secret_file($storeid, $kind) . " (root-only).\n"
+                   . "  IMPORTANT: every node in this cluster must be running "
+                   . "plugin version 1.1.25 or later before this takes effect "
+                   . "safely. Older nodes read the credential from "
+                   . "storage.cfg, which no longer holds it, and will fail to "
+                   . "authenticate against the array. Check with:\n"
+                   . "    pvesh get /nodes --output-format json | "
+                   . "grep -o '\"node\":\"[^\"]*\"'\n"
+                   . "    # then on each: dpkg -l jt-pve-storage-purestorage\n";
                 delete $scfg->{$opt};
             }
         } else {

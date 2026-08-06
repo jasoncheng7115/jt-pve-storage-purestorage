@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.27-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.28-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -433,6 +433,18 @@ which writes the secret file and removes the old line in one command.
 > deletion to the plugin as an explicit removal, so it deletes the secret file
 > too and leaves the storage with no credentials.
 
+> **Upgrade every node before running the migration.** `/etc/pve` is
+> replicated, so the secret file reaches all nodes immediately — but a node
+> still running a plugin older than 1.1.25 does not know to read it, and the
+> cleartext copy it *was* reading has just been removed. That node's storage
+> stops authenticating until its package is upgraded. Confirm with
+> `dpkg -l jt-pve-storage-purestorage` on every node first. The plugin prints
+> this same warning at the moment you run the migration.
+>
+> Nothing else about the upgrade needs coordinating: installing the package
+> does not touch storage configuration, so an un-migrated storage keeps
+> working from the value in `storage.cfg` on old and new nodes alike.
+
 ### For iSCSI
 - `open-iscsi` package
 - `multipath-tools` package
@@ -450,7 +462,7 @@ which writes the secret file and removes the old line in one command.
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.27-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.28-1_all.deb
 ```
 
 > ⚠ Avoid `dpkg -i` for the first install: it does **not** auto-install

@@ -8,6 +8,56 @@
 
 ---
 
+## [1.1.28] - 2026-08-06
+
+v1.1.25 憑證變更的後續：在整個遷移流程中唯一會被混合版本叢集咬到的那一點加上警告。
+
+### 升級是安全的；在所有節點升級完之前執行遷移則不然
+
+安裝套件不需要任何協調。它不會碰 storage 設定，因此 `on_add_hook`／
+`on_update_hook_full` 完全不會執行、不會寫出任何機密檔，尚未遷移的 storage 仍然從
+`storage.cfg` 裡的值通過認證——新舊節點皆然。
+
+風險在於遷移指令本身：
+
+```bash
+pvesm set <storeid> --pure-api-token <token>
+```
+
+`/etc/pve` 會同步，機密檔立刻出現在每個節點。但仍在執行 1.1.25 之前版本的節點不知道
+要去讀它，而它原本在讀的明文副本剛剛被移除了。那個節點的 storage 會一直無法通過
+認證，直到它的套件升級為止。
+
+外掛現在會在操作者實際承擔這個風險的當下提出警告，而不是在安裝時——那時候這個決定
+還沒擺在他面前：
+
+```
+Storage 'pure1': moved 'pure-api-token' out of storage.cfg into
+/etc/pve/priv/storage/pure1.pure-token (root-only).
+  IMPORTANT: every node in this cluster must be running plugin version 1.1.25
+  or later before this takes effect safely. Older nodes read the credential
+  from storage.cfg, which no longer holds it, and will fail to authenticate
+  against the array. Check with:
+    pvesh get /nodes --output-format json | grep -o '"node":"[^"]*"'
+    # then on each: dpkg -l jt-pve-storage-purestorage
+```
+
+兩份 README 也補上同樣的順序要求，並明確寫出套件升級本身不需要協調——避免這個警告
+被過度解讀。
+
+**建議順序：**
+
+1. 逐節點升級套件，並在每個節點執行 `systemctl restart pvestatd`。
+2. 用 `dpkg -l jt-pve-storage-purestorage` 確認每個節點都是 1.1.25 以上。
+3. 此時一切照常運作；token 還在 `storage.cfg`，外掛會回退讀它。
+4. 最後才逐一遷移，每個 storage 遷移後先用 `pvesm status <storeid>` 確認，再處理
+   下一個。
+
+第 3 步與第 4 步之間沒有時間壓力——尚未遷移的 storage 可以無限期正常運作，只是
+token 仍是明文。
+
+---
+
 ## [1.1.27] - 2026-08-06
 
 文件釋出：外掛指向哪一個管理位址，決定了控制器 failover 是完全透明，還是讓

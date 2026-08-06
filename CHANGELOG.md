@@ -8,6 +8,62 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.28] - 2026-08-06
+
+Follow-up to the v1.1.25 credential change: a warning at the one point in the
+migration where a mixed-version cluster can bite.
+
+### Upgrading is safe; migrating before every node is upgraded is not
+
+Installing the package needs no coordination. It does not touch storage
+configuration, so `on_add_hook` / `on_update_hook_full` never run, no secret
+file is written, and an un-migrated storage keeps authenticating from the
+value still in `storage.cfg` — on old and new nodes alike.
+
+The hazard is the migration command itself:
+
+```bash
+pvesm set <storeid> --pure-api-token <token>
+```
+
+`/etc/pve` is replicated, so the secret file reaches every node immediately.
+But a node still running a plugin older than 1.1.25 does not know to read it,
+and the cleartext copy it *was* reading has just been removed. That node's
+storage stops authenticating until its package is upgraded.
+
+The plugin now says so at the moment the operator takes that risk, rather than
+at install time when the decision is not yet in front of them:
+
+```
+Storage 'pure1': moved 'pure-api-token' out of storage.cfg into
+/etc/pve/priv/storage/pure1.pure-token (root-only).
+  IMPORTANT: every node in this cluster must be running plugin version 1.1.25
+  or later before this takes effect safely. Older nodes read the credential
+  from storage.cfg, which no longer holds it, and will fail to authenticate
+  against the array. Check with:
+    pvesh get /nodes --output-format json | grep -o '"node":"[^"]*"'
+    # then on each: dpkg -l jt-pve-storage-purestorage
+```
+
+Both READMEs gained the same ordering requirement, and state explicitly that
+the package upgrade itself needs no coordination — so the warning is not read
+more broadly than it should be.
+
+**Recommended order:**
+
+1. Upgrade every node and `systemctl restart pvestatd` on each.
+2. Confirm with `dpkg -l jt-pve-storage-purestorage` that every node is on
+   1.1.25 or later.
+3. Everything works normally at this point; the token is still in
+   `storage.cfg` and the plugin falls back to it.
+4. Only then migrate, one storage at a time, verifying with
+   `pvesm status <storeid>` before moving on.
+
+There is no time pressure between steps 3 and 4 — an un-migrated storage works
+indefinitely, the token is just still in cleartext.
+
+---
+
 ## [1.1.27] - 2026-08-06
 
 Documentation release: the management address the plugin is pointed at
