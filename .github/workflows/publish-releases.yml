@@ -20,8 +20,13 @@ name: Publish Releases
 # again, and the release is silently never created. v1.1.31 was published only
 # because the runner happened to check out after the tag arrived.
 #
-# The job is idempotent: an existing release has its body, title and asset
-# replaced. A version whose tag is missing is skipped with a warning that is
+# The job is idempotent, so it is always safe to re-run: an existing release
+# has its body, title and asset replaced. That matters because the run can also
+# fail for reasons that have nothing to do with this repository -- a runner
+# that cannot fetch actions/checkout reports "Failed to resolve action download
+# info" and the job dies before any step of ours executes. A push succeeding is
+# therefore NOT evidence that the release was published; check the release, and
+# re-run from Actions -> Publish Releases -> Run workflow if it is missing. A version whose tag is missing is skipped with a warning that is
 # visible in the run summary, and can be published afterwards with
 # workflow_dispatch.
 on:
@@ -121,5 +126,10 @@ jobs:
             fi
           done
 
-          echo "created=$created updated=$updated skipped=$skipped" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          {
+            echo "created=$created updated=$updated skipped=$skipped"
+            echo ""
+            echo "Safe to re-run at any time: publishing replaces the body and"
+            echo "the asset rather than appending to them."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           echo "created=$created updated=$updated skipped=$skipped"
