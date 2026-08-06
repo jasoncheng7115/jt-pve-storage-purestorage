@@ -17,3 +17,1950 @@ jt-pve-storage-purestorage (1.1.30-1) stable; urgency=medium
     which this plugin cannot implement.
 
  -- Jason Cheng <jason@jason.tools>  Thu, 06 Aug 2026 19:22:20 +0800
+
+jt-pve-storage-purestorage (1.1.29-1) stable; urgency=medium
+
+  * Negotiate the storage API version with the running Proxmox VE instead of
+    claiming a fixed 13. APIVER lives in libpve-storage-perl and moved
+    13 -> 14 -> 15 within the 9.1 point releases; a fixed claim either draws
+    the "implementing an older storage API" advisory on every pvesm, qm and
+    pct call, or -- if raised -- makes older libraries refuse to load the
+    plugin outright. api() now returns min(APIVER, 15), floored at 9.
+  * Refuse volume_resize with a snapshot name (API version 14) instead of
+    dropping the parameter and resizing the parent volume.
+
+ -- Jason Cheng <jason@jason.tools>  Wed, 06 Aug 2026 18:52:00 +0800
+
+jt-pve-storage-purestorage (1.1.28-1) stable; urgency=medium
+
+  * [MEDIUM] Warn, at the moment the credential migration runs, that every
+    node must already be on 1.1.25 or later. Installing the package is safe on
+    its own and needs no coordination - it does not touch storage
+    configuration, so an un-migrated storage keeps authenticating from the
+    value still in storage.cfg on old and new nodes alike. The hazard is the
+    migration command: /etc/pve is replicated, so the secret file reaches
+    every node immediately, but a node still running a pre-1.1.25 plugin does
+    not know to read it and the cleartext copy it WAS reading has just been
+    removed. That node's storage stops authenticating until its package is
+    upgraded. The warning is emitted from on_update_hook_full(), i.e. exactly
+    when the operator takes the risk, rather than at install time when the
+    decision is not yet in front of them. Both READMEs gained the same
+    ordering requirement, and state explicitly that the package upgrade itself
+    needs no coordination so the warning is not read more broadly than it
+    should be.
+
+ -- Jason Cheng <jason@jason.tools>  Thu, 06 Aug 2026 18:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.27-1) stable; urgency=medium
+
+  * [DOC] Document that pure-portal must be the array's VIRTUAL management IP
+    (vir0), not the address of an individual controller (ct0.eth0 /
+    ct1.eth0). A FlashArray is assigned three management addresses at setup:
+    one per controller, plus a virtual IP bound to whichever controller
+    currently holds the management primary role. Pointed at a controller's own
+    address, the plugin loses the REST API the moment that controller fails
+    over: activate_storage() cannot reach the array and the storage goes
+    inactive after three consecutive failed polls. Running guests are
+    unaffected - status() failing does not touch any device, so multipath maps
+    stay mapped and I/O continues on the data path - but every operation
+    needing the array's API stops, along with the capacity figures.
+    This is the same requirement Pure places on its other integrations: the
+    OpenStack Cinder driver documentation states that "the Management VIP
+    address is required to properly configure the FlashArray driver", and the
+    FlashArray vSphere Plugin refuses to install with a "No virtual IP
+    configured" error.
+    Added to both READMEs (with the remove-and-re-add procedure, since
+    pure-portal is a fixed property that cannot be changed with `pvesm set`),
+    to the documentation site, and to the pure-portal property description
+    itself so it appears in `pvesm set --help` and the API schema.
+
+ -- Jason Cheng <jason@jason.tools>  Thu, 06 Aug 2026 11:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.26-1) stable; urgency=medium
+
+  * [MEDIUM] Cut the steady-state REST load on the array's management gateway
+    roughly in half. Counting the calls a single pvestatd poll makes per node
+    per storage found four avoidable ones:
+    - get_managed_capacity() fetched the pod object, then called
+      pod_get_quota_limit() which fetched the SAME pod object again. The
+      already-fetched object is now passed in.
+    - _detect_api_version() ran for every new client, costing at least one
+      unauthenticated GET /api/api_version and up to nine more probes on
+      failure. The plugin's client cache expires after 300s and the
+      background reaper forks and therefore always builds a fresh client, so
+      this repeated constantly. The detected version is now cached per array
+      for the life of the process. A fallback guess is deliberately not
+      cached.
+    - A forked reaper pass logged in again. A Pure x-auth-token is a bearer
+      token, so a new client can be seeded with an existing session; what
+      must not be shared across a fork is the keep-alive socket, and each
+      client still builds its own. A stale token costs one 401, after which
+      the existing retry path re-logs in.
+    - activate_storage() asked for the iSCSI port list and re-verified the
+      host object on every poll, though neither changes in normal operation.
+      Both are now cached per process for API_CACHE_TTL (300s). The host
+      entry is recorded only after the check actually succeeds, so a
+      transient failure cannot silence the check for a whole TTL.
+    Measured over three consecutive polls in a harness with a counting API
+    stub: 15 calls before, 8 after.
+  * [MEDIUM] Never retry a rename. volume_rename() and snapshot_rename() are
+    PATCH requests, and _request() only excluded POST from its 5xx retry -
+    while LWP reports a read timeout as a synthetic 500. If the array
+    performed the rename and the response was lost, the retry addressed a name
+    that no longer existed, came back 404, and the caller concluded the rename
+    had failed. In volume_delete()'s tombstone path that meant destroying
+    under the ORIGINAL name (404), reporting the delete as failed, and leaving
+    a renamed-but-alive volume on the array; the operator's retry then found
+    nothing under the original name and reported success, stranding the volume
+    permanently. Both renames now use a new no_retry option and, on failure,
+    verify against the array whether the rename actually took effect before
+    believing the error.
+  * [MEDIUM] A 'pure-pod' naming a pod that does not exist is now a hard
+    error. The capacity lookup fell back to the array total, so a typo made
+    the storage report the whole array as free while every volume create
+    failed because the pod was missing.
+  * Documented that two storages sharing one pod double-count capacity in
+    Proxmox VE (volume names stay isolated; only the figures overlap).
+
+ -- Jason Cheng <jason@jason.tools>  Mon, 27 Jul 2026 18:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.25-1) stable; urgency=medium
+
+  * [MEDIUM] Stop storing the Pure API token and password in
+    /etc/pve/storage.cfg. PVE 9 lets a plugin declare which of its properties
+    are sensitive, via plugindata()->{'sensitive-properties'}; the storage
+    config API then pulls those out of the request before the config is
+    written and hands them to on_add_hook / on_update_hook instead. We never
+    declared it, so the list fell back to PVE's hardcoded
+    "encryption-key keyring master-pubkey password", which covers neither of
+    ours. The token therefore sat in storage.cfg in cleartext and
+    `GET /storage/<id>` returned it to anyone holding Datastore.Allocate on
+    that storage - which is not root. A Pure API token is typically
+    array-wide, so that is full control of the FlashArray rather than of one
+    storage. Credentials now live in /etc/pve/priv/storage/<id>.pure-token
+    and .pure-pw (mode 0600, in a directory pmxcfs keeps root-only), the same
+    place PBSPlugin and CIFSPlugin keep theirs.
+  * Existing installations keep working with no action required:
+    _resolve_credentials() prefers the out-of-config secret and falls back to
+    the value in storage.cfg, and a PVE storage update is a merge, so an
+    unrelated `pvesm set` can never drop the in-config token.
+  * To complete the migration and remove the cleartext copy, run once per
+    storage: `pvesm set <id> --pure-api-token <token>`. That writes the
+    secret file AND removes the old line from storage.cfg in a single
+    command. Do NOT use `--delete pure-api-token` for this: PVE reports a
+    deletion to the plugin as an explicit removal, so it would delete the
+    secret file as well and leave the storage with no credentials.
+  * [MEDIUM] Honour the volume name PVE asks for. PVE requests a specific
+    name in four places - vm-<vmid>-state-<snap> (RAM snapshot),
+    vm-<vmid>-cloudinit, vm-<vmid>-fleece-<n> (backup fleecing) and whatever
+    the operator types to `pvesm alloc`. Anything not recognised fell through
+    to the regular-disk branch, which ignored the requested name and
+    allocated vm-<vmid>-disk-<N> instead. Backup fleecing images therefore
+    came back looking like ordinary VM disks and consumed a disk id in the
+    guest's numbering. Fleecing is now a first-class volume type
+    (pve-<storage>-<vmid>-fleece<n> on the array, excluded from disk-id
+    allocation), and an unrecognised explicit name is refused with a message
+    naming the four supported forms rather than silently substituted -
+    LVMPlugin and ZFSPoolPlugin accept any vm-<vmid>-<...> for the same
+    reason.
+  * _get_api() now requires the storeid, since that is how the credentials
+    are located. All 21 call sites pass it, and tools/audit-invariants.pl
+    enforces this statically so a future call site cannot omit it.
+
+ -- Jason Cheng <jason@jason.tools>  Mon, 27 Jul 2026 16:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.24-1) stable; urgency=medium
+
+  * [CRITICAL] Report linked clones as "base-X-disk-N/vm-Y-disk-M" from
+    list_images(), matching what clone_image() returns and what the guest
+    config stores. Reporting the bare "vm-Y-disk-M" made
+    PVE::QemuServer::update_disk_config (which `qm rescan` drives) see the
+    volume as unreferenced, because it compares the config's volid against
+    the volid the plugin reports. PVE then called add_unused_volume(), so the
+    guest gained an "unusedN" entry pointing at the SAME Pure volume its
+    scsi0 was running on - and removing that "unused disk" in the GUI
+    destroys the live disk. The base volume is derived from Pure's `source`
+    field, accepting only a ".pve-base" snapshot source so that full clones
+    and clones from user snapshots keep their bare name.
+    RBDPlugin::list_images does the equivalent from the rbd parent snapshot.
+  * [HIGH] Release the snapshot-access clone that container backups leave
+    behind. PVE::VZDump::LXC calls activate_volumes($cfg, $volids, 'vzdump'),
+    which creates a clone on the array through our path(), then mounts,
+    rsyncs, umounts and deletes the snapshot - and never calls
+    deactivate_volume at all, so _cleanup_temp_snap_clone() was never
+    invoked. That leaked one Pure volume, one host connection and one local
+    multipath device per container mountpoint per backup. The one-hour orphan
+    reaper was the only backstop, and it never ran at all on an API 2.x array
+    before 1.1.22, so sites with scheduled container backups have been
+    accumulating these since installation. Cleanup is now triggered from
+    volume_snapshot_delete(), which PVE does reliably call, with the same
+    ownership, age and in-use gates as the background reaper.
+  * [HIGH] Propagate capacity changes to the local device. The refresh in
+    volume_resize() was gated on $running, so resizing a stopped VM's disk
+    left the local multipath map at the old size - start the guest and qemu
+    presents the old capacity, silently. The same applied to resizing on one
+    node and starting the guest on another, which no gating could have
+    covered. The refresh now runs unconditionally (a no-op without a local
+    device) and activate_volume() reconciles the array size it already
+    fetched against blockdev --getsize64, rescanning only on a mismatch. The
+    whole refresh is best-effort: the array-side resize has already
+    succeeded, so a local failure must not be reported as a failed resize.
+  * [MEDIUM] Match $vollist exactly in list_images(). $vollist holds complete
+    volids and the base plugin compares them exactly; a prefix match returned
+    "vm-10-disk-10" and "vm-10-disk-11" when asked for "vm-10-disk-1".
+
+ -- Jason Cheng <jason@jason.tools>  Mon, 27 Jul 2026 14:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.23-1) stable; urgency=medium
+
+  * [CRITICAL] Make the in-use safety guard fail CLOSED. is_device_in_use()
+    collapsed "I could not determine the answer" into "not in use": every
+    internal failure (a /proc/mounts read that timed out, a `fuser` call
+    killed by its own 5s watchdog, a device path that would not resolve)
+    fell through to `return 0`. For a raw Pure LUN attached to a running VM
+    there is no mount and no real holder - the kpartx partitions are
+    deliberately ignored - so `fuser` is the ONLY positive signal that a
+    guest has the device open. A timed-out `fuser` therefore turned "a VM is
+    using this disk" into "nothing is using this disk", precisely when the
+    node was unhealthy enough for that watchdog to fire, and free_image()
+    would go on to disconnect and destroy the volume. New
+    device_usage_state() returns in-use / idle / unknown with a reason;
+    is_device_in_use() now treats unknown as in use.
+  * [CRITICAL] A failed WWID lookup no longer disables the safety check.
+    free_image(), volume_snapshot_rollback() and create_base() each did
+    `my $wwid = eval { ... }; if ($wwid) { ...check... }` and then destroyed
+    or overwrote regardless, so one transient REST error ran the operation
+    unprotected. Rollback was the worst case: volume_overwrite() replaces the
+    volume's contents outright and, unlike a destroy, has no eradication-delay
+    recovery window. Both now refuse with an actionable message after a
+    bounded retry.
+  * [HIGH] No automated path performs an unrecoverable eradication any more.
+    The orphaned temp-clone reaper and the per-session temp-clone cleanup
+    called volume_delete() without skip_eradicate, i.e. DELETE /volumes -
+    permanent, with no recovery window, from a background reaper. Both now
+    soft-destroy. Note this reaper only began running at all in 1.1.22: its
+    age check could never be true on an API 2.x array before the millisecond
+    timestamp fix.
+  * [HIGH] The temp-clone reaper now re-matches candidates locally against
+    the exact name path() generates
+    (pve-<storage>-...-temp-snap-access-<unix-ts>-<pid>) instead of acting on
+    whatever the loose array-side glob returned, and requires two independent
+    age sources to agree - the array's created timestamp and the unix
+    timestamp baked into the name - before deleting.
+  * [HIGH] alloc_image() no longer destroys a pre-existing state/cloudinit
+    volume without checking whether it is in use. This was the only
+    destructive path in the plugin with no in-use check at all; a
+    vm-<id>-state-<snap> volume holding a live suspended guest's RAM image
+    would be discarded with only a warn().
+  * [HIGH] Fix two mirrored volume_list() calls that passed named arguments
+    to a positional-only function, so the pattern bound to the literal string
+    "pattern" and the array was asked for a volume with that exact name.
+    _cleanup_vm_config_volumes() therefore never deleted anything, and
+    free_image()'s "is this the VM's last disk?" test was always true. The two
+    bugs cancelled out into "config backup volumes leak". Fixing only one side
+    would have started destroying config backups on the FIRST disk deletion of
+    a multi-disk VM while snapshots of the remaining disks still referenced
+    them, so both are fixed together, and free_image() now skips the cleanup
+    rather than guessing when the disk list cannot be retrieved.
+  * [MEDIUM] Device lookup failure during a destructive operation is now an
+    error rather than being read as "there is no local device".
+  * [LOW] postinst adds `fuser` to its required-binary check; it is the
+    load-bearing check for a running guest and psmisc is already a hard
+    dependency.
+
+  * [HIGH] Stop issuing a Fibre Channel LIP on every rescan. A Loop
+    Initialization Primitive is a link reset that forces every device behind
+    that HBA port to re-login, including LUNs belonging to other storage on
+    the same HBA. It is not needed to discover a newly mapped LUN - the SCSI
+    host scan does that via REPORT_LUNS on the existing session. It was being
+    issued unconditionally from tight loops: path()'s retry loop (every 2s),
+    alloc_image()'s wait loop (every 3s), wait_for_multipath_device()'s FC
+    callback (every round) and, before 1.1.22, activate_storage() on every
+    pvestatd poll. LIP is now opt-in via rescan_fc_hosts(lip => 1) and is not
+    used anywhere by default.
+  * [HIGH] FC.pm now reads sysfs through sysfs_read_with_timeout instead of a
+    bare open(). A read of /sys/class/fc_host/*/port_state blocks
+    indefinitely on a wedged HBA, and get_fc_targets() runs from
+    activate_storage() on the pvestatd path.
+  * [HIGH] pve-pure-config-get no longer uses bare system() for mount and
+    umount. A mount against a multipath device whose paths are gone enters
+    uninterruptible sleep and never returns - and this tool only ever runs
+    when storage is already in trouble. All external commands now go through
+    PVE::Tools::run_command with an explicit timeout.
+  * [HIGH] pve-pure-config-get picks the NEWEST destroyed generation when a
+    disk has been deleted and recreated several times. Sorting tombstone
+    names lexically selected the OLDEST generation, and the newer ones then
+    hit a rename-back conflict that aborted the whole restore. Selection now
+    uses the unix timestamp embedded in the tombstone suffix, and the tool
+    prints which generation it chose and what else was available.
+  * [HIGH] The orphaned temp-clone reaper now skips clones still connected to
+    another node. A temp clone is connected only to the node that created it,
+    but every node runs the reaper: a snapshot-source operation running longer
+    than an hour on node A (a qemu-img convert of a large disk routinely is)
+    had its device disconnected and destroyed by node B, which has no local
+    device and therefore sailed past the in-use check that protects node A.
+  * [MEDIUM] remove_scsi_device() verifies the device still carries the
+    expected WWID before deleting it. free_image() captures the multipath
+    slave list before the array-side disconnect and deletes those slaves
+    afterwards; the kernel reuses /dev/sdX names, so a concurrent rescan could
+    hand the same name to an unrelated LUN whose path would then be removed.
+  * [MEDIUM] volume_get_connections() distinguishes "no connections" from "the
+    query failed". Returning an empty list for both made free_image() skip the
+    disconnect and destroy anyway, leaving orphaned host connections that
+    surface as ghost LUNs on other nodes. free_image() now refuses to delete
+    when connections cannot be listed.
+  * [MEDIUM] pve-pure-config-get uses PVE::INotify::nodename() instead of
+    `hostname -s`, so it connects volumes to the same Pure host object the
+    plugin registered, and wraps device cleanup so a refusal cannot abort a
+    restore that has already written the config.
+  * [MEDIUM] Remaining unbounded waits removed: the intermediate child in
+    status() and the success path of sysfs_read_with_timeout() now reap with
+    WNOHANG on a bounded poll.
+  * [LOW] _run_cmd and sysfs_read_with_timeout save and restore any alarm the
+    caller had armed, instead of clearing it with a bare alarm(0).
+  * [LOW] pve-pure-config-get reports its real version; dead code removed from
+    FC.pm.
+
+ -- Jason Cheng <jason@jason.tools>  Mon, 27 Jul 2026 10:30:00 +0800
+
+jt-pve-storage-purestorage (1.1.22-1) stable; urgency=medium
+
+  * [CRITICAL] Stop performing a full SAN rescan on every pvestatd poll.
+    Proxmox VE calls activate_storage() from storage_info() on every poll
+    (~10s), sequentially for every storage. activate_storage
+    unconditionally ran an iSCSI session rescan, a SCSI host scan, a
+    host-wide "multipathd reconfigure" and "udevadm trigger
+    --subsystem-match=block" plus "udevadm settle" on each of those calls,
+    i.e. a full multipath rebuild and a re-trigger of every block device on
+    the node six times a minute. Besides the standing cost, this competed
+    directly with device discovery: a VM start or backup waiting for a new
+    LUN was racing a reconfigure that repeatedly tore down and rebuilt the
+    map table. Rescans now run immediately when this node logs in to a new
+    iSCSI portal, and otherwise at most once per new option
+    pure-rescan-interval (default 300s, 0 restores the old behaviour).
+    Discovery of new LUNs is unaffected: activate_volume(), path() and
+    alloc_image() each perform their own targeted rescan and wait.
+  * [HIGH] Fix a potential unkillable hang inside the command-timeout
+    handler in Multipath.pm and ISCSI.pm. On timeout the handler ran
+    kill('TERM') followed by a blocking waitpid(). A child in
+    uninterruptible sleep - the exact case these timeouts exist for -
+    cannot be killed, so the blocking waitpid never returned and the alarm
+    that would have broken us out had already been cleared. Now escalates
+    TERM to KILL and reaps only with WNOHANG on a bounded poll.
+  * [HIGH] Rework the device-discovery wait loop (issue #13).
+    wait_for_multipath_device() probed for the device only at the END of a
+    body that could consume the entire timeout budget (per-session iSCSI
+    rescan, per-host SCSI scan, multipathd reconfigure, udev trigger and
+    settle), so on a fabric with slow paths the caller got a single look at
+    the device, taken right after a host-wide reconfigure. The loop now
+    probes before doing any work, probes again after each step, polls
+    cheaply between steps, is deadline-aware at every stage, and reaches
+    for a host-wide reconfigure only from the second round and at most once
+    per 30s process-wide.
+  * [HIGH] Do not run orphaned temp-clone cleanup in activate_storage. It
+    disconnects and destroys volumes on the array - mutating, potentially
+    slow work that does not belong on a path polled every ~10s with the
+    short-timeout health client. status() already forks it into the
+    background reaper under a lock with the resilient client.
+  * [HIGH] Report far more diagnostic detail when a device does not appear.
+    The error now includes what multipathd currently sees (map count, Pure
+    map count, whether a map exists for the WWID, whether its /dev/mapper
+    node was created), matching /dev/disk/by-id links, and per-session iSCSI
+    state read from sysfs - captured at failure time rather than left for
+    the operator to reproduce.
+  * [MEDIUM] Fix Pure REST 2.x timestamp handling. REST 2.x returns
+    milliseconds since the epoch, REST 1.x an ISO 8601 string; the code
+    assumed the opposite. Two consequences: snapshot ctime reported to
+    Proxmox VE was a millisecond value read as seconds, so the Web UI
+    showed nonsensical snapshot dates; and the orphaned temp-clone reaper's
+    "older than one hour" test could never be true on a 2.x array, so
+    orphaned temporary snapshot clones were never cleaned up, each holding
+    a volume slot, a host connection on every node and a stale multipath
+    device.
+  * [MEDIUM] Fix host lookup for the connect-to-all-nodes step. API 2.x
+    does not accept wildcards in the "names" query parameter, so
+    host_list("pve-<cluster>-*") always came back empty and new volumes
+    were pre-connected to the local node only. Wildcards now go through the
+    filter parameter, as volume_list already did.
+  * [MEDIUM] Pod capacity reporting (issue #10). "used" is now clamped to
+    the pod quota so Proxmox VE is never handed used > total, and a pod at
+    or over its quota logs an explanation of what that does and does not
+    mean, including the raw pod space figures the array returned. New
+    option pure-pod-usage-metric (provisioned, default / virtual /
+    physical) selects which figure is reported.
+  * [MEDIUM] Remove the per-volume WWID lookup from deactivate_storage; the
+    WWID is derived from the serial the volume list already returned. The
+    old form was an N+1 REST storm against the array, fired exactly when a
+    node is shutting down.
+  * [MEDIUM] Fix the API client cache key. It keyed on $scfg->{storage},
+    which Proxmox VE never populates, so it degraded to the portal address
+    alone: two storages on the same array with different API tokens or
+    different pure-status-timeout values shared one cached client.
+  * [LOW] filesystem_path() now fails with an actionable message instead of
+    a bare "storage is required" from inside the naming module. It passed
+    $scfg->{storage} as the storage id, which is always undef.
+  * [LOW] Remove the argument-less multipath_flush() call in
+    deactivate_storage, which could only ever throw (the helper refuses to
+    run "multipath -F", which would flush every unused map on the host).
+  * [LOW] postinst no longer reports another vendor's multipath settings as
+    a Pure hazard. The dangerous-settings check grepped the whole of
+    /etc/multipath.conf with no scope awareness, so `no_path_retry queue`
+    inside a `device { vendor "NETAPP" }` block - which cannot affect Pure
+    devices, and is that vendor's own recommendation - was reported as a
+    Pure risk. The check now tracks scope and only warns for settings in
+    `defaults` or in a PURE device block; settings scoped to another
+    vendor are reported as a note for awareness.
+  * [LOW] activate_volume() now tracks the volume WWID, closing a gap where
+    a volume activated without path() being called was invisible to the
+    cluster residual-device cleanup.
+
+ -- Jason Cheng <jason@jason.tools>  Sun, 26 Jul 2026 18:20:00 +0800
+
+jt-pve-storage-purestorage (1.1.21-1) stable; urgency=medium
+
+  * [HIGH] Isolate the pvestatd health path from a slow array. New
+    option pure-status-timeout (default 5s): activate_storage() and
+    the foreground of status() now use a short-timeout, single-attempt
+    REST client instead of the resilient data-path client (15s x 2
+    retries). PVE polls storages sequentially every ~10s, so a slow or
+    degraded array previously backed up the whole pvestatd cycle and
+    starved sibling storages on the same node into "inactive". Dropping
+    per-call retries on this path costs nothing because the next poll
+    is the retry. The data path (alloc/free/clone) and the background
+    reaper keep the resilient client.
+  * [HIGH] Enable HTTP keep-alive on the REST client. The LWP::UserAgent
+    now reuses one TCP+TLS connection across calls instead of opening a
+    fresh connection (and TLS handshake) per request, reducing the
+    steady-state load the plugin's polling places on the array's
+    management gateway.
+  * [MEDIUM] Bound the cumulative time of the iSCSI portal discover/
+    login loop in activate_storage(). New option pure-activate-deadline
+    (default 30s): once the budget is spent and at least one portal is
+    logged in, remaining portals are deferred to a later activation.
+    The budget never applies while zero paths are up and never
+    interrupts an in-progress login, so a slow-but-reachable storage is
+    never marked inactive. The iSCSI session list is now snapshotted
+    once before the loop instead of being queried per portal.
+  * [LOW] Compute the temp-clone WWID locally from the serial already
+    present in the volume_list() response (serial_to_wwid) instead of a
+    per-volume volume_get_wwid() REST call. _cleanup_orphaned_temp_clones
+    runs from the status() background reaper on every poll; this removes
+    the per-volume round-trip, matching the orphan reaper.
+  * [LOW] postinst now prints a prominent warning after an upgrade that
+    the operator must run "systemctl restart pvestatd" on every cluster
+    node to activate the new plugin code. The package intentionally uses
+    "systemctl reload" (SIGHUP) to avoid the stop-phase hang on D-state
+    children, but on many PVE versions reload does not reload Perl
+    modules, so pvestatd can keep running stale code. The warning shows
+    how to verify the MainPID changed.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Tue, 16 Jun 2026 19:30:00 +0800
+
+jt-pve-storage-purestorage (1.1.20-1) stable; urgency=medium
+
+  * [MEDIUM] Override get_identity(), added to the base
+    PVE::Storage::Plugin in Proxmox VE 9.2 (base default die()s with
+    "get_identity not implemented for this plugin"). It is invoked via
+    the new GET /nodes/<node>/storage/<storage>/identity endpoint
+    (primarily for Proxmox Backup Server instance matching; the Web UI
+    may poll it for any storage), so without the override the base
+    die() surfaces as a Web UI error on PVE 9.2. Returns a
+    deterministic "purestorage:<portal>:<pod>" — the management portal
+    plus optional ActiveCluster pod, which together pin the storage to
+    one array. Signature verified against the pve-storage source
+    (my ($class, $scfg, $storeid)). No APIVERSION change required;
+    we still claim 13, within PVE 9.2's accepted 9..14 range.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 29 May 2026 14:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.19-1) stable; urgency=medium
+
+  * [HIGH] volume_list(), volume_list_destroyed() and snapshot_list()
+    now follow the API 2.x continuation_token across pages. Pure
+    FlashArray REST 2.x caps each GET on a collection endpoint at a
+    server page (default ~1000 items) and signals further pages via
+    more_items_remaining + continuation_token. The previous code read
+    only the first page, so a storage with more than one page of
+    volumes or snapshots silently truncated: list_images() hid disks
+    from the Proxmox VE web UI and orphan cleanup never saw the tail
+    volumes. New API::_get_v2_collection() helper walks all pages
+    (bounded by a 100k-page safety stop). API 1.x is unaffected
+    (it returns the full set in one response). host_get_volumes()
+    is intentionally left single-page: it backs an emptiness gate
+    (logout iSCSI sessions only when no volumes remain), where a
+    truncated-but-non-empty page yields the same decision.
+  * [MEDIUM] Background orphan cleanup no longer issues one extra
+    volume_get_wwid() REST call per volume on every pvestatd poll
+    (~10s). _cleanup_orphaned_devices() Phase 1 now derives the WWID
+    from the serial already present in the volume_list() response
+    (API::serial_to_wwid), falling back to the per-volume lookup only
+    when serial is absent. On a storage with hundreds/thousands of
+    volumes this removes a per-poll burst of N REST calls that scaled
+    with volume count and could hit Pure's API rate limit.
+  * [MEDIUM] Background cleanup is now serialised per storeid with a
+    non-blocking flock. status() forks a cleanup pass on every
+    pvestatd poll; on a large array a single pass can exceed the 10s
+    poll interval, so passes would stack into multiple concurrent
+    grandchildren all hitting the REST API and local block layer.
+    Overlapping polls now skip the work instead of piling on. The
+    lock auto-releases on process exit, so it cannot wedge.
+  * [HIGH] Orphan reaper no longer reaps a device on a single
+    absent observation. Two independent guards were added to
+    _cleanup_orphaned_devices(): a grace period (a WWID first seen
+    less than 600s ago is never reaped, protecting a just-added LUN
+    during the window after map/connect but before qemu opens it,
+    when is_device_in_use() legitimately reports idle), and absence
+    hysteresis (a WWID must be reported absent from the array for 3
+    consecutive cleanup passes before teardown). The tracking-file
+    entry schema gained a per-WWID absence counter; older files
+    storing a bare timestamp are read transparently. Cross-project
+    hardening from a jt-pve-storage-netapp incident where a
+    freshly-added, in-use LUN was reaped.
+  * [HIGH] Orphan reaper no longer mis-flags a second purestorage
+    storage's live device as a stale orphan. Phase 3's warning
+    compared host-wide Pure multipath devices against ONE storage's
+    tracking; on a host with multiple purestorage storages (multiple
+    pods or arrays) a sibling storage's in-use device satisfied
+    "not on this array and not tracked here" and prompted the
+    operator to run `multipath -f` on a different storage's disk.
+    Phase 3 now unions the WWIDs tracked by every other purestorage
+    storage on the node and skips them. (Parity with
+    jt-pve-storage-netapp v0.2.15.)
+  * [MEDIUM] status() now performs outage detection and capacity
+    health monitoring. After STATUS_FAIL_THRESHOLD (3) consecutive
+    failed polls it logs a single outage ERROR (re-emitted at most
+    every 30s while down) and an INFO on recovery; it warns at
+    >=90% (WARNING) and >=95% (ERROR) capacity used, rate-limited to
+    once per hour. Events are logged via the journal with a
+    `pure-storage:` tag for monitoring pickup. (Parity with
+    jt-pve-storage-netapp v0.2.10.)
+  * [MEDIUM] activate_storage() warns (once per 24h) when every
+    reachable iSCSI portal resolves to a single Pure controller
+    (CT0/CT1), i.e. this node has no controller-level path
+    redundancy. (Parity with jt-pve-storage-netapp v0.2.11.)
+  * [LOW] postinst now detects storage-affecting operations in
+    flight (qmrestore, vzdump, qm move-disk/clone/migrate,
+    pvesm alloc/free/import/export) before reloading PVE services
+    and prints a NOTICE with a 5s grace window. The reload is a
+    graceful SIGHUP and does not abort the operations. (Parity with
+    jt-pve-storage-netapp v0.2.10.)
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 29 May 2026 10:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.18-1) stable; urgency=medium
+
+  * [MEDIUM] snapshot_delete() now pre-renames the snapshot to a
+    tombstone suffix before destroy (issue #11), mirroring the
+    volume-side tombstone fix from v1.1.15. Pure's destroyed-pending
+    state reserves a snapshot's suffix for the array's eradication
+    delay (default 24h), so without the rename, creating a new
+    snapshot with the same name within that window fails with
+    "Snapshot 't1' already exists for volume". The pre-rename
+    moves the destroyed snapshot under a `<orig-suffix>-pve-tomb-
+    <unix-ts>-<pid>` suffix so the original suffix is freed
+    immediately. Implementation uses Pure's PATCH /volume-snapshots
+    rename API (which takes the new SUFFIX in the body, NOT the
+    full name — verified against the FA 2.x OpenAPI spec). Edge
+    cases handled: 64-char snapshot-suffix limit overflow falls
+    back to direct destroy + warning, already-tombstoned suffixes
+    are not re-renamed, rollback rename on destroy failure
+    restores the original suffix for a clean retry. API 1.x lacks
+    snapshot rename support in the REST surface, so the tombstone
+    path is API 2.x only — 1.x destroys go straight through under
+    the original name. Reported by @pulipulichen (#11).
+
+  * [LOW] Configurable shorter timeout for the auxiliary
+    config-backup volume's multipath device wait (issue #12). The
+    plugin creates a 1 MB auxiliary volume on every snapshot to
+    archive the VM/CT config (used only by pve-pure-config-get
+    for disaster recovery — non-critical). Previously this used
+    pure-device-timeout (default 60s), and on degraded multipath
+    the snapshot operation would visibly stall the full timeout
+    even though the resulting "skipping config backup" warning is
+    non-fatal. New storage option `pure-config-backup-timeout`
+    (integer 5..60, default 15) sets a separate, shorter wait.
+    Warning text expanded to make the non-fatal nature explicit
+    and point at the new option. Reported by @pulipulichen (#12).
+
+  * [LOW] postinst now sanity-checks that the required external
+    binaries (multipathd, multipath, kpartx, iscsiadm, sg_inq,
+    blockdev) are on PATH before proceeding (issue #9). Catches
+    the "I installed with dpkg -i and got 'No such file or
+    directory' for /sbin/multipathd later" failure mode and
+    redirects the operator at `apt --fix-broken install` or
+    `apt install ./*.deb`. README install instructions now lead
+    with `apt install ./*.deb`, with an explicit warning against
+    bare `dpkg -i`. Declared Depends were already correct
+    (multipath-tools, open-iscsi, sg3-utils, psmisc); the new
+    check just gives a clear error when dpkg is used in a way
+    that bypasses Depends enforcement. Reported by @pulipulichen
+    (#9).
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 14 May 2026 02:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.17-1) stable; urgency=medium
+
+  * [MEDIUM] get_managed_capacity() for pod-backed storage now
+    reports `used` based on space.total_provisioned (sum of all
+    volume sizes within the pod) instead of space.virtual
+    (host-written bytes). Pure pod quota is enforced against
+    total_provisioned at allocation time, so this is the metric
+    that matches what the array will actually refuse — and the
+    headline "Size" indicator Pure UI shows on the pod detail
+    page. Operators upgrading may observe their pod storage's
+    "used" reading change to reflect provisioned capacity rather
+    than written capacity; this is the correct semantic for
+    capacity planning against the pod's quota_limit. The fallback
+    chain remains in place (virtual → total_physical → total_used)
+    for older Purity that may omit total_provisioned. Tracked
+    in #7.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 13 May 2026 23:30:00 +0800
+
+jt-pve-storage-purestorage (1.1.16-1) stable; urgency=high
+
+  * [HIGH] pve-pure-config-get restore mode: tombstone-aware recovery.
+    v1.1.15 made volume_delete pre-rename volumes to
+    "<orig>-pve-tomb-<unix-ts>-<pid>" before destroy. The disaster-
+    recovery tool pve-pure-config-get queries Pure's destroyed-
+    volumes list when in restore mode (--restore) to find both
+    config-backup volumes and the VM's disk volumes, recover them,
+    and reconstruct the VM config on this PVE node. After v1.1.15,
+    the destroyed volumes the tool finds carry the tombstone suffix.
+    Two consequences:
+    (a) decode_config_volume_name's greedy snapname capture pulled
+        the "-pve-tomb-<ts>-<pid>" trailer into the displayed
+        snapname, making the restore picker show ugly nonsense
+        instead of just "snapname1".
+    (b) MORE SERIOUS: recovered disk volumes lived under their
+        tombstone names on Pure (e.g. pve-pure1-100-disk0-pve-tomb-
+        1747000000-12345), but the VM config the tool wrote to
+        /etc/pve/qemu-server/<vmid>.conf referenced the original
+        PVE volname (vm-100-disk-0), which the plugin maps to
+        pve-pure1-100-disk0. PVE looked up the disk by its
+        original name, did not find it (it was under the tombstone
+        name), and the restored VM failed to start.
+    Fixed by:
+    - Stripping the tombstone suffix before passing volume names to
+      decode_config_volume_name for display.
+    - Renaming each recovered volume BACK to its original name
+      immediately after volume_recover, so the restored VM's disks
+      live on Pure under the names PVE expects.
+    - Detecting rename-back conflicts (extremely unlikely, but
+      possible if the operator already recreated the VM with the
+      original name) and aborting the restore with a clear error
+      that lists the conflicting tombstone names and offers two
+      recovery paths (manual cleanup OR restore to a different
+      VMID).
+    Also picked up the still-broken inline storeid_to_pure_prefix
+    duplication that issue #6 missed in this tool (line 197-198),
+    so dotted storage IDs now work end-to-end through the restore
+    workflow as well.
+
+  * make test now also syntax-checks bin/pve-pure-config-get, so a
+    Perl typo in the tool fails CI / local test rather than being
+    discovered only when an operator runs it in a disaster.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 13 May 2026 21:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.15-1) stable; urgency=medium
+
+  * [MEDIUM] Deleted PVE disks no longer hold their Pure volume name
+    in destroyed-pending state for the array's eradication delay
+    (default 24h). volume_delete now renames the volume to
+    "<orig>-pve-tomb-<unix-ts>-<pid>" BEFORE destroying it. The
+    original name is freed as soon as the rename succeeds, so the
+    user can immediately recreate a same-named disk. The tombstoned
+    volume still goes into destroyed-pending (still recoverable
+    from Pure UI, still eradicates per Pure's normal schedule),
+    just under the suffixed name. Operators can identify these in
+    Pure's Destroyed Volumes list by the "-pve-tomb-" marker.
+    Reported by @pulipulichen (#8).
+
+  * Edge cases handled in tombstone path:
+    - Pod-prefixed volumes (pod::vol) keep the pod prefix on rename;
+      63-char length limit checked against the post-"::" portion only.
+    - Names that would exceed Pure's 63-char volume-name limit after
+      adding the tombstone suffix: skip rename, destroy with original
+      name (accept the 24h name reservation rather than risk a
+      truncated-name collision), warn so operator can see.
+    - Volumes that already carry the "-pve-tomb-" marker (e.g. a
+      re-destroy after a previous failed destroy): skip rename to
+      avoid recursive double-tombstoning.
+    - PID suffix on top of unix timestamp: different PVE nodes
+      deleting the same volume in the same wall-clock second get
+      different PIDs, cannot collide.
+    - WWID is preserved across Pure-side rename; the plugin's
+      WWID tracking JSON keys on WWID (not name), so no tracking
+      update is required.
+    - opt-out: caller can pass `tombstone => 0` to skip rename
+      entirely; the regex check already prevents accidental
+      double-tombstoning for callers that don't.
+
+  * Rollback on destroy failure: if rename succeeds but the
+    subsequent destroy fails (e.g., volume has unexpected
+    protection group attachment, pod in degraded state, transient
+    API error), volume_delete now tries to rename the volume BACK
+    to its original name before propagating the destroy error.
+    This restores pre-call state so the operator's retry runs
+    naturally — without the rollback, the next free_image attempt
+    would look up the original name, fail with "not found"
+    (volume now under tombstone name), and require manual array-
+    side cleanup. Rollback is best-effort: if it ALSO fails (rare,
+    implies array-wide issue), we log enough detail (tombstone
+    name) for manual cleanup from Pure UI.
+
+  * Note on snapshot rollback (PVE revert to snapshot): unrelated
+    to this change. PVE snapshot rollback uses volume_overwrite
+    (POST /volumes?names=X&overwrite=true) which mutates an
+    existing volume's contents in-place; no volume is destroyed,
+    so the tombstone path is not entered.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 13 May 2026 18:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.14-1) stable; urgency=high
+
+  * [HIGH] VM snapshot WITH memory on a multipath-degraded host (e.g.
+    4-portal Pure with 2 paths broken) wedged pvedaemon / pvestatd
+    and eventually made the entire PVE management plane unresponsive
+    ("?" everywhere in the web UI). CT snapshot and VM snapshot
+    WITHOUT memory worked fine. Root cause: VM-with-memory snapshot
+    creates a VMSTATE volume on the array, which then has to be
+    activated host-side (iSCSI session rescan + multipath wait). The
+    rescan path used `iscsiadm -m session --rescan`, which in one
+    invocation tries to rescan every active session including the
+    dead ones. The dead sessions queue SCSI commands that wait for
+    kernel-level timeouts (30s+ per dead path), the iscsiadm
+    parent gets killed at our wrapper timeout, leaving D-state
+    children behind. Every pvestatd poll (10s) re-fired the same
+    rescan, stacking more D-state children until the management
+    plane died. Reproducer: 4-LIF Pure with 2 broken paths, take a
+    VM snapshot with memory; node degrades over time, often within
+    one snapshot operation. Fixed by rewriting rescan_sessions to
+    enumerate sessions via /sys/class/iscsi_session/ (kernel-
+    maintained, immune to iscsiadm hangs), check each session's
+    `state` attribute, and only issue per-session rescans
+    (`iscsiadm -m session -r <sid> --rescan`) on sessions in
+    LOGGED_IN state, each bounded by a 10s timeout. Sessions in
+    FREE / REOPEN / FAILED / etc. states are skipped silently;
+    worst-case orphan child count drops from "one per dead session
+    per poll forever" to "one per stuck LOGGED_IN session per call,
+    bounded". Reported by @pulipulichen (#5) with the critical
+    "CT works, VM-with-memory doesn't" reproducer that pinpointed
+    VMSTATE volume activation as the trigger.
+
+  * [MEDIUM] PVE Web UI disk list silently empty when the storage ID
+    contains a `.` (dot) character. encode_volume_name strips dots
+    via sanitize_for_pure when writing volumes to the array, but
+    list_images and six sibling pattern-building sites did only
+    `$storeid =~ s/-/_/g` — leaving the dot in the filter pattern.
+    Filter pattern `pve-pure_plugin_5.111_pvepod2-*` therefore never
+    matched volumes actually stored as `pve-pure_plugin_5111_pvepod2-...`,
+    so list_images returned empty and PVE displayed no disks. Field
+    reproducer: storage ID `pure-plugin-5.111-pvepod2` showed empty
+    disk list; renaming to `pure-plugin-5-pvepod2` (no dot) made it
+    work. Fixed by adding a `storeid_to_pure_prefix($storeid)` helper
+    in Naming.pm that does the full sanitize+underscore transform
+    that encode_volume_name uses, and replacing all 7 inline
+    duplications in PureStoragePlugin.pm with calls to it. The 4
+    inline duplications in Naming.pm itself (encode_config_volume_name,
+    pve_volname_to_pure for cloudinit/vmstate) also collapsed onto
+    the same helper to keep the transform single-source. Reported
+    by @pulipulichen (#6).
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 13 May 2026 12:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.13-1) stable; urgency=high
+
+  * [HIGH] Snapshot rollback silently no-op on REST API 2.x. The
+    volume_overwrite sub used PATCH /volumes with a `source` body
+    field, but per the FA 2.x OpenAPI spec PATCH /volumes is the
+    rename/destroy/modify endpoint and does not accept `source`.
+    Pure responded with "No attribute specified." while the API
+    returned 200 with empty body, so the PVE task appeared to
+    succeed even though the volume contents were never restored.
+    Operators saw post-snapshot data still present after rollback.
+    Fixed by switching to POST /volumes?names=X&overwrite=true with
+    `source` in body — the same endpoint volume_clone already uses,
+    with the spec-defined `overwrite=true` query parameter for the
+    object-copy case. add_to_protection_group_names and
+    with_default_protection are deliberately omitted on this path
+    because the spec forbids them when overwrite=true. Reported
+    independently by @tgdfama1 (issue #1) and @pulipulichen (#2)
+    with a reproducer that creates a snapshot, modifies the volume,
+    rolls back from PVE UI, and observes post-snapshot files still
+    present.
+
+  * [MEDIUM] Pod-backed storage reported 100% used in PVE the moment
+    a thin volume of the quota's size was provisioned, even with
+    zero host writes, while the Pure UI correctly showed the pod
+    as nearly empty. Root cause: get_managed_capacity preferred
+    `total_provisioned` (sum of volume sizes) over `virtual` (host-
+    visible logical writes) in the // fallback chain, on the theory
+    that pod quotas enforce against provisioned capacity. The
+    enforcement theory is correct but the resulting status display
+    visibly diverged from Pure's own UI and made operators think
+    the storage was full. Switched the fallback chain to prefer
+    `virtual` (matching Pure UI) → `total_physical` → `total_used`
+    → `total_provisioned`. If the array genuinely runs into the
+    quota at allocate time it returns a clear quota error to
+    volume_create which translate_pure_error already surfaces, so
+    status() does not need to pre-pessimise the cap. Reported by
+    @pulipulichen (#3).
+
+  * CI: new manually-triggered GitHub Actions workflow at
+    .github/workflows/build-deb.yml that runs `make test` and
+    `dpkg-buildpackage -us -uc -b` on an ubuntu-24.04 runner and
+    uploads the produced .deb as an artifact. Lets release
+    engineers and contributors grab a packaged build directly from
+    the GitHub Actions UI without setting up a Debian dev box.
+    Triggered via workflow_dispatch only (no auto-push). Adapted
+    from @pulipulichen's contribution in issue #4.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Mon, 11 May 2026 12:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.12-1) stable; urgency=medium
+
+  * [MEDIUM] pod_get_quota_limit() simplified: now reads ONLY the
+    Pod object's own quota_limit field. v1.1.10 also walked the
+    /policies/quota and /policies/quota/rules endpoints in an
+    attempt to honour quota policies attached to a pod (the path
+    the Pure GUI's Storage > Policies builds), but field experience
+    shows that mechanism is the WRONG mechanism for block volume
+    pod quotas — the entire /policies/* family in Pure (autodir,
+    nfs, smb, quota, snapshot) is FlashArray Files / managed-
+    directory only. Reading a file-system quota policy and
+    surfacing it as a block-level cap to PVE was misleading, even
+    though the API technically returned a value. v1.1.10's
+    "with_default_protection=false" mitigation in v1.1.11 also did
+    NOT fix the field-reported "Pod contains file systems or
+    policies." rejection because Pure refuses block volume create
+    for any pod that has a Storage > Policies policy attached,
+    regardless of default-protection handling. The cure is on the
+    Pure side: destroy the file-services policy and set
+    Pod.quota_limit instead. The plugin keeps reading
+    Pod.quota_limit, which IS the only block-level pod quota
+    mechanism Pure exposes (CLI: purepod --quota-limit; REST:
+    PATCH /pods body quota_limit; GUI: Purity 6.6+ Edit Pod).
+
+  * Documentation: README and README_zh-TW Option A "Pod with quota"
+    sections now spell out the three correct paths (CLI, REST, GUI
+    6.6+) for setting Pod.quota_limit, and warn explicitly that
+    Storage > Policies must NOT be used for pod block quota — with
+    the exact error message and the destroy + re-set recipe so
+    operators can self-recover.
+
+  * v1.1.11's with_default_protection=false on volume_create and
+    volume_clone is preserved. It does not fix the case it was
+    written for, but it remains a correct defensive change: the
+    plugin manages its own snapshot policy via volume_snapshot /
+    volume_overwrite and never relied on Pure's container default
+    protection. No regression risk.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 08 May 2026 18:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.11-1) stable; urgency=high
+
+  * [HIGH] Volume create/clone in a pod with any policy attached failed
+    with "Pod contains file systems or policies." (context: <podname>),
+    blocking VM disk creation entirely. Field reproducer: a Pure storage
+    configured with --pure-pod pvepod2 where the operator had attached a
+    quota policy 'pvepodquota2' via Storage > Policies in the GUI; every
+    'qm create' that needed a disk failed at PureStoragePlugin.pm:1660
+    inside alloc_image's volume_create call. Root cause: per the FA 2.26
+    OpenAPI spec, POST /volumes (and POST /volumes for clones) defaults
+    to with_default_protection=true, which causes Pure to apply the
+    pod's container default protection to the new volume. Pure rejects
+    that step when the pod has policies attached (the quota policy
+    counts), surfacing the misleading "Pod contains file systems or
+    policies." error. Fixed by passing with_default_protection=false on
+    the POST /volumes call when the volume name carries a "pod::"
+    prefix, both in volume_create and volume_clone. The PVE plugin does
+    not rely on Pure's default protection (it manages snapshots itself
+    via volume_snapshot/volume_overwrite), so this is the correct
+    semantic. Non-pod volumes are left untouched to preserve any
+    user-configured array-level default_protections.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 08 May 2026 12:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.10-1) stable; urgency=medium
+
+  * [MEDIUM] Pod quota capacity reporting was broken: when the storage
+    was configured with --pure-pod, status() always reported the FULL
+    FlashArray capacity instead of the pod's quota. Pure FlashArray
+    API 2.x exposes pod quotas through TWO mechanisms and the old
+    code missed both common variants:
+    (a) The Pod object itself has a quota_limit field set via
+        purepod create --quota-limit / setattr --quota-limit (Purity
+        6.4.4+ CLI). The old code read this — but it remains 0 when
+        the cap is set via mechanism (b) below.
+    (b) Newer Purity also lets the operator create a Policy of
+        policy_type=quota that references the pod via the policy's
+        own 'pod' field, with one or more Rules in
+        /policies/quota/rules carrying the actual quota_limit. The
+        Storage > Policies GUI builds quotas this way, and it does
+        NOT propagate the cap back into the Pod's own quota_limit.
+        So reading the Pod object alone always saw 0.
+    Old code therefore always saw quota=0 and fell through to
+    array_space(). Field reproducer: Purity//FA 6.5.9 with a quota
+    policy 'pvepodquota' (2 TB rule) on pod 'pvepod' showed up in
+    PVE as the array's full multi-TB capacity. Fixed by walking both
+    paths: read the Pod's own quota_limit, then GET /policies/quota
+    filtered by pod.name to find policy-based caps, then GET
+    /policies/quota/rules to pull the rule limits. Take the smallest
+    positive value across all sources — most-restrictive cap matches
+    what the array itself enforces. Edge cases handled: multiple
+    rules/policies per pod (min); enabled=false / destroyed
+    policies (skipped); enforced=false soft rules (still counted, so
+    PVE allocation respects user intent); endpoint 404 / 403 / 400
+    on older Purity (no-filter fallback then warn + array fallback);
+    pod names with quote/backslash chars (skipped); API 1.x (skipped).
+    All failure paths fall back to array capacity with a warning,
+    never croak — status() polling must not break on quota lookup.
+    Earlier draft of this fix used /policies/quota/members which is
+    WRONG for pods (per Pure API 2.26 spec, that membership table
+    binds policies to managed directories only). Verified against the
+    FA 2.26 OpenAPI spec at code.purestorage.com.
+
+  * Pod 'used' capacity now derived from total_provisioned (the metric
+    Pure quotas actually count against, per the FA 2.26 Pod space
+    schema) instead of total_used (post-reduction physical bytes).
+    Falls back to virtual / total_used / total_physical when
+    total_provisioned is absent on older Purity. Without this change,
+    a freshly-provisioned 2 T volume in a 2 T pod showed PVE 0% used
+    while the pod was already 100% full from the array's perspective;
+    the next allocation would have been rejected by the array even
+    though PVE thought there was 2 T free.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 08 May 2026 00:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.9-1) stable; urgency=high
+
+  * [HIGH] activate_storage() now TCP-probes every iSCSI portal returned
+    by iscsi_get_ports() before invoking iscsiadm discovery/login, and
+    skips portals that do not accept a TCP connection within
+    pure-portal-probe-timeout seconds (default 2s). Without this guard,
+    each unreachable portal stalls activate_storage() for 30s
+    (discovery) plus up to 60s (login); a Pure with 4 iSCSI LIFs and
+    asymmetric cabling that only reaches one controller therefore wedged
+    'pvesm add' and every subsequent pvestatd poll, leaving the web UI
+    Status panel in a permanent loading state and starving other
+    storage. Reproducer in field: 4-LIF Pure + 2-node PVE where only
+    one node could reach 2 of the 4 LIFs; 'pvesm add purestorage'
+    returned only after the 2 unreachable LIFs each timed out at line
+    PureStoragePlugin.pm:1352 (discover_targets). The same probe is
+    applied to the secondary login site in alloc_image() that
+    re-establishes sessions for state/cloudinit volumes. If no portal
+    is reachable, activate_storage() now fails fast with an actionable
+    message pointing at network/zoning checks and the --nodes option.
+
+  * New storage option pure-portal-probe-timeout (integer, 0..30,
+    default 2). Set to 0 to disable the pre-check (1.1.8 behaviour) on
+    networks where TCP setup latency exceeds 30s but iSCSI itself
+    converges; raise on high-latency or congested storage networks.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Tue, 05 May 2026 00:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.8-1) stable; urgency=medium
+
+  * [MEDIUM] _cleanup_orphaned_devices() now untracks WWIDs only after
+    verifying the local multipath device is gone. Previously, the
+    function unconditionally called _untrack_wwid() after
+    cleanup_lun_devices(), even when cleanup failed. Because Phase 1
+    cannot re-import a WWID whose volume has been deleted from the
+    array, a single transient cleanup failure (kpartx holder,
+    multipathd glitch, dmsetup busy) silently leaked a stale device
+    that no future status() poll could find. The fix mirrors the
+    conditional-untrack pattern free_image() has used since 1.1.x:
+    if get_multipath_device($wwid) still returns a path after cleanup,
+    keep the WWID tracked so the next pass retries; only untrack when
+    verifiably gone.
+
+  * [LOW] glob("/dev/disk/by-id/...") calls now wrapped in a 5-second
+    alarm timeout in Multipath::get_device_by_wwid,
+    ISCSI::wait_for_device, and ISCSI::get_device_by_serial. The -b
+    stat that follows the glob in get_device_by_wwid resolves the
+    symlink to /dev/sd* or /dev/dm-*; on a multipath device with all
+    paths down and queue_if_no_path still active, this stat hits the
+    same kernel block-layer wait that blocks vgs and lvs. Pattern
+    matches existing _run_cmd / sysfs_read_with_timeout style.
+
+  * Sibling-pattern audit driven by the author's related
+    jt-pve-storage-netapp plugin v0.2.9 fixes. Three of the NetApp
+    issues did not have a counterpart here: Pure uses
+    volume names directly as identifiers (no lookup-after-create
+    eventual consistency window); alloc_image was already a bounded
+    retry loop matching clone_image; multipath -F is already a
+    forbidden pattern.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 26 Apr 2026 12:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.7-1) stable; urgency=high
+
+  * [CRITICAL] is_device_in_use() treated ALL holders as "device in
+    use", including bare kpartx partition devices that the Linux kernel
+    creates automatically on any multipath LUN with a GPT/MBR partition
+    table (i.e. every single VM with an OS installed). This made it
+    impossible to delete any VM disk on Pure storage when the host
+    kernel had auto-scanned the LUN content. The fix distinguishes
+    bare kpartx partitions from real holders (LVM, dm-crypt, dm-raid,
+    bcache). A partition is SAFE to ignore if: its dm-name matches a
+    known kpartx pattern (<wwid>-part1, <wwid>p1, <wwid>1, mpath0-part1,
+    sdf1), it has NO sub-holders, it is NOT mounted (/proc/mounts),
+    and it is NOT used as swap (/proc/swaps). If ANY holder is NOT a
+    partition, or any partition has sub-holders/mount/swap, deletion is
+    still blocked (data-loss protection preserved).
+
+  * [HIGH] cleanup_lun_devices() now runs `kpartx -d <device>` before
+    attempting to remove the multipath map. Without this, partition
+    holder devices prevent `multipathd remove map` and `multipath -f`
+    from succeeding, because partition dm devices are holders of the
+    multipath map.
+
+  * [MEDIUM] get_device_usage_details() no longer misparses kpartx
+    partition dm-names as LVM VG names. The dm-name
+    `3624a9370...-part1` was being parsed as VG `3624a9370...` LV
+    `part1`. Partition patterns are now checked first and excluded from
+    VG name parsing.
+
+  * [LOW] Orphan warning cooldown: Phase 3 untracked-device warnings
+    in _cleanup_orphaned_devices now use a per-WWID flag file in
+    /var/run/pve-storage-purestorage/ (tmpfs, cleared on reboot) to
+    limit warnings to once per hour per WWID. Previously, pvestatd's
+    10-second status() polling would fire the same warning every 10
+    seconds, flooding the journal with identical messages for any
+    untracked Pure multipath device.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 11 Apr 2026 12:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.6-1) stable; urgency=high
+
+  * [CRITICAL] postinst now reloads ALL three PVE services that load
+    storage plugin code: pvedaemon, pvestatd, pveproxy. Previous
+    versions did not reload ANY of them, meaning old bug-containing
+    code (e.g. the pre-1.1.5 rescan_scsi_hosts that writes to all
+    SCSI hosts) stayed in memory indefinitely until manual service
+    restart. pvestatd is particularly dangerous: it polls status()
+    every 10 seconds, and if the old code triggers D-state children
+    (e.g. on HPE smartpqi), the node accumulates unkillable D-state
+    processes until a hardware watchdog or manual reboot intervenes.
+    Changed from `systemctl restart` to `systemctl reload` (SIGHUP)
+    to avoid the stop-phase hang: if the old code created D-state
+    children, the stop phase blocks waiting for unkillable processes.
+    reload sends SIGHUP which makes PVE::Daemon re-exec() itself
+    with new code, bypassing the stop phase entirely.
+
+  * [HIGH] postinst now checks /etc/lvm/lvm.conf for `global_filter`
+    and warns if absent. On PVE nodes upgraded from 7/8 to 9, the old
+    lvm.conf lacks the filter that excludes device-mapper and
+    multipath devices from LVM scanning. Without it, the host LVM
+    auto-activates VGs found inside guest VM disks (which are raw
+    LUNs visible as multipath devices), creating holder dm devices
+    on top of the multipath device. These holders cause
+    is_device_in_use() to correctly block free_image from deleting
+    the volume. The warning includes the recommended filter setting
+    and the exact commands to deactivate already-activated guest VGs.
+
+  * [HIGH] free_image() now provides detailed usage information when
+    is_device_in_use() blocks deletion. New get_device_usage_details()
+    helper in Multipath.pm enumerates holder device names, dm-names,
+    detects LVM VG names from dm-name conventions, and explains the
+    root cause (host LVM auto-activation on upgraded PVE nodes) with
+    exact remediation: `vgchange -an <vg>` to deactivate immediately,
+    `global_filter` setting for long-term fix.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 10 Apr 2026 14:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.5-1) stable; urgency=high
+
+  * [CRITICAL] rescan_scsi_hosts() iterated every entry in
+    /sys/class/scsi_host/, including non-iSCSI hosts (HPE Smart Array
+    P408i-a and similar HBAs). Writing "- - -" to those scan files
+    triggered driver-side full target rescans which entered D-state for
+    600+ seconds inside the smartpqi / megaraid_sas / mpt3sas drivers.
+    sysfs_write_with_timeout() protects the parent process but does
+    NOT protect the kernel: D-state children cannot be reaped by
+    SIGKILL and they hold kernel scan locks until the driver finishes,
+    causing cascading config-lock timeouts on every subsequent VM
+    operation, and pvedaemon restart hangs requiring force-reboot. The
+    bug was latent in every release prior to 1.1.5 and would have
+    surfaced as soon as a customer deployed on HPE ProLiant, Dell PERC,
+    Lenovo ThinkSystem, or any server with a SAS HBA / hardware RAID
+    controller. Fixed by sourcing the host list from
+    /sys/class/iscsi_host/ instead of /sys/class/scsi_host/. The
+    scsi_transport_iscsi layer registers every iSCSI host there via
+    iscsi_host_alloc(), regardless of underlying driver (iscsi_tcp,
+    iser, bnx2i, qla4xxx, qedi, be2iscsi, cxgb3i, cxgb4i, ...). Non-
+    iSCSI drivers categorically never register there, so iterating
+    that class is both exhaustive and safe. Verified on a real host
+    with mixed scsi_host (host0-3 non-iSCSI + host4-7 iSCSI): strace
+    confirms writes only happen on host4-7 after the fix.
+
+  * [HIGH] FC.pm rescan_fc_hosts() used bare open() to write
+    /sys/class/fc_host/<host>/issue_lip and /sys/class/scsi_host/<host>/scan,
+    which can hang the parent process if the FC HBA is wedged. The
+    SCSI scan loop already filtered to FC hosts only (via
+    get_fc_hosts() — no Bug 1 risk there), but the bare open() means
+    the parent worker stalls instead of moving on after a timeout.
+    Fixed by routing both writes through sysfs_write_with_timeout(),
+    matching the protection already applied in Multipath.pm.
+
+  * [LOW operator UX] Add translate_pure_error() helper in API.pm and
+    apply it to alloc_image / clone_image / volume_snapshot die sites.
+    Pure FlashArray's raw API errors tell operators WHAT happened
+    (e.g. "Maximum number of volumes reached") but not WHY (what's
+    the cap?) or HOW to recover (delete things, wait for eradication,
+    raise the limit). The translator pattern-matches Pure's known
+    limit errors (volume count, snapshot count, host connection
+    count, protection group count, capacity exhaustion, API rate
+    limit) and prepends a human summary while preserving the
+    original error. Unknown errors pass through unchanged.
+
+  * Six more bugs found by an internal deep audit after 1.1.3, applying
+    the "sibling pattern" rule (every bug fix triggers a codebase-wide
+    search for the same anti-pattern) to every cleanup path, /sys/block
+    access, and API version-divergence point.
+
+  * [HIGH] volume_get_connections() did not normalise the API 1.x
+    response shape. Pure REST 1.x returns
+    `[{ host => "h1", lun => 1, name => "myvol" }, ...]` where the
+    `name` field is the VOLUME name, not the host name. The 2.x branch
+    was already normalised to `{ name => "<host>" }`. Every caller
+    (free_image, _disconnect_from_all_hosts, _backup_vm_config,
+    _cleanup_orphaned_temp_clones, _cleanup_temp_snap_clone,
+    alloc_image orphan-cleanup) iterated `$conn->{name}`, which on
+    1.x returned the VOLUME name. The subsequent
+    `volume_disconnect_host($vol, $conn->{name})` therefore passed the
+    volume name as the host argument, which silently fails inside an
+    eval. **Result on API 1.x: every disconnect call was a no-op,
+    leaving orphaned host connections forever, and every volume_delete
+    cleanup hit the Bug E ghost-LUN failure mode.** Fix: normalise the
+    API 1.x branch in volume_get_connections() to the same
+    `[{ name => "<host>" }]` shape, with fallback to `host_name` and
+    `name` fields.
+
+  * [HIGH] path() temp clone connect-failure had two bugs in one
+    sequence: (a) Bug E pattern — `volume_delete($temp)` called
+    without disconnect first, (b) `$@` clobber — the inner cleanup
+    eval reset `$@` so the subsequent `die "...$@"` showed the
+    cleanup error instead of the original connect error. Fixed both:
+    save `$connect_err = $@` first, then call
+    `_disconnect_from_all_hosts` before `volume_delete`, then die with
+    the saved error.
+
+  * [HIGH] _backup_vm_config() connect-failure had the same Bug E
+    pattern: volume_connect_host fails -> volume_delete without
+    disconnect -> orphaned host connection on the array. Fixed by
+    calling _disconnect_from_all_hosts before volume_delete in both
+    the connect-fail branch and the "Cannot get WWID" branch.
+
+  * [MEDIUM] clone_image() was missing disk-id collision retry —
+    same TOCTOU window as alloc_image had before 1.1.0. Two
+    concurrent `qm clone` invocations on the same source VM could
+    both pick the same disk id from _find_free_diskid and one would
+    fail with "already exists". Fixed with a 5-attempt retry loop
+    around the volume_clone call: on collision, refetch the next
+    free id and retry.
+
+  * [LOW] rescan_scsi_device() used basename() instead of
+    _resolve_block_device_name(). Current callers always pass /dev/sdX
+    so the bug is latent, but as an exported helper a future caller
+    passing /dev/mapper/<wwid> would silently fail. Fixed
+    defensively for consistency with the rest of the Multipath module
+    after the 1.1.2 Bug C/D fixes.
+
+  * [LOW] _backup_vm_config() used bare system() for mkfs.ext4 / mount
+    / umount. The 1MB volume is freshly allocated so the device is
+    healthy in normal operation, but a wedged multipath device would
+    cause mount to enter D state. Replaced all four with
+    PVE::Tools::run_command(..., timeout => 30) and added an explicit
+    sync before umount. The error-path umount also gets a 30s timeout.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 09 Apr 2026 20:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.3-1) stable; urgency=high
+
+  * Three more bugs found by a proactive sibling-pattern audit after
+    the 1.1.2 release. All three follow the rule "when you fix a bug
+    pattern, the same pattern often exists elsewhere you haven't
+    checked." Pure plugin had every one of them.
+
+  * [HIGH] Bug E: alloc_image() and clone_image() cleanup-on-failure
+    paths previously called volume_delete() without first disconnecting
+    the volume from the cluster hosts that _connect_to_all_hosts() may
+    have already partially connected to. _connect_to_all_hosts iterates
+    every cluster host in per-node mode; if it succeeds on hosts 1..K
+    and fails on K+1, the volume is still mapped to K hosts when the
+    cleanup runs. Pure (unlike ONTAP) will physically destroy a still-
+    connected volume, but the orphaned host connection records cause
+    iSCSI rescan on other cluster nodes to discover ghost LUNs that
+    become stale multipath devices. Combined with `no_path_retry queue`
+    in /etc/multipath.conf defaults — same root cause as the production
+    hang incident that drove v1.1.0. Fixed by adding a
+    _disconnect_from_all_hosts() helper that queries the array for the
+    current connection list and disconnects each, and calling it BEFORE
+    volume_delete in every cleanup path. The same fix is applied to
+    four sites: alloc_image() main connect-fail cleanup, alloc_image()
+    state/cloudinit "Cannot get WWID" cleanup, alloc_image() state/
+    cloudinit "device did not appear" cleanup, and clone_image()
+    connect-fail cleanup.
+
+  * [LOW] Bug F: volume_snapshot() now flushes host-side dirty buffers
+    before calling snapshot_create on the array, mirroring what
+    volume_snapshot_rollback() already did before the rollback. For
+    running VMs the qemu freeze handles consistency at the filesystem
+    layer, but for offline volumes or external script callers (e.g.
+    backup tools writing directly to a stopped-VM volume) the dirty
+    page cache could be missing from the snapshot, producing a
+    filesystem-inconsistent capture. Guarded by is_device_in_use() so
+    we don't block on a busy live migration.
+
+  * [LOW] Bug G + dead export audit: removed four exported but
+    zero-caller functions from Multipath.pm — multipath_add,
+    multipath_remove, get_multipath_wwid, get_scsi_devices_by_serial.
+    get_multipath_wwid had a latent /dev/mapper symlink bug like the
+    one fixed in is_device_in_use in 1.1.2; rather than fix dead code
+    (and risk a future contributor seeing it in @EXPORT_OK and calling
+    it), the function is removed entirely. The other three were also
+    unused.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 09 Apr 2026 19:30:00 +0800
+
+jt-pve-storage-purestorage (1.1.2-1) stable; urgency=high
+
+  * CRITICAL: four bugs ported from jt-pve-storage-netapp v0.2.x post-release
+    forensics. The Pure plugin had the same broken patterns as the NetApp
+    plugin discovered after a real customer resize incident on 2026-04-09.
+    All four are CVE-class for production environments.
+
+  * [CRITICAL — DATA LOSS] is_device_in_use() previously called
+    basename($device) and looked at /sys/block/<basename>/holders. For a
+    multipath device path /dev/mapper/3624a9370... that resolved to
+    /sys/block/3624a9370.../holders, which DOES NOT EXIST — the holders
+    directory lives under /sys/block/dm-N/. The function therefore
+    returned 0 (not in use) for any multipath device, regardless of
+    whether an LVM volume group, dm-crypt container, or any other holder
+    sat on top of it. free_image() called this check before deleting,
+    saw "not in use", and proceeded to destroy the volume — taking the
+    customer's LVM data with it. Any production environment that uses
+    LVM (or dm-crypt / dm-raid / bcache / ...) on top of Pure-managed
+    volumes was at risk of silent data loss. Fixed by adding a
+    _resolve_block_device_name() helper that resolves /dev/mapper/<wwid>
+    symlinks to the underlying dm-N name before any /sys/block/ access.
+
+  * [HIGH] get_multipath_slaves() had the same broken pattern. It always
+    returned an empty list for /dev/mapper/<wwid> paths, which meant
+    free_image()'s post-cleanup SCSI slave removal silently skipped every
+    device, leaking SCSI residue across operations. Fixed via the same
+    _resolve_block_device_name() helper.
+
+  * [HIGH] volume_resize() called rescan_scsi_hosts() (host scan, used
+    to discover NEW devices) instead of per-device rescan (used to
+    re-read attributes of EXISTING devices). After a Pure-side resize the
+    array showed the new size, but the multipath device kept reporting
+    the old size, and QEMU's block_resize then failed with "Cannot grow
+    device files" on a running VM. Fixed to do per-slave
+    `echo 1 > /sys/block/sdX/device/rescan` followed by
+    `multipathd resize map <name>` (a new helper) to refresh the size of
+    the device-mapper layer above.
+
+  * [HIGH] volume_snapshot_rollback() had the same wrong rescan as Bug A,
+    plus a second issue: even after the underlying SCSI paths were
+    refreshed, the kernel buffer cache could still hold pages from the
+    post-snapshot content. Subsequent reads from the rolled-back volume
+    could return stale data. Fixed to (1) per-slave rescan, (2)
+    multipath_resize_map, AND (3) `blockdev --flushbufs <device>` to
+    invalidate the kernel buffer cache.
+
+  * Add multipath_resize_map() helper in Multipath.pm for the resize/
+    rollback fixes. Wrapped in @EXPORT_OK for use from the main plugin.
+
+  * Add _resolve_block_device_name() helper in Multipath.pm. Use it from
+    is_device_in_use() and get_multipath_slaves() — every other function
+    in the codebase that touches /sys/block/ should also be reviewed
+    against this pattern, and a checklist test added in TESTING.md.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 09 Apr 2026 19:00:00 +0800
+
+jt-pve-storage-purestorage (1.1.1-1) stable; urgency=high
+
+  * Multipath / anti-hang follow-ups discovered while reviewing v1.1.0
+    against the PVE storage plugin development guide:
+    - Pure multipath device block now sets `no_path_retry 30` and
+      `fast_io_fail_tmo 5` explicitly. Without these, the device inherited
+      the defaults section value, which on many sites is `queue` (the
+      NetApp HA recommendation). Combined with a stale device this caused
+      sync/blockdev/multipath -f to enter D state — exactly what we were
+      trying to prevent.
+    - _ensure_multipath_config now writes a version marker into the
+      generated /etc/multipath/conf.d/pure-storage.conf and rewrites
+      plugin-managed files when the version changes. Files without the
+      marker are still left untouched (operator-edited / third-party).
+      This means a 1.0.x → 1.1.x upgrade actually picks up the new
+      no_path_retry safety setting instead of silently keeping the old
+      file forever.
+    - Replace bare system('fuser', ...) in is_device_in_use with a
+      timeout-bounded _run_cmd. fuser opens the device path; on a wedged
+      multipath device with queue_if_no_path it can itself enter D state.
+    - Replace bare system('sync')/system('blockdev', ...) in volume_resize
+      with timeout-bounded PVE::Tools::run_command.
+    - Add _udev_refresh() helper that calls `udevadm trigger` and
+      `udevadm settle` via PVE::Tools::run_command with a 10s timeout,
+      and replace all bare system('udevadm ...') calls in the plugin and
+      the Multipath module.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 09 Apr 2026 18:30:00 +0800
+
+jt-pve-storage-purestorage (1.1.0-1) stable; urgency=high
+
+  * Major reliability release: port the v0.2.x lessons-learned fixes from
+    the related project jt-pve-storage-netapp which were validated
+    by a real production incident where stale multipath devices combined
+    with `queue_if_no_path` put PVE daemons into uninterruptible sleep
+    requiring a node reboot.
+
+  * Anti-hang protections (Section 1):
+    - Add sysfs_write_with_timeout / sysfs_read_with_timeout helpers in
+      Multipath.pm. All direct writes to /sys/class/scsi_host/*/scan,
+      /sys/class/block/*/device/{delete,rescan} and reads from
+      /proc/mounts and /sys/.../wwid now go through forked timeout-bounded
+      children so an unresponsive HBA cannot put the parent process into
+      D state.
+    - Replace bare system('sync') / system('blockdev') in cleanup paths
+      with timeout-bounded _run_cmd calls.
+    - cleanup_lun_devices now disables queue_if_no_path with multipathd
+      and issues `dmsetup message ... fail_if_no_path` BEFORE attempting
+      sync / blockdev / multipath -f. Otherwise queueing causes those
+      operations to hang forever on a dead device.
+    - multipath_flush now refuses to run without a device argument
+      (it used to fall through to `multipath -F` which flushes ALL maps
+      system-wide and can disconnect customer-managed non-Pure storage).
+    - multipath_flush has a built-in dmsetup --force fallback if
+      `multipath -f <wwid>` fails or times out.
+
+  * Cluster safety (Section 2):
+    - Add is_portal_logged_in() in ISCSI.pm and use it from login_target
+      and activate_storage. Pure controllers share one IQN across multiple
+      LIFs; checking by target only made the second-and-later portal
+      logins silently no-op, leaving the host with one path instead of N.
+    - login_target now sets node.session.timeo.replacement_timeout to 120
+      so transient outages and Pure controller failovers recover cleanly
+      regardless of iscsid.conf state.
+    - activate_storage skips iscsiadm discovery+login for already-connected
+      portals (saves up to 30s discovery latency on every status poll).
+
+  * free_image operation order (Section 3):
+    - Capture multipath slave device list BEFORE unmap (after unmap the
+      /sys/block/.../slaves directory disappears).
+    - Disconnect from ALL hosts FIRST, then clean local devices, then
+      delete the volume on the array. The previous order allowed an
+      in-flight iSCSI rescan from another node to re-import the LUN and
+      recreate the multipath device behind us.
+    - After cleanup_lun_devices, also remove residual SCSI slave devices
+      using the captured list and reload multipathd to settle state.
+
+  * API resilience (Section 4):
+    - Default UA timeout reduced from 30s to 15s and retry count from 3
+      to 2 (worst case ~34s instead of ~102s).
+    - _request now accepts a per-call timeout option that overrides the
+      UA timeout for that single call and is restored on every exit path.
+    - volume_delete uses a 60s per-call timeout because Pure volume
+      destroy can be slow when the volume has many snapshots.
+    - 401 retry now also re-applies any per-call timeout override after
+      _create_session may have rebuilt the LWP::UserAgent.
+    - status() now fail-fasts on API errors (returns inactive zeros)
+      instead of letting the polling thread block.
+    - status() now runs orphan/temp-clone cleanup in a double-forked
+      grandchild that gets reparented to init, so cleanup never blocks
+      the storage daemon.
+
+  * Cluster residual / orphan cleanup (Section 5):
+    - Add WWID tracking infrastructure: per-storage state file at
+      /var/lib/pve-storage-purestorage/<storeid>-wwids.json with
+      file-locking via /var/run/pve-storage-purestorage/<storeid>-wwids.lock.
+      Lock acquisition uses non-blocking flock with bounded retries
+      (10s deadline) to avoid blocking forever on a stuck worker.
+    - path() tracks the WWID after successfully resolving a real device.
+    - free_image conditionally untracks the WWID only after confirming
+      the local multipath device is gone — if cleanup left a stale
+      device, the WWID stays tracked so the next orphan cleanup pass
+      can retry.
+    - _cleanup_orphaned_devices runs in three phases: (1) auto-import
+      every current Pure-managed LUN WWID from the array (so all cluster
+      nodes converge on the same alive set), (2) for each tracked WWID
+      not on the array, clean its local stale device if any, (3) warn
+      about Pure multipath devices not in tracking and not on the array
+      (do NOT auto-clean — could be customer-managed).
+
+  * postinst (Section 6):
+    - Print a "CRITICAL Multipath Safety Rules" banner explaining
+      `multipath -F` vs `multipath -f`, restart vs reload, and the
+      recommended Pure-friendly multipath.conf settings.
+    - Detect dangerous /etc/multipath.conf settings (no_path_retry queue,
+      queue_if_no_path, dev_loss_tmo infinity) and warn without
+      auto-modifying the customer's config.
+    - Detect existing stale Pure multipath devices on upgrade and list
+      the exact manual cleanup commands.
+    - Pre-create /var/lib/pve-storage-purestorage and
+      /var/run/pve-storage-purestorage with mode 0700.
+
+  * Code quality (Section 7):
+    - alloc_image now retries on disk-id collision (TOCTOU between
+      _find_free_diskid and volume_create when two workers race).
+    - path() now has a proper retry loop bounded by pure-device-timeout
+      (default 30s) instead of a one-shot rescan.
+    - list_images template-detection fallback now has a 10s wall-clock
+      deadline so a slow array does not cascade timeouts across hundreds
+      of volumes.
+
+  * Documentation (Section 8):
+    - README.md and README_zh-TW.md gain prominent "CRITICAL: Multipath
+      Safety Rules" and "Upgrade SOP" sections near the top.
+    - New docs/TESTING.md and docs/TESTING_zh-TW.md: Pure-Storage-specific
+      test plan covering basic connectivity, VM lifecycle, hot-plug,
+      snapshot/clone, cluster orphan cleanup, mixed-environment safety,
+      failure injection (controller failover, blocked LIFs, blocked API,
+      queue_if_no_path + stale device hang), API 1.x and 2.x coverage,
+      naming edge cases, pod (ActiveCluster) mode, per-node vs shared
+      host mode, performance/sanity, and upgrade path.
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 09 Apr 2026 18:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.49-1) stable; urgency=medium
+
+  * Second-round audit fixes for reliability and correctness:
+    - Fix volume_snapshot_list double-encoding pve-snap- prefix, which
+      caused snapshot_delete to fail on re-encoded names
+    - Fix list_images passing pod-prefixed name to pure_to_pve_volname,
+      causing decode failure for cloudinit/state volumes in pod setups
+    - Fix parse_volname returning undef instead of die (violates PVE
+      storage plugin API contract, causes silent failures)
+    - Fix pve-pure-config-get LXC detection operator precedence that
+      misidentified QEMU VMs with arch: line as LXC containers
+    - Fix pve-pure-config-get umount calls to use list-form system()
+      to prevent shell injection
+    - Fix _backup_vm_config missing cleanup_lun_devices on error paths,
+      leaving stale SCSI devices after failed backup
+    - Fix API cache fork-safety with PID check to prevent stale session
+      tokens in forked PVE daemon workers
+    - Fix deactivate_storage to check is_device_in_use before disconnect,
+      preventing cleanup of volumes still in use by other VMs
+    - Fix alloc_image orphan cleanup missing skip_eradicate, which could
+      permanently eradicate volumes on allocation retry
+    - Replace ad-hoc multipathd reconfigure shell calls with
+      multipath_reload() for consistency
+    - Fix SG_INVERT typo to SG_INQ in Multipath.pm
+    - Fix config volume name length check in encode_config_volume_name
+      to truncate snapname when total exceeds 63 chars
+    - Move IO::Select imports to file-level in ISCSI.pm and Multipath.pm
+    - Fix pve-pure-config-get restore mode cleanup on config write error
+      (umount and disconnect now always run)
+    - Remove dead code in pve-pure-config-get restore mode
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 27 Feb 2026 17:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.48-1) stable; urgency=medium
+
+  * Security and reliability audit fixes across all modules:
+    - Fix path() returning /dev/null or synthetic path on API failure,
+      now properly dies to prevent silent data corruption (CRITICAL)
+    - Fix get_multipath_device using substring WWID match that could
+      return wrong device, now uses exact match only (HIGH)
+    - Fix get_device_by_wwid glob patterns to use exact suffix match
+      instead of substring to prevent device collision (HIGH)
+    - Fix ISCSI _find_multipath_device and wait_for_device to use
+      exact serial suffix matching instead of substring (HIGH)
+    - Fix _cleanup_orphaned_temp_clones ISO 8601 timestamp parsing
+      for API 2.x (was comparing string to epoch, never cleaning up)
+    - Fix clone_image disk ID allocation race by using _find_free_diskid
+      instead of manual max+1 logic
+    - Fix _find_free_diskid to strip pod prefix before decode_volume_name
+    - Fix pve-pure-config-get restore mode: boolean logic on line 94
+      was always dying in restore mode
+    - Fix pve-pure-config-get san_storage to use sanitize_for_pure
+    - Fix shell injection in is_device_in_use fuser call and
+      _backup_vm_config system calls (use list form)
+    - Fix _backup_vm_config mount cleanup on error path
+    - Add in-use guard to cleanup_lun_devices to prevent cleaning
+      devices that are still mounted or held open
+    - Fix _run_cmd in ISCSI.pm and Multipath.pm to use IO::Select
+      for simultaneous stdout/stderr reading (prevents deadlock)
+    - Fix _run_cmd timeout to kill child process (prevents orphans)
+    - Fix API volume_get/snapshot_get/host_get to distinguish 404
+      (not found) from transient errors instead of swallowing all
+    - Fix API host_add_initiator null check on host_get result
+    - Fix API _request to not retry non-idempotent POST on 5xx
+    - Fix API _request JSON parse error handling on 200 response
+    - Fix alloc_image and clone_image cleanup to use skip_eradicate
+      and preserve original error message ($@ clobbering)
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 27 Feb 2026 15:54:00 +0800
+
+jt-pve-storage-purestorage (1.0.47-1) stable; urgency=medium
+
+  * Fix Fibre Channel SAN critical and high-severity issues:
+    - Fix API 2.x host_add_initiator: merge new WWN with existing initiators
+      instead of replacing all (CRITICAL - was clobbering existing WWNs)
+    - Fix API 2.x host_remove_initiator: remove only targeted initiator
+      instead of clearing all (CRITICAL - was removing all initiators)
+    - Fix _backup_vm_config: pass protocol-specific rescan callbacks
+      (fc_rescan/iscsi_rescan) to wait_for_multipath_device
+    - Fix activate_storage: add FC fabric connectivity verification
+      with warning when no FC target ports detected
+    - Fix volume_snapshot_rollback: wrap FC/iSCSI rescan calls in eval
+      to prevent rescan failures from aborting rollback
+    - Fix alloc_image: add FC diagnostic info (online HBA ports,
+      visible targets) in device discovery error messages
+    - Fix deactivate_storage: add FC-specific logging with volume count
+    - Fix rescan_fc_hosts: only scan FC-related SCSI hosts (not all),
+      add error handling on LIP issue
+    - Fix get_fc_wwpns_raw: read directly from sysfs without
+      double format-then-parse conversion
+    - Fix host_create: add uri_escape for host name in API 2.x
+    - Add get_fc_targets to FC.pm exports and plugin imports
+    - Add missing multipath_flush import in plugin
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Wed, 12 Feb 2026 02:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.46-1) stable; urgency=medium
+
+  * Add disaster recovery feature to pve-pure-config-get:
+    - New -r/--restore option for full VM restore
+    - Search and display destroyed volumes in restore mode
+    - Automatically recover destroyed config and disk volumes
+    - Place config file in correct PVE location (/etc/pve/qemu-server or lxc)
+    - Connect recovered disk volumes to host
+    - Safety check: refuses to overwrite existing VM config
+  * Add API functions: volume_list_destroyed(), volume_recover()
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sun, 26 Jan 2026 20:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.45-1) stable; urgency=medium
+
+  * pve-pure-config-get: remove config content display, add restore hint
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sun, 26 Jan 2026 19:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.44-1) stable; urgency=medium
+
+  * Improve pve-pure-config-get list output formatting with dynamic column widths
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sun, 26 Jan 2026 19:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.43-1) stable; urgency=medium
+
+  * Add -n/--snap option to pve-pure-config-get for directly specifying
+    which snapshot's config to retrieve (skip interactive selection)
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sun, 26 Jan 2026 18:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.42-1) stable; urgency=medium
+
+  * Fix pve-pure-config-get: include pod prefix in search pattern when
+    pod is configured, and fix volume_list API call to use positional parameter
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sun, 26 Jan 2026 18:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.41-1) stable; urgency=medium
+
+  * Fix pve-pure-config-get: handle "volume does not exist" as empty result
+    when no config backups found for VM
+  * Suppress "Filesystem too small for a journal" warning in config backup
+    by explicitly disabling journal for small 1MB volumes
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sun, 26 Jan 2026 17:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.39-1) stable; urgency=medium
+
+  * Fix pve-pure-config-get: use correct 'host' parameter for API connection
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sun, 26 Jan 2026 16:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.38-1) stable; urgency=medium
+
+  * Fix VM config backup: use correct multipath_reload() function name
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sun, 26 Jan 2026 16:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.37-1) stable; urgency=medium
+
+  * Add VM config backup feature:
+    - Automatically backup VM config file to Pure Storage when creating snapshots
+    - Each snapshot gets its own independent config backup volume
+    - Config stored in ext4-formatted 1MB volume with metadata
+    - Config volume naming: pve-{storage}-{vmid}-vmconf-{snapname}
+    - Config volumes are automatically cleaned up when:
+      - Snapshot is deleted (corresponding config volume deleted)
+      - VM is deleted (all config volumes for VM cleaned up)
+    - Config volumes hidden from PVE disk listing
+  * Add pve-pure-config-get utility:
+    - Command-line tool to retrieve VM config backups
+    - Lists available config backups for a VM
+    - Interactive selection and retrieval
+    - Automatically handles volume connection, mounting, and cleanup
+    - Saves config to /tmp (or specified directory)
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sun, 26 Jan 2026 14:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.36-1) stable; urgency=medium
+
+  * Fix volume/snapshot deletion to preserve recoverability:
+    - free_image now only destroys volumes, does NOT eradicate
+    - volume_snapshot_delete now only destroys snapshots, does NOT eradicate
+    - Deleted volumes/snapshots go to Pure Storage "Destroyed" state
+    - Allows recovery from Pure Storage UI if needed
+    - Pure Storage auto-eradicates based on eradication delay setting (default 24h)
+    - Cleanup operations (error recovery, temp clones) still eradicate immediately
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sun, 26 Jan 2026 12:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.35-1) stable; urgency=medium
+
+  * Fix Linked Clone to use proper PVE volume naming format:
+    - clone_image now returns "base-X-disk-N/vm-Y-disk-M" for template clones
+    - Added parse_volname support for linked clone format
+    - Added pve_volname_to_pure support for linked clone format
+    - parse_volname now returns proper basename/basevmid for linked clones
+    - Fixes linked clone not showing parent relationship in PVE
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 25 Jan 2026 02:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.34-1) stable; urgency=medium
+
+  * Document PVE Full Clone architecture limitation:
+    - PVE GUI "Full Clone" always uses alloc + data copy (PVE design)
+    - PVE does NOT call clone_image for Full Clone, bypasses storage plugin
+    - Our clone_image supports instant clone from volume, but PVE won't call it
+    - WORKAROUND: Use "Linked Clone" for instant cloning
+    - Linked Clone uses Pure Storage instant clone via clone_image
+    - After Linked Clone, delete source snapshot if independence is needed
+    - Added detailed comments in plugin source explaining this limitation
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 25 Jan 2026 02:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.33-1) stable; urgency=medium
+
+  * Fix slow list_images when no templates exist:
+    - Was falling back to individual API calls for each volume
+    - Now only falls back if batch query actually fails (not if empty)
+    - Significantly improves list performance
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 24 Jan 2026 18:40:00 +0800
+
+jt-pve-storage-purestorage (1.0.32-1) stable; urgency=medium
+
+  * Add clone_image support for direct volume clone:
+    - clone_image now supports cloning directly from volume (not just snapshots)
+    - Pure Storage supports instant clone from volume
+    - NOTE: PVE GUI Full Clone does NOT use this (see 1.0.34 notes)
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 24 Jan 2026 18:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.31-1) stable; urgency=medium
+
+  * Optimize pod prefix queries for better performance:
+    - Use pod.name filter to limit results when querying with pod prefix
+    - Avoids fetching all volumes/snapshots when using pods
+    - Significantly improves list/status speed for pod-based storage
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 24 Jan 2026 18:20:00 +0800
+
+jt-pve-storage-purestorage (1.0.30-1) stable; urgency=medium
+
+  * Fix volume_list API call based on official Pure Storage documentation:
+    - Use destroyed=false as query parameter (not in filter)
+    - Use filter=name='pattern*' for wildcard patterns (without ::)
+    - Pod prefix patterns (::) still filtered in Perl
+    - Fixes "Unable to parse query" error
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 24 Jan 2026 18:10:00 +0800
+
+jt-pve-storage-purestorage (1.0.29-1) stable; urgency=medium
+
+  * Fix API filter syntax for destroyed volumes:
+    - Change "not destroyed" to "destroyed=false" (correct Pure API syntax)
+    - Fixes "Syntax error in query" when listing volumes
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 24 Jan 2026 18:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.28-1) stable; urgency=medium
+
+  * Fix API filter syntax error with pod:: prefix:
+    - volume_list: Handle pod::pattern* with Perl-side filtering
+    - snapshot_list: Handle pod::pattern* with Perl-side filtering
+    - Fixes "Syntax error in query" when listing volumes with pod prefix
+  * Fix missing pod prefix in volume pattern queries:
+    - _find_free_diskid: Add pod prefix to pattern
+    - _cleanup_orphaned_temp_clones: Add pod prefix to pattern
+    - list_images template query: Add pod prefix to snapshot pattern
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 24 Jan 2026 17:56:00 +0800
+
+jt-pve-storage-purestorage (1.0.27-1) stable; urgency=medium
+
+  * Comprehensive udev trigger fix for all device operations:
+    - Add udev trigger to activate_storage (iSCSI and FC)
+    - Add udev trigger to path function (temp clone and quick rescan)
+    - Add udev trigger to volume_resize (online resize)
+    - Add udev trigger to volume_snapshot_rollback
+    - Ensures consistent device discovery across all operations
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Sat, 24 Jan 2026 17:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.26-1) stable; urgency=medium
+
+  * Fix device discovery for CT, VM clone, and all volume operations:
+    - Add udev trigger to wait_for_multipath_device (Multipath module)
+    - Add protocol-specific rescan callbacks (iSCSI/FC) to wait loop
+    - Update activate_volume to pass iSCSI/FC rescan callback
+    - Update path function temp clone handling with proper rescan
+    - Fixes CT creation, VM clone, and other operations that use activate_volume
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 20:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.25-1) stable; urgency=medium
+
+  * Add proper cleanup in deactivate_storage:
+    - Cleanup local multipath and SCSI devices for storage volumes
+    - Disconnect volumes from Pure Storage host
+    - Logout iSCSI sessions if no more volumes connected
+    - Flush unused multipath maps
+    - Add host_get_volumes API function
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 19:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.24-1) stable; urgency=medium
+
+  * Fix list_images showing destroyed volumes:
+    - Add "not destroyed" filter to volume_list API call
+    - Filter out destroyed volumes in API response (fallback)
+    - Destroyed but not eradicated volumes no longer appear in PVE
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 19:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.23-1) stable; urgency=medium
+
+  * Fix udev WWID cache issue causing device discovery failures:
+    - Add udevadm trigger after SCSI rescan to refresh stale WWIDs
+    - Fixes issue where new volume reusing LUN ID shows old WWID
+    - Root cause of "device did not appear" error for state volumes
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 18:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.22-1) stable; urgency=medium
+
+  * Add automatic multipath configuration for Pure Storage:
+    - Auto-detect and create multipath config if missing
+    - Use /etc/multipath/conf.d/ if available (non-invasive)
+    - Safely append to existing /etc/multipath.conf if needed
+    - Only adds Pure Storage device section, preserves other configs
+    - Called during activate_storage
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 18:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.21-1) stable; urgency=medium
+
+  * Improve RAM snapshot device discovery diagnostics:
+    - Add verbose logging during device wait loop (first 3 iterations)
+    - Verify iSCSI sessions exist before rescanning
+    - Auto re-establish iSCSI sessions if none found
+    - Add extra 1-second delay after iSCSI rescan for kernel processing
+    - Increase initial connection propagation delay to 3 seconds
+    - Add detailed debug commands in error message
+    - Show iSCSI session count in diagnostic output
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 17:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.20-1) stable; urgency=medium
+
+  * Fix orphaned state/cloudinit volume cleanup:
+    - Auto-detect and cleanup orphaned volumes from previous failed attempts
+    - Disconnect all host connections before deleting orphaned volume
+    - Provide clear error message if cleanup fails (manual deletion required)
+    - Fixes "Volume already exists" error when retrying RAM snapshot
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 16:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.19-1) stable; urgency=medium
+
+  * Fix RAM snapshot device discovery (improved):
+    - Add 2 second delay for Pure Storage to propagate connection
+    - Include iSCSI/FC session rescan in the wait loop (was missing!)
+    - Rescan protocol-specific + SCSI + multipath in every iteration
+    - Improve error message with WWID and troubleshooting commands
+    - The previous fix only did one iSCSI rescan before the wait loop
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 15:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.18-1) stable; urgency=medium
+
+  * Fix RAM snapshot device discovery:
+    - Add iSCSI/FC rescan after creating state/cloudinit volumes
+    - Wait for device to appear before returning from alloc_image
+    - Fix "Device did not appear" error when creating RAM snapshots
+    - Cleanup state volume if device discovery fails
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 14:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.17-1) stable; urgency=medium
+
+  * Fix RAM snapshot (Include RAM) support:
+    - Handle vm-{vmid}-state-{snapname} volume type in alloc_image
+    - Handle vm-{vmid}-cloudinit volume type in alloc_image
+    - Previously caused "Volume already exists" error when creating
+      snapshot with "Include RAM" option checked
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 13:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.16-1) stable; urgency=medium
+
+  * Comprehensive error handling improvements:
+    - Add existence checks for all snapshot operations
+    - Improve volume_snapshot_delete with dependency detection
+    - Add volume_snapshot_rollback validation and safety checks
+    - Improve clone_image with source validation and better error messages
+    - Add linked clone support validation (template vs snapshot)
+    - Improve create_base with in-use detection
+    - Add host/initiator conflict detection and helpful error messages
+    - Add detailed device discovery failure diagnostics
+    - Add capacity/quota error detection
+  * Migration support improvements:
+    - Add _connect_to_all_hosts() helper for cluster-wide volume access
+    - Volumes now connected to all cluster hosts on creation
+    - Support container (CT) storage with rootdir content type
+  * Code refactoring:
+    - Consolidate host connection logic into reusable helper
+    - Improve cleanup on partial operation failures
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 12:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.15-1) stable; urgency=medium
+
+  * FC support improvements:
+    - Use raw WWN format (no colons) for Pure Storage API compatibility
+    - Add normalize_wwn() for format-agnostic WWN comparison
+    - Add get_fc_wwpns_raw() for API-compatible WWPN retrieval
+    - Handle API 2.x 'wwns'/'iqns' and API 1.x 'wwnlist'/'iqnlist' formats
+    - Normalize WWN comparison when checking existing host initiators
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Fri, 24 Jan 2026 10:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.14-1) stable; urgency=medium
+
+  * Fix snapshot suffix: replace underscore and dot with dash
+  * Pure Storage snapshot suffix only allows alphanumeric and '-'
+  * Add detailed comments about naming restrictions
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 23:15:00 +0800
+
+jt-pve-storage-purestorage (1.0.12-1) stable; urgency=medium
+
+  * Fix pod prefix missing in all volume operations
+  * Fix deactivate_volume, path, volume_snapshot, volume_snapshot_delete
+  * Fix volume_snapshot_rollback, volume_snapshot_list, create_base
+  * Fix rename_volume, clone_image to use pod prefix
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 22:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.11-1) stable; urgency=medium
+
+  * Fix API 2.x volume size field: use 'provisioned' instead of 'size'
+  * Fix API 2.x used space: use 'space.total_physical' instead of 'volumes'
+  * Update list_images, volume_size_info, volume_resize for API 2.x
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 22:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.10-1) stable; urgency=medium
+
+  * Fix API 2.x wildcard queries: use filter parameter instead of names
+  * volume_list: filter=name='pattern*' for wildcard patterns
+  * snapshot_list: filter=name='pattern*' for wildcard patterns
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 21:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.9-1) stable; urgency=medium
+
+  * Fix API 2.x: names/source_names must be in query string, not body
+  * Fix volume_create: POST /volumes?names=volname
+  * Fix volume_clone: POST /volumes?names=volname with source in body
+  * Fix snapshot_create: POST /volume-snapshots?source_names=volname
+  * Fix volume_connect_host: POST /connections?host_names=x&volume_names=y
+  * Fix volume_connect_hgroup: POST /connections?host_group_names=x&volume_names=y
+  * URL-encode pod::volname format (:: becomes %3A%3A) in query strings
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 21:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.8-1) stable; urgency=medium
+
+  * Show pod quota limit as storage capacity when configured
+  * Add pod_get API function for pod information
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 20:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.7-1) stable; urgency=medium
+
+  * Add pure-pod option for ActiveCluster configurations
+  * Support pod-prefixed volume names (pod::volname format)
+  * Fix volume creation when File service is enabled
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 20:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.6-1) stable; urgency=medium
+
+  * Fix API 2.x host creation: use query parameter for names
+  * POST /hosts?names=hostname with iqns/wwns in body
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 19:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.5-1) stable; urgency=medium
+
+  * Fix API 2.x endpoints: arrays, ports, network-interfaces
+  * Handle API 2.x response format with {items: [...]}
+  * Fix capacity reporting for API 2.x nested space object
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 19:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.4-1) stable; urgency=medium
+
+  * Use API 2.x with POST /login endpoint for authentication
+  * Detect API version via /api/api_version endpoint
+  * Get x-auth-token from login response header
+  * Support API versions up to 2.42
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 18:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.3-1) stable; urgency=medium
+
+  * Implement two-stage authentication like kolesa-team plugin
+  * Use POST /auth/session with api-token to get x-auth-token
+  * Use x-auth-token for all subsequent API requests
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 13:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.2-1) stable; urgency=medium
+
+  * Fix Content-Type header issue on GET requests causing 401 errors
+  * Only set Content-Type for POST/PUT/PATCH requests
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 12:30:00 +0800
+
+jt-pve-storage-purestorage (1.0.1-1) stable; urgency=medium
+
+  * Fix API version detection for Pure Storage arrays without API 2.x
+  * Improve 401 authentication error diagnostics
+  * Handle Pure Storage API returning HTTP 200 with error body
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Thu, 23 Jan 2026 12:00:00 +0800
+
+jt-pve-storage-purestorage (1.0.0-1) stable; urgency=medium
+
+  * Initial release
+  * Support for Pure Storage FlashArray via iSCSI and FC
+  * Volume management: create, delete, resize
+  * Snapshot: create, delete, rollback
+  * Clone support via Pure Storage snapshots
+  * Template support
+  * Multipath I/O support
+  * Live migration support
+
+ -- Jason Cheng (Jason Tools) <jason@jason.tools>  Mon, 13 Jan 2026 00:00:00 +0800
