@@ -1,0 +1,114 @@
+name: Publish Releases
+
+# Creates (or refreshes) the GitHub Release for each version that has a
+# release-notes file, attaching the matching .deb from releases/.
+#
+# Why this exists: creating a release from a tag in the web UI pre-fills the
+# description with the tag's commit message, and pasting the real notes
+# underneath leaves both. Setting the body from a file is unambiguous and
+# repeatable, and it means the notes live under review in the repository
+# rather than only in the web UI.
+#
+# Runs when the notes or the packages change, on a version tag, and on demand.
+# The job is idempotent: an existing release has its body, title and asset
+# replaced; a version whose tag does not exist yet is skipped with a note, so
+# whichever of "push main" / "push tag" happens second completes the job.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'release-notes/**'
+      - 'releases/**'
+      - '.github/workflows/publish-releases.yml'
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Versions to publish, space separated (e.g. "1.1.30"), or "all"'
+        required: false
+        default: 'all'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-releases
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish releases
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Tags are needed to tell "release not created yet" from
+          # "tag does not exist", which are handled differently.
+          fetch-depth: 0
+
+      - name: Publish releases from release-notes/
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.versions || 'all' }}
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          versions=()
+          if [ "$REQUESTED" = "all" ] || [ -z "$REQUESTED" ]; then
+            for f in release-notes/release_notes_*.md; do
+              v="${f#release-notes/release_notes_}"
+              versions+=("${v%.md}")
+            done
+          else
+            read -r -a versions <<< "$REQUESTED"
+          fi
+
+          if [ ${#versions[@]} -eq 0 ]; then
+            echo "No release-notes files found - nothing to do."
+            exit 0
+          fi
+
+          # Oldest first, so the Releases page ends up in a sensible order.
+          mapfile -t versions < <(printf '%s\n' "${versions[@]}" | sort -V)
+
+          created=0; updated=0; skipped=0
+          for v in "${versions[@]}"; do
+            tag="${v}-1"
+            notes="release-notes/release_notes_${v}.md"
+            deb="releases/jt-pve-storage-purestorage_${v}-1_all.deb"
+
+            if [ ! -f "$notes" ]; then
+              echo "::warning::$v: no notes at $notes - skipped"
+              skipped=$((skipped+1)); continue
+            fi
+            if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              echo "::notice::$v: tag $tag does not exist yet - skipped"
+              skipped=$((skipped+1)); continue
+            fi
+
+            args=(--title "v${v}" --notes-file "$notes")
+            if [ -f "$deb" ]; then
+              args+=("$deb")
+            else
+              echo "::warning::$v: no package at $deb - publishing notes only"
+            fi
+
+            if gh release view "$tag" >/dev/null 2>&1; then
+              # Replace the body and title outright. This is what clears a
+              # description that was auto-filled from the commit message.
+              gh release edit "$tag" --title "v${v}" --notes-file "$notes"
+              if [ -f "$deb" ]; then
+                gh release upload "$tag" "$deb" --clobber
+              fi
+              echo "updated $tag"
+              updated=$((updated+1))
+            else
+              gh release create "$tag" "${args[@]}"
+              echo "created $tag"
+              created=$((created+1))
+            fi
+          done
+
+          echo "created=$created updated=$updated skipped=$skipped" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          echo "created=$created updated=$updated skipped=$skipped"
