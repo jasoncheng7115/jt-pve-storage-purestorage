@@ -146,7 +146,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.30 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.31 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +541,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.30-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.31-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +621,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.30-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.31-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1984,6 +1984,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.31 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-08-06</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Two storages could own the same Pure volumes:</strong> volume names are built from the storage id with characters Pure cannot use removed and <code>-</code> mapped to <code>_</code>, so <code>pure-prod</code>, <code>pure_prod</code> and <code>pure-p.rod</code> all produce the same names. That prefix is the only thing scoping ownership, so two colliding storages on one array shared a namespace &mdash; each listed the other's disks, and deleting through one could destroy a volume the other's guests were running on. Adding a colliding storage is now refused; updating one warns. Also warns when two node names, which are truncated to 20 characters, produce the same Pure host object.</span>
+            <span class="lang-zh"><strong>兩個 storage 可能擁有同一批 Pure Volume：</strong>Volume 名稱由 storage id 推導，過程中會移除 Pure 不接受的字元並把 <code>-</code> 換成 <code>_</code>，因此 <code>pure-prod</code>、<code>pure_prod</code>、<code>pure-p.rod</code> 會產生完全相同的名稱。而這個前綴是唯一界定歸屬的依據，所以同一台陣列上兩個互相碰撞的 storage 會共用一個命名空間&mdash;&mdash;彼此都會列出對方的磁碟，透過其中一個刪除可能銷毀另一個的 guest 正在使用的 Volume。現在新增會碰撞的 storage 會被拒絕，更新則發出警告。另外，當兩個節點名稱（會被截斷成 20 字元）產生相同的 Pure host 物件時也會警告。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.30 <span class="changelog-tag changelog-tag--fix">Fix</span></div>

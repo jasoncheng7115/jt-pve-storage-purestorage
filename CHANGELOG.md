@@ -8,6 +8,34 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.31] - 2026-08-06
+
+### Fixed
+- Two storages whose ids differ only by `-`, `_` or `.` owned the same Pure
+  volumes. Volume names are built from the storage id with characters Pure
+  cannot use removed and `-` mapped to `_`, so `pure-prod`, `pure_prod` and
+  `pure-p.rod` all produce `pve-pure_prod-<vmid>-disk<n>`. That prefix is the
+  only thing that scopes ownership: `list_images()`, the orphan reaper, the
+  temp-clone reaper and the config-volume cleanup all ask the array for
+  `pve-<prefix>-*` and treat every answer as their own. Two colliding storages
+  on one array therefore shared a namespace -- each listed the other's disks,
+  and deleting through one could destroy a volume the other's guests were
+  running on. Adding such a storage is now refused with a message naming the
+  existing storage; updating one only warns, so an existing pair stays
+  editable.
+
+### Added
+- A warning when another node in the cluster produces the same Pure host name.
+  Node names are truncated to 20 characters, so `virtualization-node-01` and
+  `virtualization-node-02` both become `pve-pve-virtualization-node-`: the
+  first node creates the host, the second adds its initiator to it, and the
+  array can no longer tell them apart. Every per-node ownership check is then
+  wrong, including the temp-clone reaper's. The plugin reports this rather
+  than renaming the host object, because the existing volume connections hang
+  off the current name and the array would reject the initiator as already in
+  use elsewhere. `pure-host-mode = shared` is excluded, where one shared host
+  object is intended.
+
 ## [1.1.30] - 2026-08-06
 
 ### Fixed

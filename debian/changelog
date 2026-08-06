@@ -1,3 +1,16 @@
+jt-pve-storage-purestorage (1.1.31-1) stable; urgency=medium
+
+  * Refuse a storage whose id produces the same Pure volume names as an
+    existing storage on the same array. Pure names drop characters they cannot
+    use and map '-' to '_', so 'pure-prod', 'pure_prod' and 'pure-p.rod' are
+    one namespace -- and that prefix is the only thing scoping ownership, so
+    each storage would list the other's disks as its own and could delete
+    them. Updates warn instead of failing, so an existing pair stays editable.
+  * Warn when another node in the cluster produces the same Pure host name.
+    Node names are truncated to 20 characters, so two nodes sharing a prefix
+    share one host object, which breaks every per-node ownership check.
+
+ -- Jason Cheng <jason@jason.tools>  Thu, 06 Aug 2026 21:16:32 +0800
 jt-pve-storage-purestorage (1.1.30-1) stable; urgency=medium
 
   * Request a filesystem freeze around container snapshots. PVE cgroup-freezes

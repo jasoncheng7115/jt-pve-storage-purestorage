@@ -8,6 +8,28 @@
 
 ---
 
+## [1.1.31] - 2026-08-06
+
+### 修正
+- 兩個只差在 `-`、`_`、`.` 的 storage id 會擁有同一批 Pure Volume。Volume 名稱
+  由 storage id 推導，過程中會移除 Pure 不接受的字元並把 `-` 換成 `_`，因此
+  `pure-prod`、`pure_prod`、`pure-p.rod` 都會產生
+  `pve-pure_prod-<vmid>-disk<n>`。而這個前綴是唯一界定歸屬的依據：
+  `list_images()`、殘留回收器、暫存複製回收器與設定 Volume 清理，全都是向陣列
+  查詢 `pve-<前綴>-*`，並把每一筆結果都當成自己的。因此同一台陣列上兩個互相
+  碰撞的 storage 會共用一個命名空間——彼此都會列出對方的磁碟，而透過其中一個
+  執行刪除，可能銷毀另一個的 guest 正在使用的 Volume。現在新增這樣的 storage
+  會被拒絕，並在訊息中指出既有的那個；更新則只警告，讓既有的碰撞組合仍可編輯。
+
+### 新增
+- 當叢集中其他節點會產生相同的 Pure host 名稱時發出警告。節點名稱會被截斷成
+  20 個字元，因此 `virtualization-node-01` 與 `virtualization-node-02` 都會變成
+  `pve-pve-virtualization-node-`：先啟用的節點建立該 host，後啟用的節點把自己的
+  initiator 加進去，陣列從此無法分辨兩者。所有以節點為單位的歸屬判斷都會出錯，
+  包含暫存複製回收器的判斷。外掛選擇回報而非自動改名，因為既有的 Volume 連線
+  掛在目前的名稱上，而陣列會以「該 initiator 已被其他 host 使用」拒絕。
+  `pure-host-mode = shared` 不在此列，該模式本來就是刻意共用一個 host 物件。
+
 ## [1.1.30] - 2026-08-06
 
 ### 修正

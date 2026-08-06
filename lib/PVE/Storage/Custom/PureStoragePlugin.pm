@@ -443,8 +443,73 @@ sub _resolve_credentials {
 # a key that is absent was not supplied. Any pre-existing file for this
 # storeid is a leftover from a storage of the same name that was removed, so
 # clearing it is correct here (same as PBSPlugin).
+# Refuse a storage whose name collides with an existing one on the same array.
+#
+# Every Pure object this plugin owns is named from the storeid put through
+# storeid_to_pure_prefix(), and that transform is NOT injective: it deletes
+# characters it cannot use (so a dot disappears) and then maps '-' to '_'.
+# PVE storage ids may contain all three, so these are distinct storages that
+# produce one prefix:
+#
+#     pure-prod   ->  pure_prod
+#     pure_prod   ->  pure_prod
+#     pure-p.rod  ->  pure_prod
+#
+# The prefix is the ONLY thing that scopes ownership -- list_images(), the
+# orphan reaper, the temp-clone reaper and the config-volume cleanup all ask
+# the array for "pve-<prefix>-*" and treat every answer as theirs. Two
+# colliding storages on the same array therefore share one namespace: each
+# lists the other's disks as its own, and deleting a volume through one can
+# destroy a volume the other's guests are running on.
+#
+# Making the transform injective is not an option -- it would rename every
+# volume that already exists. Refusing the collision at the moment it is
+# created costs nothing and is the only point where the operator can still
+# choose a different name.
+#
+# Scoped to the same portal and pod, because a different array or a different
+# pod is a different namespace. Two portals that happen to address the SAME
+# array (say vir0 and a controller address) would slip through; the message
+# names that case so the operator can recognise it.
+sub _assert_storeid_prefix_unique {
+    my ($storeid, $scfg) = @_;
+
+    my $cfg = eval { PVE::Storage::config() };
+    return unless $cfg && ref($cfg->{ids}) eq 'HASH';
+
+    my $ours   = eval { storeid_to_pure_prefix($storeid) };
+    return unless defined $ours && length $ours;
+    my $portal = $scfg->{'pure-portal'} // '';
+    my $pod    = $scfg->{'pure-pod'}    // '';
+
+    for my $other (sort keys %{ $cfg->{ids} }) {
+        next if $other eq $storeid;
+        my $o = $cfg->{ids}->{$other};
+        next unless ref($o) eq 'HASH' && ($o->{type} // '') eq 'purestorage';
+        next unless ($o->{'pure-portal'} // '') eq $portal;
+        next unless ($o->{'pure-pod'}    // '') eq $pod;
+
+        my $theirs = eval { storeid_to_pure_prefix($other) };
+        next unless defined $theirs && $theirs eq $ours;
+
+        die "Storage '$storeid' would use the same Pure volume names as the "
+          . "existing storage '$other' on array '$portal'"
+          . ($pod ? " (pod '$pod')" : "") . ".\n"
+          . "  Both names reduce to the prefix '$ours': Pure volume names "
+          . "drop characters they cannot use and map '-' to '_', so "
+          . "'$storeid' and '$other' are indistinguishable on the array.\n"
+          . "  Sharing a prefix means each storage lists the other's disks "
+          . "as its own and can delete them. Choose a storage id that "
+          . "differs by more than '-', '_' or '.'.\n";
+    }
+
+    return;
+}
+
 sub on_add_hook {
     my ($class, $storeid, $scfg, %param) = @_;
+
+    _assert_storeid_prefix_unique($storeid, $scfg);
 
     for my $p (['pure-api-token', 'pure-token'], ['pure-password', 'pure-pw']) {
         my ($opt, $kind) = @$p;
@@ -504,6 +569,14 @@ sub on_update_hook {
 # having dropped the old credential without having stored the new one.
 sub on_update_hook_full {
     my ($class, $storeid, $scfg, $update, $delete, $sensitive) = @_;
+
+    # Warn, do not die. An operator who already has a colliding pair (created
+    # before this check existed, or by changing pure-pod so that two storages
+    # met in one namespace) must still be able to edit the storage -- refusing
+    # here would lock them out of the very commands that fix it, including
+    # setting credentials.
+    eval { _assert_storeid_prefix_unique($storeid, $scfg); };
+    warn $@ if $@;
 
     for my $p (['pure-api-token', 'pure-token'], ['pure-password', 'pure-pw']) {
         my ($opt, $kind) = @$p;
@@ -1605,11 +1678,73 @@ sub _cached_iscsi_ports {
     return $ports;
 }
 
+# Warn when another node in this cluster produces the same Pure host name.
+#
+# encode_host_name() truncates the node name to 20 characters, so node names
+# that are longer and share a 20-character prefix land on ONE host object:
+#
+#     virtualization-node-01  ->  pve-pve-virtualization-node-
+#     virtualization-node-02  ->  pve-pve-virtualization-node-
+#
+# Whichever node registers first creates the host; the second finds it and
+# adds its own initiator to it. Both nodes then ARE that host as far as the
+# array is concerned, and every ownership decision that asks "is this volume
+# connected to a host other than mine?" answers wrongly -- including the
+# temp-clone reaper's check, which exists precisely to stop one node tearing
+# down another node's in-use clone.
+#
+# This only reports. Changing the host name would orphan the connections that
+# already exist under the old one, and the initiator would come back from the
+# array as "already in use by another host", so the rename has to be an
+# operator decision made during maintenance, not something an upgrade does
+# silently.
+sub _warn_host_name_collision {
+    my ($scfg, $host_name) = @_;
+
+    # In 'shared' mode every node deliberately uses one host object; there is
+    # nothing to tell apart and nothing to warn about.
+    return if ($scfg->{'pure-host-mode'} // 'per-node') eq 'shared';
+
+    my $nodes = eval { PVE::Cluster::get_nodelist() };
+    return unless ref($nodes) eq 'ARRAY' && @$nodes > 1;
+
+    my $me = eval { PVE::INotify::nodename() } // '';
+    my $cluster = $scfg->{'pure-cluster-name'} // 'pve';
+
+    my @clash = grep {
+        $_ ne $me && encode_host_name($cluster, $_) eq $host_name
+    } @$nodes;
+    return unless @clash;
+
+    my $flag = "/var/run/pve-storage-purestorage/hostname-clash-$host_name";
+    $flag =~ s/[^\w\/.\-]/_/g;
+    if (-e $flag && (time() - (stat($flag))[9] // 0) < 3600) {
+        return;
+    }
+    if (open(my $fh, '>', $flag)) { close($fh); }
+
+    warn "Pure host name '$host_name' is also produced by node(s) "
+       . join(', ', map { "'$_'" } @clash) . " in this cluster: node names "
+       . "are truncated to 20 characters for the array, and these share a "
+       . "prefix.\n"
+       . "  Those nodes share ONE host object on the array, so their "
+       . "initiators are pooled and this plugin cannot tell them apart. "
+       . "Disconnecting a volume on one node removes it from the other, and "
+       . "the temp-clone reaper's per-node ownership check does not hold.\n"
+       . "  Fixing it means giving the nodes names that differ within their "
+       . "first 20 characters. That is a maintenance operation; this plugin "
+       . "will not rename the host object on its own because the existing "
+       . "volume connections hang off the current name.\n";
+
+    return;
+}
+
 # Ensure host exists and has current node's initiator
 sub _ensure_host {
     my ($scfg, $api, %opts) = @_;
 
     my $host_name = _get_host_name($scfg);
+    _warn_host_name_collision($scfg, $host_name);
 
     my $cache_key = ($scfg->{'pure-portal'} // '') . "\0$host_name";
     unless ($opts{force}) {

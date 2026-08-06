@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.30-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.31-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -462,7 +462,7 @@ which writes the secret file and removes the old line in one command.
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.30-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.31-1_all.deb
 ```
 
 > ⚠ Avoid `dpkg -i` for the first install: it does **not** auto-install
