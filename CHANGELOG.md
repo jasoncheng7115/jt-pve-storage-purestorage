@@ -8,6 +8,54 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.30] - 2026-08-06
+
+### Fixed
+- Running container snapshots were quiesced by nothing at all. Proxmox VE
+  cgroup-freezes an LXC container's processes before calling
+  `volume_snapshot()`, but freezes the filesystem only for storages that ask
+  for it through `volume_snapshot_needs_fsfreeze()`, which this plugin did not
+  implement. Freezing the processes stops new writes without pushing out the
+  dirty pages the host kernel is already holding, and the array takes its
+  snapshot over REST, out of band from this host's block layer. Running
+  container snapshots -- including vzdump backups in snapshot mode -- were
+  therefore crash-consistent rather than filesystem-consistent. `RBDPlugin`
+  does the same for the same reason. QEMU guests were never affected: their
+  filesystem quiescing runs through the guest agent and never consults this
+  method.
+- The pre-snapshot `sync` and `blockdev --flushbufs` were skipped when the
+  device was in use, which is precisely when there are dirty pages to flush --
+  a running container's filesystem is mounted by the host kernel. Both calls
+  now run regardless, still bounded and still best-effort.
+- `rename_snapshot()` and `volume_snapshot_info()` are refused explicitly.
+  The inherited implementations route through `filesystem_path()`, which this
+  plugin cannot implement, and base `rename_snapshot()` would have attempted a
+  filesystem `rename()`. Neither is reachable today; the explicit refusal
+  gives a future caller a straight answer.
+
+## [1.1.29] - 2026-08-06
+
+### Changed
+- `api()` now negotiates the storage API version with the running Proxmox VE
+  rather than claiming a fixed 13. `APIVER` lives in `libpve-storage-perl`,
+  which versions independently of `pve-manager` and moved 13 -> 14 -> 15
+  within the 9.1 point releases, so no fixed number is correct on every node.
+  Claiming below the running `APIVER` made Proxmox VE print
+  `Plugin ... is implementing an older storage API, an upgrade is recommended`
+  on every `pvesm`, `qm` and `pct` call and on every daemon start; claiming
+  above it would have made older libraries refuse to load the plugin, removing
+  every purestorage storage from the node. The plugin now claims
+  `min(APIVER, 15)`, floored at 9, and falls back to 13 when `PVE::Storage` is
+  not loaded. No functional change: `api()` is only a load-time gate and
+  nothing in Proxmox VE branches on the value afterwards.
+
+### Fixed
+- `volume_resize()` accepted the `$snapname` parameter added in API version 14
+  and silently dropped it, which would have resized the parent volume when the
+  caller meant a snapshot. It is now refused with an explanatory message.
+  Not reachable in practice: Proxmox VE only passes a snapshot name when
+  `snapshot-as-volume-chain` is set, which this plugin does not offer.
+
 ## [1.1.28] - 2026-08-06
 
 Follow-up to the v1.1.25 credential change: a warning at the one point in the

@@ -8,6 +8,46 @@
 
 ---
 
+## [1.1.30] - 2026-08-06
+
+### 修正
+- 執行中容器的快照沒有經過任何一致性處理。Proxmox VE 在呼叫
+  `volume_snapshot()` 之前會用 cgroup 凍結 LXC 容器的行程，但只有在 storage
+  透過 `volume_snapshot_needs_fsfreeze()` 要求時才會凍結檔案系統，而本外掛
+  沒有實作這個方法。凍結行程只能停止新的寫入，不會把主機核心已經持有的
+  dirty page 寫出去，而陣列是透過 REST 取得快照，與本機的 block layer 無關。
+  因此執行中容器的快照——包含 snapshot 模式的 vzdump 備份——只是
+  crash-consistent，而非檔案系統一致。`RBDPlugin` 基於相同理由也是這樣做。
+  QEMU guest 從來不受影響：它們的檔案系統一致性由 guest agent 處理，完全
+  不會用到這個方法。
+- 快照前的 `sync` 與 `blockdev --flushbufs` 在裝置使用中時會被跳過，而那正是
+  有 dirty page 需要寫出的情況——執行中容器的檔案系統是由主機核心掛載的。
+  現在兩個呼叫一律執行，仍然有時間上限、仍然是盡力而為。
+- `rename_snapshot()` 與 `volume_snapshot_info()` 改為明確拒絕。繼承來的實作
+  會走 `filesystem_path()`，而本外掛無法實作該方法；base 的
+  `rename_snapshot()` 還會試圖對檔案系統做 `rename()`。目前兩者都不會被呼叫
+  到，明確拒絕是為了讓未來的呼叫端得到直接的答案。
+
+## [1.1.29] - 2026-08-06
+
+### 變更
+- `api()` 改為與執行中的 Proxmox VE 協商 storage API 版本，不再固定宣告 13。
+  `APIVER` 位於 `libpve-storage-perl`，其版本與 `pve-manager` 各自獨立，且在
+  9.1 的小版本之間就從 13 變到 14 再到 15，因此沒有任何固定值在每個節點上都
+  正確。宣告值低於執行中的 `APIVER` 時，Proxmox VE 會在每一次 `pvesm`、`qm`、
+  `pct` 呼叫與每次服務啟動時印出
+  `Plugin ... is implementing an older storage API, an upgrade is recommended`；
+  而宣告值高於它，較舊的函式庫則會直接拒絕載入外掛，該節點上所有
+  purestorage storage 都會消失。現在改為宣告 `min(APIVER, 15)`，下限 9，並在
+  `PVE::Storage` 未載入時回退為 13。功能沒有變化：`api()` 只是載入時的關卡，
+  Proxmox VE 之後不會依據這個值改變任何行為。
+
+### 修正
+- `volume_resize()` 原本會接下 API 版本 14 新增的 `$snapname` 參數卻默默丟棄，
+  在呼叫端要求調整快照大小時，實際被調整的會是母 Volume。現在改為明確拒絕並
+  說明原因。實務上不會走到：Proxmox VE 只有在設定
+  `snapshot-as-volume-chain` 時才會傳入快照名稱，而本外掛不提供該選項。
+
 ## [1.1.28] - 2026-08-06
 
 v1.1.25 憑證變更的後續：在整個遷移流程中唯一會被混合版本叢集咬到的那一點加上警告。

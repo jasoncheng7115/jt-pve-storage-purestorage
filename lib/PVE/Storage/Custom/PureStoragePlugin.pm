@@ -74,9 +74,42 @@ use PVE::Storage::Custom::PureStorage::FC qw(
     normalize_wwn
 );
 
-# Plugin API version
+# The storage API version this plugin claims.
+#
+# It has to be negotiated rather than hardcoded, because PVE::Storage treats
+# the two directions very differently when it loads a third-party plugin:
+#
+#   api() > PVE::Storage::APIVER     HARD REJECT. The plugin never loads and
+#                                    every purestorage storage disappears from
+#                                    the node.
+#   api() < APIVER - APIAGE          rejected as too old, same outcome.
+#   api() != APIVER (but in range)   loads, and PVE warns "implementing an
+#                                    older storage API, an upgrade is
+#                                    recommended" on EVERY load of
+#                                    PVE::Storage -- once per pvesm/qm/pct
+#                                    call and once per daemon start.
+#
+# Proxmox VE 9 raised APIVER twice inside the 9.1 point releases (13 -> 14 ->
+# 15) and the constants live in libpve-storage-perl, which versions
+# independently of pve-manager. No single hardcoded number is right on every
+# node. Claiming what the running PVE asks for, capped at the highest version
+# whose delta is actually implemented here, is both quiet and safe: api() is
+# only a load-time gate. Nothing in PVE branches on the value afterwards --
+# it calls plugin methods with its own current signatures either way.
+#
+# Raise APIVERSION_MAX only after implementing that version's delta:
+#   14  volume_resize gained a $snapname parameter (handled: refused, because
+#       this plugin does snapshots on the array, not as a volume chain)
+#   15  get_identity()
+use constant APIVERSION_MAX => 15;
+use constant APIVERSION_MIN => 9;
+
+# What to claim when PVE::Storage is not loaded at all, i.e. `perl -c` and the
+# unit tests. Any value in range does; this is the version the plugin was
+# first written against, and the one every Proxmox VE 9.0/9.1/9.2 storage
+# library accepts.
 use constant APIVERSION => 13;
-use constant MIN_APIVERSION => 9;
+use constant MIN_APIVERSION => APIVERSION_MIN;
 
 # Mark as shared storage (accessible from multiple nodes)
 push @PVE::Storage::Plugin::SHARED_STORAGE, 'purestorage';
@@ -86,7 +119,16 @@ push @PVE::Storage::Plugin::SHARED_STORAGE, 'purestorage';
 #
 
 sub api {
-    return APIVERSION;
+    my $pve = eval {
+        PVE::Storage->can('APIVER') ? PVE::Storage::APIVER() : undef;
+    };
+
+    return APIVERSION unless defined $pve && $pve =~ /^\d+\z/;  ## audit-ok: the documented fallback when PVE::Storage is absent
+
+    my $claim = $pve < APIVERSION_MAX ? $pve : APIVERSION_MAX;
+    $claim = APIVERSION_MIN if $claim < APIVERSION_MIN;
+
+    return $claim;
 }
 
 sub type {
@@ -3296,10 +3338,24 @@ sub volume_size_info {
 }
 
 sub volume_resize {
-    my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
+    my ($class, $scfg, $storeid, $volname, $size, $running, $snapname) = @_;
 
     # Pure Storage supports online resize, no need to check $running
     # Note: $running parameter is kept for API compatibility
+
+    # API version 14 added $snapname, for storages that keep snapshots as a
+    # chain of volumes and therefore have a resizable object per snapshot.
+    # Ours live on the array and are not resizable, so resizing the parent
+    # volume instead -- which is what silently dropping the parameter would
+    # do -- would grow the wrong thing. PVE only reaches this with
+    # 'snapshot-as-volume-chain' set, which this plugin does not offer, so
+    # this is a guard against a future caller rather than a live path. The
+    # base plugin refuses the same case with the same reasoning.
+    die "resizing a snapshot is not supported by the Pure Storage plugin "
+        . "(volume '$volname', snapshot '$snapname'). Snapshots live on the "
+        . "array and have no independently resizable object; resize the "
+        . "volume itself instead.\n"
+        if defined($snapname) && $snapname ne '';
 
     my $api = _get_api($scfg, $storeid);
     my $pure_volname = _get_full_volname($scfg, pve_volname_to_pure($storeid, $volname));
@@ -3926,6 +3982,61 @@ sub filesystem_path {
 # Snapshot operations
 #
 
+# The base implementations of these two go through filesystem_path(), which
+# this plugin cannot implement (Pure volume names are derived from the
+# storeid, which PVE does not pass to it). Left inherited, a caller would get
+# a confusing "filesystem_path is not supported" error, and base
+# rename_snapshot() would additionally have attempted a filesystem rename().
+#
+# Neither is reachable today: every base call site is gated on
+# `snapshot-as-volume-chain`, which is not among our options(), and the
+# QemuServer call sites sit behind do_snapshots_type() eq 'external', which
+# needs volume_qemu_snapshot_method() to return 'mixed' -- it returns
+# 'storage' for our raw volumes. Refuse explicitly so that a future caller
+# gets a straight answer instead of an error about a method it never named.
+sub rename_snapshot {
+    my ($class, $scfg, $storeid, $volname, $source_snap, $target_snap) = @_;
+
+    die "renaming a snapshot is not supported by the Pure Storage plugin "
+        . "(volume '$volname', '$source_snap' -> '$target_snap'). Snapshot "
+        . "names encode the PVE snapshot name and are created and removed "
+        . "together with it.\n";
+}
+
+sub volume_snapshot_info {
+    my ($class, $scfg, $storeid, $volname) = @_;
+
+    die "volume_snapshot_info is not supported by the Pure Storage plugin "
+        . "(volume '$volname'): it describes a qcow2 volume chain, and "
+        . "snapshots here live on the array. Use volume_snapshot_list().\n";
+}
+
+# Ask PVE to freeze a container's filesystem around volume_snapshot().
+#
+# PVE::LXC::Config::__snapshot_freeze() cgroup-freezes the container's
+# processes unconditionally, but only calls fsfreeze_mountpoint() for
+# mountpoints whose storage answers 1 here. Freezing the processes stops new
+# writes; it does not flush the dirty pages the host kernel is already holding
+# for that filesystem, and our snapshot is taken by the array over REST, out
+# of band from this host's block layer. Without the fsfreeze, a running
+# container's snapshot -- including a vzdump backup in snapshot mode -- is
+# crash-consistent rather than filesystem-consistent.
+#
+# PVE::Storage::RBDPlugin does the same, for the same reason: a snapshot taken
+# by a remote system cannot see this host's cache. Local-snapshot storages
+# (LVM-thin, ZFS) inherit the base 0 because the same kernel owns both the
+# filesystem and the snapshot.
+#
+# QEMU guests are unaffected either way: their filesystem quiescing is done by
+# the guest agent from PVE::QemuConfig, which never consults this method.
+#
+# Failure is handled by PVE: fsfreeze_mountpoint() is called inside an eval
+# and the thaw runs even when the snapshot itself dies, so a freeze that fails
+# warns rather than leaving the container wedged.
+sub volume_snapshot_needs_fsfreeze {
+    return 1;
+}
+
 sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snap) = @_;
 
@@ -3947,15 +4058,29 @@ sub volume_snapshot {
     }
 
     # Best-effort flush of host-side dirty buffers BEFORE the storage-level
-    # snapshot. For running VMs, qemu's own freeze handles consistency at
-    # the filesystem layer; this flush only catches the case where the
-    # device has dirty page cache from non-qemu access (e.g. backup tool
-    # writing directly to a stopped-VM volume). Skip if device is in use
-    # so we don't block on a busy live migration.
+    # snapshot. The array copies what it has received; anything still sitting
+    # in this host's page cache is not in the snapshot.
+    #
+    # This used to skip the flush when the device was in use, to avoid
+    # blocking on a busy host. That was backwards. "In use" is precisely the
+    # case that has dirty pages: an LXC container's filesystem is mounted by
+    # the HOST kernel, so its writes land in host page cache, and PVE's
+    # container freeze (AbstractConfig::snapshot_create -> __snapshot_freeze)
+    # only cgroup-freezes the processes -- it stops new writes without pushing
+    # the existing dirty ones out. A running qemu guest is the opposite case:
+    # it holds the device O_DIRECT, so there is little host cache to flush and
+    # only the guest agent can quiesce the guest's own filesystem. So the
+    # flush costs a running VM almost nothing and is the whole point for a
+    # running container.
+    #
+    # Both calls are bounded and non-fatal: the snapshot is still worth taking
+    # if the host is too busy to flush in time, it is just less consistent.
+    # See also volume_snapshot_needs_fsfreeze(), which asks PVE to freeze a
+    # container's filesystem properly around this call.
     my $wwid = eval { $api->volume_get_wwid($pure_volname); };
     if ($wwid) {
         my $device = get_device_by_wwid($wwid);
-        if ($device && -b $device && !is_device_in_use($device)) {
+        if ($device && -b $device) {
             eval { PVE::Tools::run_command(['/bin/sync'], timeout => 10); };
             warn "pre-snapshot sync failed/timed out: $@" if $@;
             eval { PVE::Tools::run_command(['/sbin/blockdev', '--flushbufs', $device], timeout => 10); };
