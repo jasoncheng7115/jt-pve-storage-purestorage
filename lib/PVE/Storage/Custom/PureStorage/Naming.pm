@@ -17,11 +17,8 @@ our @EXPORT_OK = qw(
     encode_host_name
     encode_config_volume_name
     decode_config_volume_name
-    is_config_volume
     sanitize_for_pure
     storeid_to_pure_prefix
-    is_valid_pure_volume_name
-    is_pve_managed_volume
     pve_volname_to_pure
     pure_to_pve_volname
 );
@@ -280,37 +277,6 @@ sub decode_config_volume_name {
     }
 
     return undef;
-}
-
-# Check if volume name is a VM config backup volume
-sub is_config_volume {
-    my ($volname) = @_;
-
-    return 0 unless defined $volname;
-    return ($volname =~ $RE_VMCONF) ? 1 : 0;
-}
-
-# Validate Pure Storage volume name
-sub is_valid_pure_volume_name {
-    my ($name) = @_;
-
-    return 0 unless defined $name;
-    return 0 if length($name) > MAX_VOLUME_NAME_LENGTH;
-    return 0 if length($name) < 1;
-    # Must start with alphanumeric
-    return 0 unless $name =~ /^[a-zA-Z0-9]/;
-    # Only alphanumeric, hyphen, underscore allowed
-    return 0 unless $name =~ /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
-
-    return 1;
-}
-
-# Check if volume name is managed by this plugin
-sub is_pve_managed_volume {
-    my ($name) = @_;
-
-    return 0 unless defined $name;
-    return ($name =~ /^pve-.+?-\d+-(disk\d+|cloudinit|state-.+)$/);
 }
 
 # Convert PVE volume name (vm-100-disk-0 or base-100-disk-0) to Pure volume name

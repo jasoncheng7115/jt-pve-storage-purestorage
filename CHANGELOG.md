@@ -8,6 +8,28 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.34] - 2026-08-07
+
+### Removed
+- Six exported functions with no callers: `is_config_volume`,
+  `is_pve_managed_volume`, `is_valid_pure_volume_name`, `is_target_logged_in`,
+  `set_initiator_name` and `wait_for_device`. Three were still named in the
+  plugin's import list, which is how removing them proved the imports were
+  decorative too. `set_initiator_name()` contained a bare
+  `system('systemctl', 'restart', 'iscsid')` -- no timeout, restarting a daemon
+  whose stop phase can block while iSCSI sessions are active. The rule against
+  bare `system()` was already enforced by a static check, but that check was
+  scoped to `bin/` and never looked at the library.
+
+### Changed
+- The bare-`system()` check now covers `lib/` as well as `bin/`, and a new
+  check fails when a function is exported without a caller.
+- Documentation rules are now enforced by static checks over every public
+  markdown file rather than by hand: no emoji, and Taiwan terminology in
+  Traditional Chinese. This removed ten warning signs from the READMEs and
+  changelogs, and corrected two terms in `docs/` that had kept their PRC
+  spellings: snapshot rollback, and the word for a leftover object.
+
 ## [1.1.33] - 2026-08-07
 
 ### Fixed
@@ -1593,7 +1615,7 @@ Old code therefore always saw `quota = 0`, fell through the
 `if (quota > 0)` guard, and returned the array-wide capacity from
 `array_space()`.
 
-> ⚠ Earlier drafts of this fix attempted to use
+> Note: earlier drafts of this fix attempted to use
 > `/policies/quota/members` with a `member.resource_type='pods'`
 > filter. That endpoint is **wrong for pods** — per the Pure API
 > 2.26 spec, the members table binds quota policies to **managed
@@ -2083,7 +2105,7 @@ that gap.
   still left untouched (operator-edited or third-party). This means a
   1.0.x → 1.1.x upgrade actually picks up the new safety settings instead
   of silently keeping the old file forever.
-  > **⚠️ Upgrade gotcha:** if your existing
+  > **Upgrade gotcha:** if your existing
   > `/etc/multipath/conf.d/pure-storage.conf` was created by an earlier
   > plugin version (1.0.x), it has NO marker line, so 1.1.x will leave
   > it alone. You must either manually align it with the new device

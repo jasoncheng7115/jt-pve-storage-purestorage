@@ -89,7 +89,7 @@ Jason Cheng (Jason Tools) — jason@jason.tools
 | 3.1 | `qm snapshot 9001 snap1` | Pure 上建立快照 `<vol>.pve-snap-snap1` | 後綴只用 Pure 允許的字元 （英數 + 連字號） |
 | 3.2 | 包含底線的快照名 (`my_snap`) | 編碼後綴 （例如 `my-snap` 或 `pve-snap-my-snap`)，無 API 錯誤 | 測試 `encode_snapshot_name` |
 | 3.3 | 很長的快照名 (>30 chars) | 編碼後的名稱 + 後綴總長維持在 Pure 63 字元 Volume 名上限內 | 測試 `encode_config_volume_name` 的 config volume name 截斷 |
-| 3.4 | `qm rollback 9001 snap1` | Volume 回滾，VM 從快照狀態啟動 | Pure 是 copy-on-write,rollback 應在 5 秒內完成 |
+| 3.4 | `qm rollback 9001 snap1` | Volume 倒回，VM 從快照狀態啟動 | Pure 是 copy-on-write,rollback 應在 5 秒內完成 |
 | 3.5 | `qm delsnapshot 9001 snap1` | 快照移除 (skip_eradicate) | 快照在 Pure 上為 "destroyed" 狀態 |
 | 3.6 | VM 停機時 `qm resize 9001 scsi0 +5G` | Volume 在 Pure 上 resize | Pure 支援 online resize，但 PVE 在這裡走 offline 路徑 |
 | 3.7 | VM 執行中時 `qm resize 9001 scsi0 +5G` | Online resize,rescan 後 guest 看到新大小 | 測試 volume_resize 中的 rescan |
@@ -194,7 +194,7 @@ orphan 清理，正是因為 Pure Volume 會在每個叢集節點被 iSCSI resca
 | 7.4 | `qm migrate 9001 nodeB --online --with-local-disks` （儲存遷移到 B 上的 Pure) | B 上建立新 Volume，內容搬移，來源 Volume 釋放 |
 | 7.5 | `vzdump 9001 --storage local --mode snapshot` | 透過 Pure 快照臨時 clone 讀取，無殘留臨時 clone |
 | 7.6 | `qmrestore <backup> 9050 -storage pure1` | 磁碟還原到 Pure |
-| 7.7 | 多磁碟 VM (4× Pure 磁碟）：建立、快照、回滾、銷毀 | 所有磁碟處理，無 orphan，共用單一 config 備份 Volume |
+| 7.7 | 多磁碟 VM (4× Pure 磁碟）：建立、快照、倒回、銷毀 | 所有磁碟處理，無 orphan，共用單一 config 備份 Volume |
 | 7.8 | 帶 vmstate 的 VM (`qm snapshot --vmstate`) | 狀態 Volume `vm-9001-state-snap1` 在 Pure 上配置、寫入，delsnapshot 時清理 |
 
 ---

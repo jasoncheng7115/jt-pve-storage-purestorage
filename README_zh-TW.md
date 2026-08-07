@@ -61,7 +61,7 @@
 
 ## 升級 SOP
 
-> **⚠️ 升級前務必先讀 — `/etc/multipath/conf.d/pure-storage.conf` 升級行為**
+> **升級前務必先讀 — `/etc/multipath/conf.d/pure-storage.conf` 升級行為**
 >
 > 自 1.1.1 起，外掛在自己產生的 `pure-storage.conf` 內寫入版本標記
 > (`# pure-multipath-config-version: N`),`_ensure_multipath_config`
@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.33-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.34-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -432,10 +432,10 @@ pvesm set <storeid> --pure-api-token <token>
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.33-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.34-1_all.deb
 ```
 
-> ⚠ 首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件
+> **注意**：首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件
 > （`multipath-tools`、`open-iscsi`、`sg3-utils`）。若不慎用了
 > `dpkg -i`，postinst 會檢測缺少的執行檔並印明確錯誤拒絕完成
 > configure，需要再執行 `apt --fix-broken install` 才能補齊相依
@@ -488,7 +488,7 @@ Pod 是陣列上的命名空間。在 Pod 設定 `quota_limit` 並讓外掛指�
 此 Pod，外掛便會以 Pod 配額取代陣列總容量進行回報。Volume 名稱
 會自動加上 `pod::` 前綴，與 Pod 外的物件不會撞名。
 
-> ⚠ **重要：Pod 配額一定要用對的方式設定**
+> **重要：Pod 配額一定要用對的方式設定**
 >
 > Pod block-level 配額是 Pod 物件本身的 `Pod.quota_limit` 欄位。
 > 用以下任一方式設定：

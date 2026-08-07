@@ -28,10 +28,8 @@ use PVE::Storage::Custom::PureStorage::Naming qw(
     encode_host_name
     encode_config_volume_name
     decode_config_volume_name
-    is_config_volume
     pve_volname_to_pure
     pure_to_pve_volname
-    is_pve_managed_volume
     storeid_to_pure_prefix
 );
 use PVE::Storage::Custom::PureStorage::ISCSI qw(
@@ -44,7 +42,6 @@ use PVE::Storage::Custom::PureStorage::ISCSI qw(
     get_session_states
     rescan_sessions
     is_portal_logged_in
-    wait_for_device
 );
 use PVE::Storage::Custom::PureStorage::Multipath qw(
     rescan_scsi_hosts
@@ -3340,6 +3337,27 @@ sub free_image {
 #
 # Returns undef when the array does not report `source` at all, which is the
 # safe direction: no change from previous behaviour.
+#
+# `source` itself is confirmed: Pure's generated client declares it on the
+# Volume model from API 2.0 onward as "A reference to the originating volume as
+# a result of a volume copy", and it is a FixedReference object in 2.x versus a
+# plain string in 1.x -- hence the ref() check below.
+#
+# What the documentation does NOT settle is whether a copy made from a SNAPSHOT
+# reports the snapshot or the parent volume. REST 1.17 documents the POST
+# parameter as "the name of a volume or snapshot whose data is copied", but no
+# GET example shows a snapshot-form value. If an array reports the parent
+# volume, this returns undef and linked clones keep their bare name, i.e. the
+# pre-v1.1.24 behaviour. To settle it on a live array, take a linked clone and
+# look at what the volume reports:
+#
+#   curl -sk -H "x-auth-token: $TOK" \
+#     "https://<array>/api/2.26/volumes?names=<clone>" | jq '.items[].source'
+#
+# A value ending in `.pve-base` means this works; the parent volume name means
+# it silently does not, and widening the match is NOT the fix -- a full clone
+# reports its parent too, so accepting that would invent a dependency that does
+# not exist.
 sub _linked_clone_base {
     my ($scfg, $vol) = @_;
 

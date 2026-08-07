@@ -64,7 +64,7 @@ by rebooting the node. Read these before installing the plugin.
 
 ## Upgrade SOP
 
-> **⚠️ READ FIRST — `/etc/multipath/conf.d/pure-storage.conf` upgrade behaviour**
+> **READ FIRST — `/etc/multipath/conf.d/pure-storage.conf` upgrade behaviour**
 >
 > Starting in 1.1.1 the plugin writes a version marker
 > (`# pure-multipath-config-version: N`) into the `pure-storage.conf` it
@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.33-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.34-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -462,10 +462,10 @@ which writes the secret file and removes the old line in one command.
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.33-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.34-1_all.deb
 ```
 
-> ⚠ Avoid `dpkg -i` for the first install: it does **not** auto-install
+> **Note:** avoid `dpkg -i` for the first install: it does **not** auto-install
 > the declared dependencies (`multipath-tools`, `open-iscsi`, `sg3-utils`).
 > If you do use it, the postinst will refuse to configure with a clear
 > "missing binaries" error and you'll need to run `apt --fix-broken install`
@@ -520,7 +520,7 @@ point the plugin at it; the plugin then reports the Pod's quota
 instead of the array total. Volume names get a `pod::` prefix so they
 cannot collide with anything outside the Pod.
 
-> ⚠ **Critical: how to set the Pod quota correctly**
+> **Critical: how to set the Pod quota correctly**
 >
 > Pod block-level quota is the `Pod.quota_limit` field on the Pod
 > object itself. Set it through ONE of these:

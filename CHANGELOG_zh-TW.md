@@ -8,6 +8,24 @@
 
 ---
 
+## [1.1.34] - 2026-08-07
+
+### 移除
+- 六個沒有任何呼叫者的匯出函式：`is_config_volume`、`is_pve_managed_volume`、
+  `is_valid_pure_volume_name`、`is_target_logged_in`、`set_initiator_name`、
+  `wait_for_device`。其中三個還列在外掛的匯入清單裡，移除時才發現那些匯入同樣
+  是裝飾用的。`set_initiator_name()` 裡有一個裸 `system('systemctl',
+  'restart', 'iscsid')`——沒有逾時，而且在 iSCSI 工作階段仍存活時，該服務的停止
+  階段可能卡住。禁止裸 `system()` 的規則本來就有靜態檢查把關，但那個檢查只掃
+  `bin/`，從來沒有看過函式庫。
+
+### 變更
+- 裸 `system()` 檢查現在同時涵蓋 `lib/` 與 `bin/`，並新增一項檢查：匯出但沒有
+  呼叫者的函式會導致失敗。
+- 文件規則改由靜態檢查涵蓋每一個公開的 markdown 檔，不再靠人工：不得有 emoji，
+  繁體中文須使用臺灣用語。據此移除了 README 與變更紀錄中的十個警告符號，並統一
+  `docs/` 裡快照倒回與殘留物件的用語（先前沿用了 PRC 譯法）。
+
 ## [1.1.33] - 2026-08-07
 
 ### 修正
@@ -1324,7 +1342,7 @@ Pure FlashArray API 2.x 的 Pod 配額有**兩種設定路徑**，舊版程式�
 原本的程式因此永遠拿到 `quota = 0`，直接走 `if (quota > 0)` 之後的
 fallback 分支，回傳 `array_space()` 給的全陣列容量。
 
-> ⚠ 本修正最初的草稿曾試圖用 `/policies/quota/members` 並加上
+> 註：本修正最初的草稿曾試圖用 `/policies/quota/members` 並加上
 > `member.resource_type='pods'` filter——這對 pod 是**錯的**：依
 > Pure API 2.26 spec，這個 members 表只用於將 quota policy 綁到
 > **managed directory**。Pod 配額 policy 的關聯是讀 policy 物件
@@ -1746,7 +1764,7 @@ jt-pve-storage-netapp 在正式環境上一次 resize 事故揭露 4 個 bug,Pur
   plugin-managed 檔案會在版本變動時被外掛重寫。**沒有**標記的檔案
   （操作員手改或第三方產生） 一律不動。這代表從 1.0.x → 1.1.x 升級時
   能真正吃到新的安全設定，而不是繼續沉默地用舊檔。
-  > **⚠️ 升級陷阱：** 若你既有的
+  > **升級陷阱**：若你既有的
   > `/etc/multipath/conf.d/pure-storage.conf` 是由更早版本 (1.0.x)
   > 建立的，它**沒有**標記行，所以 1.1.x 會保留不動。你必須手動把它
   > 對齊新版 device 區塊 （見 README「升級 SOP」上方的警告框）,

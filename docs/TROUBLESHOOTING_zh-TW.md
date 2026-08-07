@@ -75,7 +75,7 @@
 
 4. 對同一 VM 並行配置可能會碰到 disk-id 衝突；外掛會重試最多 5 次。
    若你遇到持續性的衝突，代表其中一個 worker 可能留下了部分 Volume — 請在
-   Pure UI 檢查孤兒 `pve-*` Volume。
+   Pure UI 檢查殘留 `pve-*` Volume。
 
 ### 3. Volume 建立後裝置沒有出現
 

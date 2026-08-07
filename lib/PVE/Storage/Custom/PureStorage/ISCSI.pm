@@ -18,7 +18,6 @@ use Exporter qw(import);
 
 our @EXPORT_OK = qw(
     get_initiator_name
-    set_initiator_name
     probe_portal
     discover_targets
     login_target
@@ -26,9 +25,7 @@ our @EXPORT_OK = qw(
     get_sessions
     get_session_states
     rescan_sessions
-    is_target_logged_in
     is_portal_logged_in
-    wait_for_device
 );
 
 # Constants
@@ -171,20 +168,6 @@ sub get_initiator_name {
     }
 
     croak "Failed to parse initiator name from " . INITIATOR_NAME_FILE;
-}
-
-# Set the local initiator name (IQN)
-sub set_initiator_name {
-    my ($iqn) = @_;
-
-    croak "Invalid IQN format" unless $iqn =~ /^iqn\.\d{4}-\d{2}\.[^:]+:/;
-
-    _write_file(INITIATOR_NAME_FILE, "InitiatorName=$iqn\n");
-
-    # Restart iscsid to pick up new name
-    system('systemctl', 'restart', 'iscsid');
-
-    return 1;
 }
 
 # Quick TCP connectivity probe to an iSCSI portal. Returns 1 if the host
@@ -397,18 +380,6 @@ sub get_session_states {
     return \@out;
 }
 
-# Check if any session is open to a target (anywhere). Used as a coarse check.
-sub is_target_logged_in {
-    my ($target) = @_;
-
-    my $sessions = get_sessions();
-    for my $session (@$sessions) {
-        return 1 if $session->{target} eq $target;
-    }
-
-    return 0;
-}
-
 # Check if a session is open to a SPECIFIC (portal, target) pair.
 # This is the correct check before logging in to a Pure Storage iSCSI portal,
 # because all Pure controller LIFs serving the same target share one IQN.
@@ -574,46 +545,6 @@ sub _untaint_device_path {
         return $1;
     }
     return undef;
-}
-
-# Wait for a SCSI device to appear
-sub wait_for_device {
-    my ($serial, %opts) = @_;
-
-    croak "serial is required" unless $serial;
-
-    my $timeout = $opts{timeout} // DEVICE_WAIT_TIMEOUT;
-    my $interval = $opts{interval} // DEVICE_WAIT_INTERVAL;
-    my $start_time = time();
-
-    while ((time() - $start_time) < $timeout) {
-        # Check /dev/disk/by-id for the device (exact suffix match to avoid substring collisions)
-        # Wrap in alarm to bound the glob in case devtmpfs / udev wedges.
-        my $found;
-        eval {
-            local $SIG{ALRM} = sub { die "timeout\n" };
-            alarm(5);
-            my @devices = grep { /\Q$serial\E$/i } glob("/dev/disk/by-id/scsi-*");
-            $found = $devices[0] if @devices;
-            alarm(0);
-        };
-        alarm(0);
-        if ($@ && $@ eq "timeout\n") {
-            warn "wait_for_device: /dev/disk/by-id glob timed out after 5s, retrying\n";
-        } elsif ($found) {
-            return _untaint_device_path($found);
-        }
-
-        # Also check multipath
-        my $mpath_device = _find_multipath_device($serial);
-        if ($mpath_device) {
-            return $mpath_device;  # Already untainted by _find_multipath_device
-        }
-
-        sleep($interval);
-    }
-
-    return undef;  # Device not found within timeout
 }
 
 # Find multipath device by LUN serial

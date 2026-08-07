@@ -1,3 +1,16 @@
+jt-pve-storage-purestorage (1.1.34-1) stable; urgency=medium
+
+  * Remove six exported functions that had no callers, one of which contained a
+    bare system('systemctl', 'restart', 'iscsid') -- no timeout, restarting a
+    daemon whose stop phase can block while sessions are active. The static
+    check that forbids bare system() had been scoped to bin/ only, so the
+    library was never checked; it now covers lib/ as well, and a new check
+    fails when an exported function has no caller.
+  * Documentation: remove the warning signs from README and CHANGELOG, which
+    render as emoji, and correct two Traditional Chinese terms in docs/. Both
+    rules are now static checks over every public markdown file.
+
+ -- Jason Cheng <jason@jason.tools>  Fri, 07 Aug 2026 08:20:13 +0800
 jt-pve-storage-purestorage (1.1.33-1) stable; urgency=medium
 
   * Fix snapshot access failing on any storage whose id is longer than ten
