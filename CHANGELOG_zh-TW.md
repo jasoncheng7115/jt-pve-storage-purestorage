@@ -8,6 +8,52 @@
 
 ---
 
+## [1.1.35] - 2026-08-09
+
+本次修正來自把本專案對照相關的 `jt-pve-storage-synology` 外掛先踩到的缺陷逐一檢查。
+
+### 文件
+- **一台 guest 在陣列上佔用多少物件，以及操作被中斷會留下什麼。**
+  `docs/TROUBLESHOOTING.md` 新增兩節，起因是 Proxmox VE 論壇上關於「規模成長時的
+  空間規劃」與「操作進行到一半被切斷」的提問。前者是算法：每顆磁碟一顆 Volume、
+  每台 guest 的每個**快照名稱**一顆 1 MB 的設定備份 Volume、每顆磁碟的每個快照
+  一個陣列快照，以及讀取快照期間的一顆暫時性複製——因此一台有兩顆磁碟、三個快照
+  的 guest 會佔用五顆 Volume 與六個快照。後者是一張表，列出操作可能被切斷的每一個
+  點、當下陣列與本機各留下什麼，以及由哪個回收器或哪個檢視來收拾。沒有任何一項是
+  無聲的：每一列的結局不是在儲存內容檢視中看得到，就是由有明確排程的回收器處理。
+
+### 修正
+- **網頁介面執行的 Perl 與你的 shell 不同，而本外掛在它底下無法執行任何指令。**
+  `pvedaemon` 與 `pveproxy` 是 `#!/usr/bin/perl -T`，而 `pvestatd`、`qm`、`pvesm`
+  不是。在 taint 模式下，來自檔案、socket 或其他指令輸出的值無法傳給 `exec`，而
+  `PVE::Tools::run_command` 不會 untaint——把 sysfs 讀來的值交給它會死在
+  *Insecure dependency in exec while running with -T switch*，同一個呼叫改用字面
+  常數則成功。本外掛建構的每一個裝置路徑，都來自陣列回傳的 WWID 或 `multipathd`
+  的輸出，因此從網頁介面驅動的操作可能失敗，而完全相同的操作從 shell 上的
+  `pvesm` 卻正常。現在兩個指令執行器與每一個直接呼叫 `run_command` 的地方，都會
+  以允許清單做正則捕捉來 untaint，清單以外的一律**拒絕**而非清洗：被清洗過的參數
+  已經是另一個參數，而需要被清洗的裝置路徑，本來就不該對它動手。
+- **`/sbin/udevadm` 不存在，所以每一次 udev 刷新都沒有作用。** 在 Debian 13 上
+  `udevadm` 位於 `/usr/bin`，而 `/sbin` 是指向 `/usr/sbin` 的符號連結，因此四個
+  呼叫點全部以
+  `exec of /sbin/udevadm failed: No such file or directory` 失敗——而且是無聲的，
+  因為它們都包在 `eval` 裡。`_udev_refresh()` 正是本專案規定所有 udevadm 呼叫都
+  必須經過的助手；規則被遵守了，助手卻從來沒有生效過。因此 LUN 出現之後，裝置節點
+  與 `/dev/disk/by-id/` 符號連結從未被明確等待完成。指令路徑現在會依候選清單解析，
+  找不到時以明確訊息失敗，並新增靜態檢查確認每一個字面指令路徑在主機上存在。
+
+### 新增
+- `bin/pve-pure-config-get --version`。操作者在故障期間動用這個復原工具時，應該
+  能直接問這支程式它是哪一版，而不是去問一個本身可能就是問題一部分的節點上的套件
+  資料庫。
+
+### 已檢查、無需變更
+- Proxmox VE 會構造出本外掛列舉的三種以外的 Volume 名稱，因此這份清單改為從
+  Proxmox VE 裡讀出來，而不是用猜的。帶明確名稱的 `vdisk_alloc` 呼叫只有
+  `vm-<vmid>-state-<snap>` 與 `vm-<vmid>-cloudinit`，兩者本來就已支援。
+  `vm-<vmid>-efi-enroll` 是 QEMU storage daemon 的識別碼而非 Volume 名稱，而 TPM
+  狀態磁碟配置時根本不帶名稱，因此會以一般的 `vm-<vmid>-disk-<n>` 形式進來。
+
 ## [1.1.34] - 2026-08-07
 
 ### 移除

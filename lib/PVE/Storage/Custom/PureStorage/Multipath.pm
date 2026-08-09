@@ -17,6 +17,8 @@ use POSIX ();
 use Exporter qw(import);
 
 our @EXPORT_OK = qw(
+    udevadm_path
+    untaint_arg
     rescan_scsi_hosts
     multipath_reload
     multipath_reload_throttled
@@ -288,8 +290,71 @@ sub _reap_timed_out_child {
 }
 
 # Run a command and return output
+# Resolve an external command to an absolute path that exists on THIS host.
+#
+# Two separate reasons, both measured on a PVE 9 node:
+#
+#   * A Proxmox VE daemon has no PATH at all -- /proc/<pid>/environ for
+#     pvedaemon, pvestatd and pveproxy contains no PATH -- so exec falls back
+#     to the C library's /bin:/usr/bin, and multipath, multipathd, iscsiadm,
+#     dmsetup, blockdev and kpartx all live in /usr/sbin. A bare command name
+#     therefore works from a shell and cannot be executed from the web
+#     interface. Every command here is already absolute for that reason.
+#   * An absolute path can still be the wrong one. `/sbin/udevadm` does not
+#     exist on Debian 13: udevadm is in /usr/bin, and /sbin is a symlink to
+#     /usr/sbin. Every udevadm call this plugin made had been failing since it
+#     was written, silently, because they are wrapped in eval.
+#
+# So candidates are tried in order and the answer is cached. Nothing is
+# guessed: if none exists the caller gets a message naming what was looked for.
+my %cmd_path_cache;
+sub _cmd_path {
+    my ($name, @candidates) = @_;
+
+    return $cmd_path_cache{$name} if exists $cmd_path_cache{$name};
+
+    for my $c (@candidates) {
+        if (-x $c) {
+            $cmd_path_cache{$name} = $c;
+            return $c;
+        }
+    }
+    die "cannot find '$name' on this host (looked for: "
+      . join(', ', @candidates) . "). Install the package that provides it.\n";
+}
+
+sub udevadm_path { return _cmd_path('udevadm', '/usr/bin/udevadm', '/bin/udevadm',
+                                    '/usr/sbin/udevadm', '/sbin/udevadm'); }
+
+# Untaint one command argument, refusing anything this plugin could not have
+# produced.
+#
+# pvedaemon and pveproxy are #!/usr/bin/perl -T. Under taint mode a value that
+# came from a file, a socket or another command's output cannot be passed to
+# exec: Perl dies with "Insecure dependency in exec while running with -T
+# switch", and PVE::Tools::run_command does not untaint for us (verified). A
+# device path built from a WWID the array returned is exactly such a value, so
+# the operation succeeds from `pvesm` on a shell and fails from the web
+# interface -- the worst way for a fault to present.
+#
+# A regex capture is what untaints, and matching against an allowlist makes the
+# untainting and the correctness check the same act. Refusing rather than
+# stripping is deliberate: a stripped argument is a different argument, and a
+# device path that needed stripping is one we should not be acting on.
+sub untaint_arg {
+    my ($arg) = @_;
+
+    return $arg if !defined $arg;
+    return $1 if "$arg" =~ m{\A([A-Za-z0-9_./:=@,+%-]*)\z};
+
+    die "refusing to run a command with an argument this plugin could not "
+      . "have produced: '$arg'\n";
+}
+
 sub _run_cmd {
     my ($cmd, %opts) = @_;
+
+    $cmd = [ map { untaint_arg($_) } @$cmd ];
 
     my $timeout = $opts{timeout} // 30;
 
@@ -649,9 +714,9 @@ sub wait_for_multipath_device {
 
         # Step 3: udev — creates the /dev/mapper and /dev/disk/by-id nodes.
         # Cheap relative to a reconfigure and usually all that is missing.
-        eval { _run_cmd(['/sbin/udevadm', 'trigger', '--subsystem-match=block'],
+        eval { _run_cmd([udevadm_path(), 'trigger', '--subsystem-match=block'],
             timeout => 10, allow_nonzero => 1, ignore_errors => 1); };
-        eval { _run_cmd(['/sbin/udevadm', 'settle', '--timeout=5'],
+        eval { _run_cmd([udevadm_path(), 'settle', '--timeout=5'],
             timeout => 10, allow_nonzero => 1, ignore_errors => 1); };
         $device = $probe->();
         return $device if $device;

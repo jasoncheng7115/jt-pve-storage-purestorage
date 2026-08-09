@@ -7,6 +7,8 @@ package PVE::Storage::Custom::PureStorage::ISCSI;
 use strict;
 use warnings;
 
+use PVE::Storage::Custom::PureStorage::Multipath ();
+
 use Carp qw(croak);
 use IO::Select;
 use IO::Socket::INET;
@@ -96,6 +98,10 @@ sub _reap_timed_out_child {
 # Run a command and return output
 sub _run_cmd {
     my ($cmd, %opts) = @_;
+
+    # pvedaemon and pveproxy run with -T; a value read from sysfs or off the
+    # network cannot reach exec untainted. See Multipath::untaint_arg.
+    $cmd = [ map { PVE::Storage::Custom::PureStorage::Multipath::untaint_arg($_) } @$cmd ];
 
     my $timeout = $opts{timeout} // 30;
 

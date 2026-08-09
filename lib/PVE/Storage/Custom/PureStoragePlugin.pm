@@ -47,6 +47,8 @@ use PVE::Storage::Custom::PureStorage::Multipath qw(
     rescan_scsi_hosts
     rescan_scsi_device
     multipath_reload
+    untaint_arg
+    udevadm_path
     multipath_reload_throttled
     describe_wwid_state
     multipath_flush
@@ -631,13 +633,13 @@ use constant API_CACHE_TTL => 300;
 sub _udev_refresh {
     eval {
         PVE::Tools::run_command(
-            ['/sbin/udevadm', 'trigger', '--subsystem-match=block'],
+            [ map { untaint_arg($_) } udevadm_path(), 'trigger', '--subsystem-match=block' ],
             timeout => 10, errfunc => sub { }, outfunc => sub { },
         );
     };
     eval {
         PVE::Tools::run_command(
-            ['/sbin/udevadm', 'settle', '--timeout=5'],
+            [ map { untaint_arg($_) } udevadm_path(), 'settle', '--timeout=5' ],
             timeout => 10, errfunc => sub { }, outfunc => sub { },
         );
     };
@@ -1540,7 +1542,7 @@ sub _backup_vm_config {
     eval {
         # Create filesystem. -O ^has_journal because 1MB is too small.
         PVE::Tools::run_command(
-            ['/sbin/mkfs.ext4', '-q', '-F', '-O', '^has_journal', $device],
+            [ map { untaint_arg($_) } '/sbin/mkfs.ext4', '-q', '-F', '-O', '^has_journal', $device ],
             timeout => 30,
         );
 
@@ -1548,7 +1550,7 @@ sub _backup_vm_config {
         mkdir($mount_point) or die "mkdir failed: $!";
 
         PVE::Tools::run_command(
-            ['/bin/mount', $device, $mount_point],
+            [ map { untaint_arg($_) } '/bin/mount', $device, $mount_point ],
             timeout => 30,
         );
         $mounted = 1;
@@ -1569,10 +1571,10 @@ sub _backup_vm_config {
         close($mfh);
 
         # Sync to ensure data hits the device before unmount
-        PVE::Tools::run_command(['/bin/sync'], timeout => 10);
+        PVE::Tools::run_command([ map { untaint_arg($_) } '/bin/sync' ], timeout => 10);
 
         # Unmount
-        PVE::Tools::run_command(['/bin/umount', $mount_point], timeout => 30);
+        PVE::Tools::run_command([ map { untaint_arg($_) } '/bin/umount', $mount_point ], timeout => 30);
         $mounted = 0;
         rmdir($mount_point);
     };
@@ -1580,7 +1582,7 @@ sub _backup_vm_config {
         warn "Failed to write config to volume: $@\n";
         # Ensure mount is cleaned up even on error
         if ($mounted) {
-            eval { PVE::Tools::run_command(['/bin/umount', $mount_point], timeout => 30); };
+            eval { PVE::Tools::run_command([ map { untaint_arg($_) } '/bin/umount', $mount_point ], timeout => 30); };
             rmdir($mount_point);
         }
         # Cleanup local devices and Pure Storage volume
@@ -3661,7 +3663,7 @@ sub _refresh_local_capacity {
     my $actual;
     eval {
         my $out = '';
-        PVE::Tools::run_command(['/sbin/blockdev', '--getsize64', $device],
+        PVE::Tools::run_command([ map { untaint_arg($_) } '/sbin/blockdev', '--getsize64', $device ],
             timeout => 10, outfunc => sub { $out .= shift });
         $out =~ s/\s+//g;
         $actual = $out =~ /^\d+$/ ? $out + 0 : undef;
@@ -3864,8 +3866,8 @@ sub deactivate_volume {
         if ($device && -b $device) {
             # Use timeout-bounded run_command — bare system('sync')/blockdev
             # can enter D state on a wedged device.
-            eval { PVE::Tools::run_command(['/bin/sync'], timeout => 10); };
-            eval { PVE::Tools::run_command(['/sbin/blockdev', '--flushbufs', $device], timeout => 10); };
+            eval { PVE::Tools::run_command([ map { untaint_arg($_) } '/bin/sync' ], timeout => 10); };
+            eval { PVE::Tools::run_command([ map { untaint_arg($_) } '/sbin/blockdev', '--flushbufs', $device ], timeout => 10); };
         }
     }
 
@@ -4315,9 +4317,9 @@ sub volume_snapshot {
     if ($wwid) {
         my $device = get_device_by_wwid($wwid);
         if ($device && -b $device) {
-            eval { PVE::Tools::run_command(['/bin/sync'], timeout => 10); };
+            eval { PVE::Tools::run_command([ map { untaint_arg($_) } '/bin/sync' ], timeout => 10); };
             warn "pre-snapshot sync failed/timed out: $@" if $@;
-            eval { PVE::Tools::run_command(['/sbin/blockdev', '--flushbufs', $device], timeout => 10); };
+            eval { PVE::Tools::run_command([ map { untaint_arg($_) } '/sbin/blockdev', '--flushbufs', $device ], timeout => 10); };
             warn "pre-snapshot blockdev --flushbufs failed for $device: $@" if $@;
         }
     }
@@ -4452,7 +4454,7 @@ sub volume_snapshot_rollback {
             # 3. CRITICAL: invalidate kernel buffer cache so subsequent
             #    reads see the snapshot content, not stale post-snapshot
             #    pages.
-            eval { PVE::Tools::run_command(['/sbin/blockdev', '--flushbufs', $device], timeout => 10); };
+            eval { PVE::Tools::run_command([ map { untaint_arg($_) } '/sbin/blockdev', '--flushbufs', $device ], timeout => 10); };
 
             # 4. udev refresh
             _udev_refresh();

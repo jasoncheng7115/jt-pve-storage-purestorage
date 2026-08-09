@@ -8,6 +8,65 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.35] - 2026-08-09
+
+Found by auditing this project against defects the sibling
+`jt-pve-storage-synology` plugin hit first.
+
+### Documentation
+- **What a guest costs on the array, and what an interrupted operation leaves
+  behind.** Two new sections in `docs/TROUBLESHOOTING.md`, prompted by
+  questions on the Proxmox VE forum about provisioning at scale and about
+  operations that are cut off half way. The first is the arithmetic: one volume
+  per disk, one 1 MB volume per *snapshot name* per guest for the configuration
+  backup, one array snapshot per disk per snapshot, and a transient clone while
+  something reads a snapshot -- so a guest with two disks and three snapshots
+  holds five volumes and six snapshots. The second is a table of every point an
+  operation can be cut off at, what is then left on the array and on the host,
+  and which reaper or which view resolves it. Nothing is silent: each row ends
+  either in the storage content view or in a reaper with a stated schedule.
+
+### Fixed
+- **The web interface runs a different Perl from your shell, and this plugin
+  could not run a command under it.** `pvedaemon` and `pveproxy` are
+  `#!/usr/bin/perl -T`, while `pvestatd`, `qm` and `pvesm` are not. Under taint
+  mode a value that came from a file, a socket or another command's output
+  cannot reach `exec`, and `PVE::Tools::run_command` does not untaint -- a
+  sysfs read passed to it dies with *Insecure dependency in exec while running
+  with -T switch*, while the same call with a literal succeeds. Every device
+  path this plugin builds comes from a WWID the array returned or from
+  `multipathd` output, so an operation driven from the web interface could fail
+  where the identical operation from `pvesm` on a shell worked. Arguments are
+  now untainted through a capture against an allowlist at both command runners
+  and at every direct `run_command` call site, and anything outside the
+  allowlist is **refused** rather than stripped: a stripped argument is a
+  different argument, and a device path that needed stripping is one this
+  plugin should not act on.
+- **`/sbin/udevadm` does not exist, so every udev refresh did nothing.** On
+  Debian 13 `udevadm` is in `/usr/bin` and `/sbin` is a symlink to `/usr/sbin`,
+  so all four call sites failed with
+  `exec of /sbin/udevadm failed: No such file or directory` -- silently, because
+  they are wrapped in `eval`. `_udev_refresh()` is the helper this project
+  requires for every udevadm call; the rule was followed and the helper had
+  never worked. Device nodes and `/dev/disk/by-id/` symlinks were therefore
+  never explicitly settled after a LUN appeared. Command paths now resolve
+  against a candidate list and fail with a message naming what was looked for,
+  and a static check asserts that every literal command path exists on the host.
+
+### Added
+- `bin/pve-pure-config-get --version`. An operator reaching for the recovery
+  tool during an outage should be able to ask the script which build it is,
+  rather than the package database of a node that may be part of the problem.
+
+### Checked, no change needed
+- Proxmox VE constructs volume names beyond the three this plugin enumerates,
+  so the list was read out of Proxmox VE rather than guessed. The only
+  `vdisk_alloc` calls carrying an explicit name are `vm-<vmid>-state-<snap>`
+  and `vm-<vmid>-cloudinit`, both already handled. `vm-<vmid>-efi-enroll` is a
+  QEMU storage daemon id rather than a volume name, and a TPM state disk
+  allocates with no name at all, so it arrives as an ordinary
+  `vm-<vmid>-disk-<n>`.
+
 ## [1.1.34] - 2026-08-07
 
 ### Removed

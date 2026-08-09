@@ -289,6 +289,72 @@ systemctl show -p MainPID pvestatd     # 前後各執行一次；PID 必須改�
 `pvedaemon` 與 `pveproxy` 同樣會載入外掛程式碼；若 Web UI／API 路徑仍出現舊行為，
 也一併重新啟動。
 
+## 一台 guest 在陣列上佔用多少物件
+
+一顆 Proxmox VE 磁碟對應一顆 Pure Volume。其餘的算法比較不直觀，而它決定了
+一台陣列在 guest 數量成長時能撐到哪裡：
+
+| 陣列上的物件 | 每⋯⋯一個 |
+|---|---|
+| Volume `pve-<storage>-<vmid>-disk<n>` | 虛擬磁碟 |
+| Volume `pve-<storage>-<vmid>-vmconf-<快照名>` | **快照名稱**（每台 guest），1 MB |
+| Snapshot `<volume>.pve-snap-<快照名>` | 磁碟，每個快照 |
+| Volume `<volume>-tsa-<...>` | 正在被讀取的快照，暫時性 |
+
+設定備份 Volume 是多數人沒料到的一項：它是**每個快照名稱**一顆，而不是每台
+guest 一顆。因此一台有兩顆磁碟、三個快照的 guest，會佔用**五顆 Volume 與六個
+快照**：
+
+```
+pve-pure1-100-disk0                     pve-pure1-100-disk0.pve-snap-nightly
+pve-pure1-100-disk1                     pve-pure1-100-disk1.pve-snap-nightly
+pve-pure1-100-vmconf-nightly            ⋯⋯每個快照都有這樣一對
+pve-pure1-100-vmconf-before-upgrade
+pve-pure1-100-vmconf-test
+```
+
+那顆 Volume 存放該快照當下的 guest 設定副本，讓 `bin/pve-pure-config-get`
+能在 Proxmox VE 叢集已經不存在時重建 guest。它會隨該 guest 的最後一顆磁碟一起
+刪除。
+
+暫時性的 `-tsa-` 複製只在有東西讀取快照時存在——從快照備份、`qemu-img convert`、
+容器備份。若被中斷的操作留下一個，見下表。
+
+## 操作被中斷會留下什麼
+
+每個操作在**失敗**時都會自行清理。這張表講的是另一種情況：行程被殺掉、節點被
+fence、或與陣列的網路在操作中途斷掉，因此清理程式碼根本沒有機會執行。
+
+表中沒有任何一項是無聲的。每一列的結局，不是在 Proxmox VE 的儲存檢視中看得到，
+就是由某個回收器依排程收拾。
+
+| 中斷於⋯⋯之後 | 陣列上留下 | 本機留下 | 由什麼收拾 |
+|---|---|---|---|
+| 建立磁碟，Proxmox VE 尚未記錄 | 該 Volume | 可能有已對應的裝置 | 會被 `list_images` 列出，因此在儲存內容檢視中顯示為該 guest 的磁碟——從那裡刪除 |
+| 連線磁碟，裝置尚未出現 | Volume 與主機連線 | 可能有已對應的裝置 | 同上；重試該 guest 時連線會被沿用 |
+| 刪除磁碟，已中斷連線但尚未銷毀 | 該 Volume（未連線） | 已清理完畢 | Proxmox VE 仍持有該 volid，下次啟用會重新連線，再刪一次即可完成 |
+| 刪除磁碟，已銷毀但尚未解除追蹤 | 無 | 殘留裝置與追蹤紀錄 | 殘留回收器：首次發現距今至少 600 秒，且連續三輪在陣列上不存在 |
+| 取得快照，設定備份尚未完成 | 該快照 | 無 | 不需處理；設定備份是盡力而為，下次快照會寫入自己的那一份 |
+| 讀取快照，暫存複製已建立 | `-tsa-` 複製與連線 | 已對應的裝置 | 暫存複製回收器：`pure-host-mode = per-node` 為 1 小時，`shared` 為 24 小時 |
+| 調整大小，陣列已擴充 | 無 | 仍為舊容量的對應 | `activate_volume` 會比對陣列容量與 `blockdev --getsize64`，不一致時重新掃描 |
+
+有兩個結論值得明講：
+
+- **被中斷的建立所留下的磁碟 Volume 不會被自動回收。** 這是刻意讓它可見：本外掛
+  不會刪除一顆 Proxmox VE 可能正要引用的陣列 Volume。請在儲存內容檢視中尋找
+  沒有任何 guest 設定提到的磁碟。
+- **回收器只會移除本機裝置與本外掛自己的暫時性物件。** 本外掛沒有任何自動路徑會
+  銷毀存有 guest 資料的 Volume。
+
+## 規模
+
+已量測的部分：在設有 pod 的 storage 上，**連續三輪 `activate_storage` 加
+`status` 共花 8 次 REST 呼叫**；集合型 GET 會依循 Pure 的 continuation token，
+因此列舉不會在第一頁被截斷。
+
+尚未量測的部分：本外掛未曾對照過持有數千顆 Volume 的陣列，或節點數眾多的叢集。
+上面的算法就是規劃容量時該依據的依據；若你在那種規模下執行，那些數字很值得回報。
+
 ## 診斷指令
 
 ### 外掛狀態

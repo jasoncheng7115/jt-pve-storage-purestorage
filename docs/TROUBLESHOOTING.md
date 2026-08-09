@@ -314,6 +314,79 @@ systemctl show -p MainPID pvestatd     # run before and after; PID MUST change
 `pvedaemon` and `pveproxy` similarly load plugin code; restart them too if a
 Web UI / API path still shows stale behaviour.
 
+## What a guest costs on the array
+
+One Proxmox VE disk is one Pure volume. The rest of the arithmetic is less
+obvious, and it is what decides how far a given array goes as the number of
+guests grows:
+
+| Object on the array | One per |
+|---|---|
+| Volume `pve-<storage>-<vmid>-disk<n>` | virtual disk |
+| Volume `pve-<storage>-<vmid>-vmconf-<snapshot>` | **snapshot name**, per guest, 1 MB |
+| Snapshot `<volume>.pve-snap-<snapshot>` | disk, per snapshot |
+| Volume `<volume>-tsa-<...>` | snapshot being read, transient |
+
+The config-backup volume is the one people do not expect: it is per snapshot
+*name*, not per guest. A guest with two disks and three snapshots therefore
+holds **five volumes and six snapshots**:
+
+```
+pve-pure1-100-disk0                     pve-pure1-100-disk0.pve-snap-nightly
+pve-pure1-100-disk1                     pve-pure1-100-disk1.pve-snap-nightly
+pve-pure1-100-vmconf-nightly            ... and the same pair per snapshot
+pve-pure1-100-vmconf-before-upgrade
+pve-pure1-100-vmconf-test
+```
+
+That volume holds a copy of the guest configuration as it was at the snapshot,
+so `bin/pve-pure-config-get` can rebuild a guest whose Proxmox VE cluster is
+gone. It is deleted with the last disk of that guest.
+
+The transient `-tsa-` clone exists only while something reads a snapshot — a
+backup from a snapshot, `qemu-img convert`, a container backup. If one is left
+behind by an interrupted operation, see the table below.
+
+## What an interrupted operation leaves behind
+
+Every operation cleans up after itself when it *fails*. This table is about the
+other case: the process was killed, the node was fenced, or the network to the
+array dropped mid-operation, so no cleanup code ran at all.
+
+Nothing here is silent. Each row ends either in something visible in the
+Proxmox VE storage view, or in a reaper that collects it on a schedule.
+
+| Interrupted after | On the array | On this host | What resolves it |
+|---|---|---|---|
+| creating a disk, before Proxmox VE recorded it | the volume | possibly a mapped device | listed by `list_images`, so it appears in the storage content view as a disk of that guest — delete it there |
+| connecting a disk, before its device appeared | volume + host connection | possibly a mapped device | as above; the connection is reused if the guest is retried |
+| deleting a disk, after disconnect, before destroy | the volume, disconnected | already cleaned | Proxmox VE still holds the volid; the next activation reconnects, and deleting again completes |
+| deleting a disk, after destroy, before untracking | — | stale device + tracking entry | the orphan reaper: first seen at least 600 s ago, absent from the array on three consecutive passes |
+| taking a snapshot, before the config backup | the snapshot | — | nothing to resolve; the config backup is best-effort and the next snapshot writes its own |
+| reading a snapshot, after the temp clone was made | the `-tsa-` clone + connection | a mapped device | the temp-clone reaper: 1 hour with `pure-host-mode = per-node`, 24 hours with `shared` |
+| resizing, after the array grew the volume | — | a map still at the old size | `activate_volume` compares the array size against `blockdev --getsize64` and rescans when they disagree |
+
+Two consequences worth stating plainly:
+
+- **A disk volume left by an interrupted create is not garbage-collected.** It
+  is deliberately visible instead: the plugin will not delete an array volume
+  that Proxmox VE might still be about to reference. Look for a disk in the
+  storage content view that no guest configuration mentions.
+- **The reapers only ever remove local devices and the plugin's own transient
+  objects.** No automated path in this plugin destroys a volume that holds
+  guest data.
+
+## Scale
+
+What has been measured: a poll cycle costs **8 REST calls across three
+consecutive `activate_storage` + `status` rounds** on a storage with a pod,
+and collection GETs follow Pure's continuation tokens so a listing is never
+truncated at one page.
+
+What has not: this plugin has not been driven against an array holding
+thousands of volumes or a cluster of many nodes. The arithmetic above is what
+to size against; if you run it at that scale, the numbers are worth reporting.
+
 ## Diagnostic Commands
 
 ### Plugin Status

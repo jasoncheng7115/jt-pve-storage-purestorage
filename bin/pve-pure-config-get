@@ -65,7 +65,7 @@ use PVE::Storage::Custom::PureStorage::ISCSI qw(
     rescan_sessions
 );
 
-my $VERSION = '1.1.34';
+my $VERSION = '1.1.35';
 
 # Strip the tombstone suffix that volume_delete (plugin v1.1.15+) adds
 # before destroying a volume. Tombstone names look like
@@ -96,6 +96,7 @@ my $list_only = 0;
 my $snap_name;
 my $restore_mode = 0;
 my $help = 0;
+my $show_version;
 
 GetOptions(
     'storage|s=s' => \$storage_id,
@@ -105,7 +106,19 @@ GetOptions(
     'snap|n=s'    => \$snap_name,
     'restore|r'   => \$restore_mode,
     'help|h'      => \$help,
+    # No short alias: -v is already vmid, and Getopt::Long ignores case by
+    # default, so 'version|V' collides with it.
+    'version'     => \$show_version,
 ) or usage();
+
+# An operator reaching for this during an outage needs to know which build
+# they are holding, and the answer has to come from the script rather than
+# from dpkg -- the recovery case includes a node whose package database is
+# not what is running.
+if ($show_version) {
+    print "pve-pure-config-get $VERSION\n";
+    exit 0;
+}
 
 usage() if $help;
 
@@ -114,6 +127,7 @@ sub usage {
 pve-pure-config-get v$VERSION - Retrieve VM config backup from Pure Storage
 
 Usage: pve-pure-config-get -s <storage> -v <vmid> [-n <snap>] [-o <output_dir>] [-l] [-r]
+       pve-pure-config-get --version
 
 Options:
     -s, --storage <name>   Pure Storage storage ID (required)
