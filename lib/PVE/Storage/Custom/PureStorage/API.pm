@@ -68,6 +68,8 @@ sub new {
         # why a forked worker still builds its own UA. Seeding the token saves
         # a POST /login per forked reaper pass.
         _session_token => $opts{session_token},
+        # Seeded from another client's session: usable, but not ours to end.
+        _session_owned => 0,
         _api_major  => undef,  # 1 or 2, set after version detection
     };
 
@@ -229,6 +231,108 @@ sub _get_auth_headers {
 }
 
 # Create session using API token or username/password
+# Sessions this process created, so they can be given back.
+#
+# A REST session is a resource on the array, not a local object: Pure's own
+# reference documents DELETE /api/1.x/auth/session as "Deletes (invalidates)
+# the REST session", and 2.x carries /logout alongside /login as an endpoint
+# that needs no token. Nothing here ever called either, so every process that
+# spoke to the array left a session behind to sit out its idle timeout.
+#
+# That is not one session. pvestatd rebuilds its client when the local cache
+# TTL expires, a pvedaemon worker runs one task and exits, and every `pvesm`,
+# `qm` or `pct` invocation is its own process -- each logs in once and walks
+# away.
+#
+# Keyed by host and token rather than by object, so the release does not
+# depend on object lifetime, and stamped with the pid that created it: a
+# forked worker inherits this table and must not end its parent's sessions.
+my %owned_sessions;
+
+sub _session_key { my ($self) = @_; return join("\0", $self->{host} // '',
+    $self->{port} // '', $self->{api_version} // '', $self->{_session_token} // ''); }
+
+sub _register_session {
+    my ($self) = @_;
+    return unless $self->{_session_token};
+    $owned_sessions{ _session_key($self) } = {
+        pid     => $$,
+        host    => $self->{host},
+        port    => $self->{port},
+        version => $self->{api_version},
+        token   => $self->{_session_token},
+        ssl     => $self->{ssl_verify},
+    };
+    return;
+}
+
+# Give a session back to the array.
+#
+# Deliberately NOT gated on the session being "valid" by this plugin's local
+# reckoning. A session past our own TTL is the one that most needs releasing:
+# the TTL is our policy, and the array's session is still occupying whatever
+# the array counts.
+sub logout {
+    my ($self) = @_;
+
+    return 0 unless $self->{_session_token};
+    return 0 unless $self->{_session_owned};
+
+    my $ok = _release_session({
+        host    => $self->{host},
+        port    => $self->{port},
+        version => $self->{api_version},
+        token   => $self->{_session_token},
+        ssl     => $self->{ssl_verify},
+    }, $self->{_ua});
+
+    delete $owned_sessions{ _session_key($self) };
+    delete $self->{_session_token};
+    delete $self->{_session_owned};
+
+    return $ok;
+}
+
+# The wire part, usable without a live object so the END block can run after
+# the objects have gone.
+sub _release_session {
+    my ($info, $ua) = @_;
+
+    return 0 unless $info && $info->{token} && $info->{host};
+
+    $ua //= LWP::UserAgent->new(
+        timeout  => 5,
+        ssl_opts => {
+            verify_hostname => $info->{ssl} ? 1 : 0,
+            SSL_verify_mode => $info->{ssl} ? 0x01 : 0x00,
+        },
+    );
+
+    my $base = "https://$info->{host}:$info->{port}/api/$info->{version}";
+    my $req;
+    if (($info->{version} // '') =~ /^2\./) {
+        $req = HTTP::Request->new(POST => "$base/logout");
+    } else {
+        $req = HTTP::Request->new(DELETE => "$base/auth/session");
+    }
+    $req->header('x-auth-token' => $info->{token});
+
+    my $resp = eval { $ua->request($req) };
+    return ($resp && $resp->is_success) ? 1 : 0;
+}
+
+# A pvedaemon worker or a `pvesm` process exits after one task. DESTROY cannot
+# do this: at global destruction the user agent is already being torn down, so
+# the request cannot be made. An END block still can.
+END {
+    for my $key (keys %owned_sessions) {
+        my $info = $owned_sessions{$key};
+        next unless $info && ($info->{pid} // 0) == $$;
+        eval { _release_session($info) };
+        delete $owned_sessions{$key};
+    }
+}
+
 sub _create_session {
     my ($self) = @_;
 
@@ -268,6 +372,12 @@ sub _create_session {
         my $token = $resp->header('x-auth-token');
         if ($token) {
             $self->{_session_token} = $token;
+            # This object created the session, so this object is the one that
+            # may release it. A client seeded with someone else's token (see
+            # the session-reuse in the plugin's _get_api) must never log that
+            # token out -- the owner is still using it.
+            $self->{_session_owned} = 1;
+            _register_session($self);
             return 1;
         }
         croak "Session created but no x-auth-token in response";

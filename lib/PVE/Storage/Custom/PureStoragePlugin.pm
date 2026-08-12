@@ -1228,6 +1228,16 @@ sub _get_api {
             ($cached->{pid} // 0) == $$) {
             return $cached->{api};
         }
+
+        # About to replace it. The array's session is still open -- the TTL
+        # above is this plugin's own policy, not the array's -- so give it
+        # back rather than abandoning it. Only the client that created a
+        # session owns it; one seeded from another client's token declines.
+        # A borrower left holding an invalidated token costs one 401 and the
+        # existing retry path re-logs in.
+        if (($cached->{pid} // 0) == $$) {
+            eval { $cached->{api}->logout(); };
+        }
     }
 
     my $ssl_verify = $scfg->{'pure-ssl-verify'} // 0;
@@ -2431,7 +2441,25 @@ sub activate_storage {
     # Verify we can connect to the array
     eval { $api->array_get(); };
     if ($@) {
-        die "Cannot connect to Pure Storage array at $scfg->{'pure-portal'}: $@";
+        my $err = $@;
+
+        # Proxmox VE logs whatever this dies with, on every poll -- roughly
+        # six times a minute, per node, for as long as the outage lasts. The
+        # array's own answer is the diagnosis, so the first failures carry it
+        # in full; once the outage is on record, repeating a 250-character
+        # transport error every ten seconds only buries the journal, and the
+        # throttled OUTAGE line beside it already carries the same facts.
+        my $h = eval { _read_health_state($storeid) } // {};
+        if ($h->{down}) {
+            chomp(my $short = $err);
+            $short =~ s/\s+/ /g;
+            $short = substr($short, 0, 80) . '...' if length($short) > 80;
+            die "Pure FlashArray at $scfg->{'pure-portal'} is unreachable "
+              . "(storage '$storeid'; see the OUTAGE record for the full "
+              . "error). $short\n";
+        }
+
+        die "Cannot connect to Pure Storage array at $scfg->{'pure-portal'}: $err";
     }
 
     # NOTE: orphaned temp-clone cleanup deliberately does NOT run here. It

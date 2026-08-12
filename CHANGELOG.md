@@ -8,6 +8,45 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.36] - 2026-08-12
+
+Found by auditing this project against defects the sibling
+`jt-pve-storage-dellemc` plugin hit first.
+
+### Fixed
+- **Every process left a REST session behind on the array.** A session is a
+  resource on the array, not a local object -- Pure documents
+  `DELETE /api/1.x/auth/session` as *"Deletes (invalidates) the REST session"*,
+  and its 2.x client lists `/logout` beside `/login` -- and nothing here called
+  either. That is not one session: `pvestatd` rebuilds its client whenever the
+  local 300-second cache expires, a `pvedaemon` worker runs one task and exits,
+  and every `pvesm`, `qm` or `pct` invocation is its own process. Each logged
+  in once and walked away, leaving the session to sit out the array's idle
+  timeout. Sessions this process created are now released from an `END` block
+  -- `DESTROY` cannot do it, because at global destruction the user agent is
+  already going away -- and the registry is stamped with the creating pid so a
+  forked worker does not end its parent's session. The client cache releases
+  the session it is about to discard when its TTL expires, rather than
+  abandoning it: that TTL is this plugin's policy, and the array's session is
+  still there. A client seeded with another client's token (v1.1.26) never
+  releases it, because the owner is still using it.
+- **A long outage buried the journal.** Proxmox VE logs whatever
+  `activate_storage` dies with, on every poll -- about six times a minute, per
+  node, for as long as the outage lasts. The throttled OUTAGE record already
+  carried the same facts. The first failures still carry the array's own
+  answer, because that is the diagnosis; after the outage is on record the
+  message names the storage and the address and points at the OUTAGE record.
+
+### Checked, no change needed
+- The sibling found two of the four volume names Proxmox VE builds itself were
+  unrecognised, and that the failure was not a refusal: allocation fell through
+  to picking a free disk id, so the volume was created under a name that says
+  it is an ordinary VM disk. This plugin refuses an unrecognised name instead.
+  The enumeration was re-read out of this Proxmox VE anyway:
+  `vm-<vmid>-efi-enroll` appears only as a QEMU storage daemon id and never
+  reaches allocation, and no `vdisk_alloc` in the tree passes a fleecing name --
+  which this plugin handles regardless.
+
 ## [1.1.35] - 2026-08-09
 
 Found by auditing this project against defects the sibling

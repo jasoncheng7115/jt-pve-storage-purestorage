@@ -568,3 +568,68 @@ If full test plan is too long, the absolute minimum smoke test is:
 
 If all five pass, the plugin is at least minimally functional. Run the
 full plan before any production deployment or release.
+
+---
+
+## Before every release — the operational checklist
+
+Adapted from the checklist the sibling `jt-pve-storage-synology` project uses.
+Its opening point applies here unchanged, and was re-measured on this node:
+
+**Drive it from the web interface.** `pvedaemon` and `pveproxy` run as
+`#!/usr/bin/perl -T` **with no `PATH` at all** — `/proc/<pid>/environ` for
+pvedaemon, pvestatd and pveproxy carries none — while `qm`, `pvesm` and `pvesh`
+are plain `perl` with a shell's environment. `multipath`, `multipathd`,
+`iscsiadm`, `dmsetup`, `blockdev` and `kpartx` all live in `/usr/sbin`, which is
+not on the fallback `/bin:/usr/bin`. **A run from a shell is a regression
+check, not a verification.**
+
+Stages B through H need a reachable Pure FlashArray. No other vendor's array can
+stand in: this plugin negotiates Pure's REST API, derives every WWID from the
+Pure OUI prefix `3624a9370`, and scopes its multipath block on the SCSI inquiry
+strings `vendor "PURE"` / `product "FlashArray"`. Pointed at anything else it
+fails at the first call.
+
+| | Operation | What it exercises |
+|---|---|---|
+| **A1–A4** | Add · update credentials · remove a storage | `on_add_hook`, `on_update_hook_full`, `on_delete_hook`, the credential store in `/etc/pve/priv/storage`. Not reachable from the GUI — PVE hardcodes its storage-type list |
+| **B1** | Add a disk | `alloc_image`, host registration, first LUN map |
+| **B2** | Resize, running and stopped | `volume_resize`, then the local refresh — the map must reach the new size, not just the array |
+| **B3** | Move to another storage and back | the `qemu-img` path over `path()` |
+| **B4** | Detach and remove | `free_image`: the in-use guard, disconnect, `kpartx -d`, flush, tombstone rename, destroy, untrack |
+| **C1 · C2** | Snapshot, running and stopped | `volume_snapshot`, the host cache flush, the config-backup volume |
+| **C3** | Roll back | `volume_snapshot_rollback`, the fail-closed idle guard, cache invalidation |
+| **C4** | Delete a snapshot | the temp-clone sweep that runs from it |
+| **C5** | `bin/pve-pure-config-get --list` and a restore | the disaster-recovery tool against a real config-backup volume |
+| **D1** | Stop and start | `activate_volume`: session rescan, WWID confirmation, map creation, size reconciliation |
+| **D2** | Migrate away and back, offline and online | that the source node is left clean |
+| **D3 · D4 · D5** | Full clone · clone from a snapshot · template then linked clone | `clone_image`, `create_base`, and `list_images` reporting the `base/clone` form |
+| **E1 · E2 · E3** | Backup in all three `vzdump` modes | the snapshot-access temp clone, and its release |
+| **E4 · E5** | Restore to a new VM ID · overwrite the original | `alloc_image` and `free_image` back to back |
+| **F1–F3** | Orphan reaping with a guest running on the storage | the in-use guard, the grace period and the absence hysteresis |
+| **G1–G9** | The container path | `pct` drives `path()`, `activate_volume`, `volume_size_info` and resize directly, and runs under `-T` |
+| **H1–H4** | Snapshot, resize, clone and migration killed part-way | what each leaves on the array and on the host — see the table in `TROUBLESHOOTING.md` |
+
+### What has been run without an array
+
+These stages need no hardware and were driven on a Proxmox VE 9 node
+(`libpve-storage-perl` 9.1.6, `APIVER` 15):
+
+| | Result |
+|---|---|
+| A1 · A2 — add a storage, update its credentials | pass. The token never reaches `storage.cfg`; `/etc/pve/priv/storage/<id>.pure-token` is created `0600` |
+| A3 — a storage id that collides with an existing one | pass. Refused at `pvesm add`, with both ids and the shared prefix named |
+| A4 — `--delete pure-api-token`, then remove the storage | pass, and it confirms the documented trap: the delete removes the secret file outright, leaving the storage with no credentials. Removing the storage clears both the secret and the config entry |
+| Adding an **enabled** storage whose array is unreachable | refused at `pvesm add` with the portal, the URL and whether a token was sent — it does not create a storage that cannot work |
+| The plugin driven under `perl -T` with `PATH` deleted | pass, 12 checks: the module loads, `udevadm` resolves, a command carrying a value that came off the array runs and its argument arrives intact, and an argument the plugin could not have produced is refused |
+| `multipath -F` is never generated anywhere in the tree | pass, and enforced by a static check |
+| Package install, state directories, service reloads | pass. `/var/lib/` and `/var/run/pve-storage-purestorage` are `0700 root:root` |
+
+`/etc/multipath/conf.d/pure-storage.conf` is written by `_ensure_multipath_config()`
+from `activate_storage`, so it appears only once a Pure storage is activated —
+its absence on a node with no Pure storage is expected. It matters because
+multipath-tools' own built-in `PURE`/`FlashArray` entry sets
+`path_grouping_policy`, `prio` and `fast_io_fail_tmo 10` but **no
+`no_path_retry` and no `dev_loss_tmo`**; the generated file supplies
+`no_path_retry 30`, `fast_io_fail_tmo 5` and `dev_loss_tmo 60`.
+

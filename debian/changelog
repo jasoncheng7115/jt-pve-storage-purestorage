@@ -1,3 +1,22 @@
+jt-pve-storage-purestorage (1.1.36-1) stable; urgency=medium
+
+  * Give REST sessions back to the array. Nothing called a logout, so every
+    process that spoke to the array left a session behind to sit out its idle
+    timeout: pvestatd rebuilds its client when the local cache TTL expires, a
+    pvedaemon worker runs one task and exits, and every pvesm, qm or pct
+    invocation is its own process. Sessions this process created are released
+    from an END block, stamped with the creating pid so a forked worker does
+    not end its parent's session, and a client seeded with another client's
+    token never releases it.
+  * Stop repeating the full transport error on every poll of a storage that is
+    already recorded as down. The first failures still carry the array's own
+    answer; after that the message names the storage and points at the OUTAGE
+    record.
+
+  Both were found by auditing this project against defects the sibling
+  jt-pve-storage-dellemc plugin hit first.
+
+ -- Jason Cheng <jason@jason.tools>  Wed, 12 Aug 2026 21:07:22 +0800
 jt-pve-storage-purestorage (1.1.35-1) stable; urgency=medium
 
   * Untaint command arguments. pvedaemon and pveproxy run with -T, and

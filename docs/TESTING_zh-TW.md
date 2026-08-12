@@ -549,3 +549,66 @@ SIGKILL 收回。唯一安全的防護是「一開始就不執行該操作」。
 5. 再次 `pvesm status pure1` → 仍在 5 秒內回應
 
 五項全過，代表外掛至少基本可用。任何正式部署或發版前都應跑完整計畫。
+
+---
+
+## 每次釋出前——操作檢查表
+
+改編自相關的 `jt-pve-storage-synology` 專案所用的檢查表。它開頭那一點在這裡同樣
+成立，並已在本節點重新量測：
+
+**請從網頁介面驅動。** `pvedaemon` 與 `pveproxy` 以 `#!/usr/bin/perl -T` 執行，
+而且**完全沒有 `PATH`**——pvedaemon、pvestatd、pveproxy 的
+`/proc/<pid>/environ` 裡都沒有這個變數——而 `qm`、`pvesm`、`pvesh` 是普通的
+`perl`，帶著 shell 的環境。`multipath`、`multipathd`、`iscsiadm`、`dmsetup`、
+`blockdev`、`kpartx` 全都位於 `/usr/sbin`，不在退回的 `/bin:/usr/bin` 之內。
+**從 shell 跑一遍是回歸檢查，不是驗證。**
+
+B 到 H 階段需要一台可連線的 Pure FlashArray。其他廠商的陣列無法代替：本外掛協商
+Pure 的 REST API、每個 WWID 都由 Pure 的 OUI 前綴 `3624a9370` 推導，multipath
+設定區塊則以 SCSI inquiry 的 `vendor "PURE"` / `product "FlashArray"` 界定範圍。
+指向其他任何設備都會在第一次呼叫就失敗。
+
+| | 操作 | 驗證什麼 |
+|---|---|---|
+| **A1–A4** | 新增 · 更新憑證 · 移除 storage | `on_add_hook`、`on_update_hook_full`、`on_delete_hook`，以及 `/etc/pve/priv/storage` 的憑證存放。GUI 無法操作——PVE 的 storage 型別清單是寫死的 |
+| **B1** | 新增磁碟 | `alloc_image`、主機註冊、第一次 LUN 對應 |
+| **B2** | 調整大小（執行中與停機） | `volume_resize` 及本機刷新——對應必須跟上新容量，不能只有陣列變大 |
+| **B3** | 搬移到其他 storage 再搬回 | 經由 `path()` 的 `qemu-img` 路徑 |
+| **B4** | 卸載並移除 | `free_image`：使用中守門、中斷連線、`kpartx -d`、flush、tombstone 改名、銷毀、解除追蹤 |
+| **C1 · C2** | 快照（執行中與停機） | `volume_snapshot`、主機快取沖刷、設定備份 Volume |
+| **C3** | 倒回 | `volume_snapshot_rollback`、fail-closed 閒置守門、快取失效 |
+| **C4** | 刪除快照 | 由它觸發的暫存複製清理 |
+| **C5** | `bin/pve-pure-config-get --list` 與還原 | 災難復原工具對真實設定備份 Volume 的操作 |
+| **D1** | 停止再啟動 | `activate_volume`：工作階段重新掃描、WWID 確認、建立對應、容量調和 |
+| **D2** | 遷移出去再遷回（離線與線上） | 來源節點是否被清乾淨 |
+| **D3 · D4 · D5** | 完整複製 · 從快照複製 · 範本後 linked clone | `clone_image`、`create_base`，以及 `list_images` 是否回報 `base/clone` 形式 |
+| **E1 · E2 · E3** | 三種 `vzdump` 模式的備份 | 快照存取用的暫存複製，及其釋放 |
+| **E4 · E5** | 還原到新 VM ID · 覆寫原本的 | `alloc_image` 與 `free_image` 連續操作 |
+| **F1–F3** | 有 guest 在該 storage 上執行時進行殘留回收 | 使用中守門、寬限期與缺席遲滯 |
+| **G1–G9** | 容器路徑 | `pct` 會直接驅動 `path()`、`activate_volume`、`volume_size_info` 與 resize，且在 `-T` 下執行 |
+| **H1–H4** | 快照、調整大小、複製、遷移中途被殺 | 各自在陣列與本機留下什麼——見 `TROUBLESHOOTING.md` 的表 |
+
+### 不需要陣列即可執行的部分
+
+以下階段不需要硬體，已在一台 Proxmox VE 9 節點上實際驅動
+（`libpve-storage-perl` 9.1.6、`APIVER` 15）：
+
+| | 結果 |
+|---|---|
+| A1 · A2——新增 storage、更新憑證 | 通過。token 完全不會進入 `storage.cfg`；`/etc/pve/priv/storage/<id>.pure-token` 以 `0600` 建立 |
+| A3——與既有 storage 產生名稱碰撞的 id | 通過。在 `pvesm add` 階段被拒絕，訊息中指出兩個 id 與共用的前綴 |
+| A4——`--delete pure-api-token`，接著移除 storage | 通過，並證實文件記載的陷阱屬實：該刪除會直接移除機密檔，使該 storage 完全沒有憑證。移除 storage 則會同時清除機密檔與設定條目 |
+| 新增一個**已啟用**但陣列不可達的 storage | 在 `pvesm add` 階段即被拒絕，訊息含 portal、URL 以及是否送出 token——不會建立一個根本無法運作的 storage |
+| 在 `perl -T` 且刪除 `PATH` 的環境下驅動外掛 | 通過，12 項：模組可載入、`udevadm` 解析得到、帶著陣列回傳值的指令可以執行且參數原封不動送達、本外掛不可能產生的參數會被拒絕 |
+| 全樹不得產生 `multipath -F` | 通過，並由靜態檢查把關 |
+| 套件安裝、狀態目錄、服務重新載入 | 通過。`/var/lib/` 與 `/var/run/pve-storage-purestorage` 為 `0700 root:root` |
+
+`/etc/multipath/conf.d/pure-storage.conf` 由 `activate_storage` 呼叫的
+`_ensure_multipath_config()` 寫入，因此只有在某個 Pure storage 被啟用之後才會
+出現；在沒有任何 Pure storage 的節點上看不到它是預期行為。它之所以重要，是因為
+multipath-tools 自己內建的 `PURE`/`FlashArray` 條目只設定了
+`path_grouping_policy`、`prio` 與 `fast_io_fail_tmo 10`，**沒有 `no_path_retry`
+也沒有 `dev_loss_tmo`**；產生的檔案補上 `no_path_retry 30`、`fast_io_fail_tmo 5`
+與 `dev_loss_tmo 60`。
+
