@@ -1,5 +1,5 @@
 PACKAGE = jt-pve-storage-purestorage
-VERSION = 1.1.36
+VERSION = 1.1.37
 
 DESTDIR =
 PREFIX = /usr
@@ -39,6 +39,13 @@ test:
 	@perl -Ilib -c bin/pve-pure-config-get || exit 1
 	@echo "All syntax checks passed."
 	@echo ""
+	@if [ -f t/run-all.pl ]; then \
+		echo "Running behaviour tests..."; \
+		perl t/run-all.pl || exit 1; \
+		echo ""; \
+	else \
+		echo "(t/run-all.pl not present - skipping behaviour tests)"; \
+	fi
 	@if [ -f tools/audit-invariants.pl ]; then \
 		perl tools/audit-invariants.pl . || exit 1; \
 	else \

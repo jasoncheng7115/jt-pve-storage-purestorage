@@ -8,6 +8,49 @@
 
 ---
 
+## [1.1.37] - 2026-08-15
+
+由 @DLTKdevopsmaconomy 回報的四個缺陷，每一個都附有重現方式與根因：
+[#15](https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/15)、
+[#16](https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/16)、
+[#17](https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/17)、
+[#18](https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/18)。
+
+### 修正
+- **1.1.36 上刪除 Volume 與遷移磁碟都會失敗。** 1.1.35 加入的參數守門拒絕了
+  `%n %w`——那是本外掛自己傳給 `multipathd show maps` 的格式字串，共四個呼叫點。
+  第一個走到它的是 `free_image()` 用來做使用中檢查的 WWID 查詢，因此表現為
+  *「Refusing to delete volume ... the in-use safety check cannot run」*，而
+  storage 遷移則在配置好目標 Volume 之後失敗。把全樹所有字面參數拿去對自己的
+  守門掃一遍，找到第二個：設定備份 Volume 的 mkfs 選項 `^has_journal`，自 1.1.35
+  起就被拒絕，而且因為該失敗屬於非致命而一直是無聲的。兩者現在都以**精確比對**
+  處理，而不是放寬字元類別——來自陣列或 `multipathd` 輸出的值仍然不得包含空格或
+  caret。`make test` 現在會在「全樹任一字面參數被守門拒絕」時失敗。
+- **realm 範圍的 pod 被切錯分隔符。** 受 realm 範圍限制的 Purity 帳號，其 pod 命名
+  為 `realm::pod`，因此其中的 Volume 是 `realm::pod::name`。切第一個 `::` 會把
+  realm 當成 pod、把 pod 當成名稱的一部分，列舉結果為空。改為切最後一個 `::`；
+  只有單一分隔符時兩種寫法結果相同，因此沒有 realm 的 pod 完全不受影響。
+- **host 物件名稱沒有帶 realm 前綴。** 受 realm 範圍限制的帳號要求物件名稱都帶
+  `realm::`，host 也不例外，因此陣列會對本外掛剛建立的 host 回答
+  `Host does not exist`。realm 取自 `pure-pod`；沒有 realm 的 pod 不受影響。
+- **OVMF 的 `efidisk0` 無法建立。** Proxmox VE 給它 528 KiB，而陣列拒絕小於 1 MiB
+  的 Volume，因此配置會以 *「Volume size must be between 1 MB and 4 PB」* 失敗，
+  帶有這種 VM 的遷移也一併失敗。現在會夾到該下限——本外掛對自己的設定備份 Volume
+  早就套用同一個值。Proxmox VE 的 guest 設定仍記錄原本的邏輯大小，因此這只是補上
+  未使用的空間。
+- 有一處以裸名呼叫 `multipathd`。Proxmox VE 的常駐程式沒有 `PATH`，而 `multipathd`
+  位於 `/usr/sbin`，因此該呼叫在網頁介面下無法執行。已改為絕對路徑。
+- RAM 快照的裝置始終沒有出現時，訊息現在會指出該檢查什麼、該調高哪個設定。
+
+### 新增
+- **行為測試進入版本庫的 `t/`，並由 `make test` 執行。** 三十組，每一組重現一個本
+  外掛真的出過的缺陷；每一組都標明它守護的稽核紀錄條目，因此覆蓋率可以重新計算而
+  不是相信。其中兩組在 `perl -T` 下執行，因為 `pvedaemon` 與 `pveproxy` 就是如此，
+  而不在 `-T` 下執行的測試完全看不見那一類缺陷。
+- 新增靜態檢查：版本號在所有記載它的檔案中一致、Pure WWID 前綴在三處一致、
+  `activate_storage()` 不出現昂貴操作、以及參數守門必須接受本外掛自己傳的參數。
+  合計二十一條。
+
 ## [1.1.36] - 2026-08-12
 
 本次修正來自把本專案對照相關的 `jt-pve-storage-dellemc` 外掛先踩到的缺陷逐一檢查。

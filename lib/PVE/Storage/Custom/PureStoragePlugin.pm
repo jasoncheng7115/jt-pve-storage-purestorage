@@ -719,6 +719,10 @@ use constant TEMP_CLONE_UNOWNED_MIN_AGE => 86400;
 # 63 characters (alphanumeric, '_' and '-') in length and begin and end with a
 # letter or number."
 use constant MAX_PURE_VOLUME_NAME => 63;
+
+# The smallest volume FlashArray will create. Its own words when refused:
+# "Volume size must be between 1 MB and 4 PB".
+use constant PURE_MIN_VOLUME_BYTES => 1024 * 1024;
 use constant OUTAGE_REEMIT_SECONDS => 30;    # re-emit outage ERROR at most this often
 use constant CAPACITY_WARN_PCT     => 90;
 use constant CAPACITY_CRIT_PCT     => 95;
@@ -1378,12 +1382,29 @@ sub _get_host_name {
     my $cluster_name = $scfg->{'pure-cluster-name'} // 'pve';
     my $mode = $scfg->{'pure-host-mode'} // 'per-node';
 
+    my $name;
     if ($mode eq 'shared') {
-        return encode_host_name($cluster_name, undef);
+        $name = encode_host_name($cluster_name, undef);
     } else {
         my $nodename = PVE::INotify::nodename();
-        return encode_host_name($cluster_name, $nodename);
+        $name = encode_host_name($cluster_name, $nodename);
     }
+
+    # A Purity account scoped to a realm requires every object name to carry
+    # the `realm::` prefix -- hosts included, not just volumes. Without it the
+    # array answers "Host does not exist" for a host this plugin just created,
+    # and `pvesm status` fails. The realm is taken from `pure-pod`, which such
+    # an account must already give as `realm::pod`: that is how the API
+    # behaves for these accounts, and it avoids a second option that could
+    # disagree with the first. A pod with no realm prefix changes nothing.
+    # (#17)
+    if (my $pod = $scfg->{'pure-pod'}) {
+        if (my ($realm) = $pod =~ /^([^:]+)::/) {
+            $name = "${realm}::${name}" if length $realm;
+        }
+    }
+
+    return $name;
 }
 
 # Get full volume name with pod prefix if configured
@@ -2490,7 +2511,7 @@ sub activate_storage {
             multipath_reload_throttled();
 
             # Trigger udev to update device info
-            _udev_refresh();
+            _udev_refresh();  ## audit-ok: A1/A5 - inside the rescan gate above
         }
 
         # Verify FC fabric connectivity to Pure Storage target ports
@@ -2672,7 +2693,7 @@ sub activate_storage {
                 multipath_reload_throttled();
 
                 # Trigger udev to update device info
-                _udev_refresh();
+                _udev_refresh();  ## audit-ok: A1/A5 - inside the rescan gate above
             }
         }
     }
@@ -2908,6 +2929,14 @@ sub alloc_image {
 
     # Size is in kilobytes, convert to bytes
     my $size_bytes = $size * 1024;
+
+    # FlashArray refuses a volume under 1 MiB outright: "Volume size must be
+    # between 1 MB and 4 PB". Proxmox VE sizes an OVMF efidisk0 at 528 KiB, so
+    # every VM with UEFI firmware failed to allocate, and a migration carrying
+    # one failed at the first volume. The plugin already hardcodes this floor
+    # for its own config-backup volume. Proxmox VE keeps the logical size in
+    # the guest configuration, so this only pads unused space. (#18)
+    $size_bytes = PURE_MIN_VOLUME_BYTES if $size_bytes < PURE_MIN_VOLUME_BYTES;
 
     my $pure_volname_base;
     my $pve_volname;
@@ -3152,7 +3181,12 @@ sub alloc_image {
 
         unless ($device && -b $device) {
             # Cleanup on failure
-            warn "State volume device did not appear within ${timeout}s, cleaning up '$pure_volname'\n";
+            warn "State volume device did not appear within ${timeout}s, "
+               . "cleaning up '$pure_volname'. The RAM snapshot cannot be "
+               . "written without it. Check 'multipath -ll' and "
+               . "'systemctl status multipathd' on this node; raise "
+               . "pure-device-timeout if this fabric is consistently slower "
+               . "than ${timeout}s.\n";
 
             # Collect diagnostic info before cleanup
             my $diag = "";

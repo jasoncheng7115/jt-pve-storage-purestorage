@@ -134,6 +134,10 @@
             <span class="lang-en">Acknowledgments</span>
             <span class="lang-zh">致謝</span>
         </a>
+        <a href="#related" class="sidebar__link">
+            <span class="lang-en">Related projects</span>
+            <span class="lang-zh">相關專案</span>
+        </a>
     </div>
 </nav>
 
@@ -146,7 +150,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.36 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.37 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -541,7 +545,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.36-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.37-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -621,7 +625,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.36-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.37-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1986,6 +1990,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
     </p>
 
     <div class="changelog-entry">
+        <div class="changelog-version">v1.1.37 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
+        <div class="changelog-date">2026-08-15</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Four reported defects, and 1.1.36 users should upgrade:</strong> the argument guard added in 1.1.35 refused <code>%n %w</code>, the format string this plugin itself passes to <code>multipathd</code>, and the first caller to reach it is the in-use check <code>free_image()</code> depends on &mdash; so deleting a volume and migrating a disk both failed. A scan of every literal argument found a second one refused since 1.1.35 and silent. Also: a realm-scoped pod was split on the wrong separator, the host object name carried no realm prefix, and an OVMF <code>efidisk0</code> (528 KiB) fell below the array's 1 MiB minimum. The behaviour tests now live in <code>t/</code> and run from <code>make test</code>.</span>
+            <span class="lang-zh"><strong>四個回報的缺陷，1.1.36 的使用者請升級：</strong>1.1.35 加入的參數守門拒絕了 <code>%n %w</code>&mdash;&mdash;那是本外掛自己傳給 <code>multipathd</code> 的格式字串，而第一個走到它的正是 <code>free_image()</code> 依賴的使用中檢查，因此刪除 Volume 與遷移磁碟都會失敗。掃過全樹所有字面參數後又找到第二個，自 1.1.35 起被拒絕且一直無聲。另外：realm 範圍的 pod 被切錯分隔符、host 物件名稱沒帶 realm 前綴、OVMF 的 <code>efidisk0</code>（528 KiB）低於陣列的 1 MiB 下限。行為測試現在放在 <code>t/</code> 並由 <code>make test</code> 執行。</span>
+        </div>
+    </div>
+
+    <div class="changelog-entry">
         <div class="changelog-version">v1.1.36 <span class="changelog-tag changelog-tag--fix">Fix</span></div>
         <div class="changelog-date">2026-08-12</div>
         <div class="changelog-summary">
@@ -2393,6 +2406,44 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
 </div><!-- /content-wrap -->
 
 <!-- ---- Footer ---- -->
+<section class="doc-section" id="related">
+    <h2 class="section-title">
+        <span class="lang-en">Related projects</span>
+        <span class="lang-zh">相關專案</span>
+    </h2>
+    <p class="section-subtitle">
+        <span class="lang-en">Proxmox VE storage plugins for other arrays. They share the host-side layer &mdash; iSCSI sessions, multipath, WWID tracking &mdash; and the operational rules, so a defect found in one is audited for in all of them.</span>
+        <span class="lang-zh">其他陣列的 Proxmox VE 儲存 plugin。它們共用主機端的架構&mdash;&mdash;iSCSI 工作階段、multipath、WWID 追蹤&mdash;&mdash;以及維運規則，因此在其中一個專案找到的缺陷，會回頭在其他專案逐一檢查。</span>
+    </p>
+
+    <div class="card-grid">
+        <a class="card" href="https://github.com/jasoncheng7115/jt-pve-storage-netapp" target="_blank" rel="noopener">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg></div>
+            <div class="card__title">jt-pve-storage-netapp</div>
+            <div class="card__desc">
+                <span class="lang-en">NetApp ONTAP</span>
+                <span class="lang-zh">NetApp ONTAP</span>
+            </div>
+        </a>
+        <a class="card" href="https://github.com/jasoncheng7115/jt-pve-storage-dellemc" target="_blank" rel="noopener">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01"/><path d="M7 17h.01"/></svg></div>
+            <div class="card__title">jt-pve-storage-dellemc</div>
+            <div class="card__desc">
+                <span class="lang-en">PowerStore &middot; PowerVault ME &middot; PowerFlex &middot; Unity XT</span>
+                <span class="lang-zh">PowerStore &middot; PowerVault ME &middot; PowerFlex &middot; Unity XT</span>
+            </div>
+        </a>
+        <a class="card" href="https://github.com/jasoncheng7115/jt-pve-storage-synology" target="_blank" rel="noopener">
+            <div class="card__icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8"/><path d="M8 12h8"/><path d="M8 17h4"/></svg></div>
+            <div class="card__title">jt-pve-storage-synology</div>
+            <div class="card__desc">
+                <span class="lang-en">Synology SAN Manager</span>
+                <span class="lang-zh">Synology SAN Manager</span>
+            </div>
+        </a>
+    </div>
+</section>
+
 <footer class="footer">
     <div class="footer__inner">
         <div>

@@ -8,6 +8,62 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.37] - 2026-08-15
+
+Four defects reported by @DLTKdevopsmaconomy, each with a reproduction and a
+root cause: [#15](https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/15),
+[#16](https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/16),
+[#17](https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/17),
+[#18](https://github.com/jasoncheng7115/jt-pve-storage-purestorage/issues/18).
+
+### Fixed
+- **Deleting a volume and migrating a disk failed on 1.1.36.** The argument
+  guard added in 1.1.35 refused `%n %w` -- the format string this plugin itself
+  passes to `multipathd show maps`, at four call sites. The first caller to
+  reach it is the WWID lookup `free_image()` uses for its in-use check, so the
+  refusal surfaced as *"Refusing to delete volume ... the in-use safety check
+  cannot run"*, and a storage migration failed after allocating its target
+  volume. Scanning every literal argument the tree passes against its own guard
+  found a second one: `^has_journal`, the mkfs option for the config-backup
+  volume, refused since 1.1.35 and silent because that failure is non-fatal.
+  Both are now matched **exactly**, rather than by widening the character class
+  -- a value arriving from the array or from `multipathd` output still cannot
+  contain a space or a caret. `make test` now fails if any literal argument the
+  tree passes is refused by the guard.
+- **A realm-scoped pod was split on the wrong separator.** A Purity account
+  scoped to a realm names its pod `realm::pod`, so a volume in it is
+  `realm::pod::name`. Splitting on the first `::` took the realm as the pod and
+  the pod as part of the name, and listings came back empty. Split on the last
+  `::` instead; with a single separator both forms are identical, so nothing
+  changes for a pod without a realm.
+- **The host object name carried no realm prefix.** Realm-scoped accounts
+  require object names to carry `realm::`, hosts included, so the array
+  answered `Host does not exist` for a host this plugin had just created. The
+  realm is taken from `pure-pod`; a pod without one changes nothing.
+- **An OVMF `efidisk0` could not be created.** Proxmox VE sizes it at 528 KiB
+  and the array refuses anything under 1 MiB, so allocation failed with
+  *"Volume size must be between 1 MB and 4 PB"* and any migration carrying such
+  a VM failed with it. Volumes are now clamped to that floor, which the plugin
+  already applied to its own config-backup volume. Proxmox VE keeps the logical
+  size in the guest configuration, so this only pads unused space.
+- `multipathd` was invoked by bare name in one place. A Proxmox VE daemon has
+  no `PATH` and `multipathd` lives in `/usr/sbin`, so that call could not
+  execute from the web interface. Resolved to an absolute path.
+- The message when a RAM snapshot's device never appears now names what to
+  check and which setting to raise.
+
+### Added
+- **The behaviour tests are in the repository, in `t/`, and `make test` runs
+  them.** Thirty suites, each reproducing a defect this plugin actually
+  shipped; every one names the register entries it guards, and the coverage can
+  be recomputed rather than believed. Two run under `perl -T`, because
+  `pvedaemon` and `pveproxy` do and a test that does not cannot see that class
+  of defect at all.
+- Static checks for the version agreeing across all files that carry it, for
+  the Pure WWID prefix agreeing across its three sites, for `activate_storage()`
+  staying off the expensive paths, and for the argument guard accepting what
+  this plugin passes. Twenty-one in total.
+
 ## [1.1.36] - 2026-08-12
 
 Found by auditing this project against defects the sibling

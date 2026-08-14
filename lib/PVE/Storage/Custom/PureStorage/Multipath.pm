@@ -18,6 +18,7 @@ use Exporter qw(import);
 
 our @EXPORT_OK = qw(
     udevadm_path
+    multipathd_path
     untaint_arg
     rescan_scsi_hosts
     multipath_reload
@@ -325,6 +326,8 @@ sub _cmd_path {
 
 sub udevadm_path { return _cmd_path('udevadm', '/usr/bin/udevadm', '/bin/udevadm',
                                     '/usr/sbin/udevadm', '/sbin/udevadm'); }
+sub multipathd_path { return _cmd_path('multipathd', '/sbin/multipathd',
+                                       '/usr/sbin/multipathd'); }
 
 # Untaint one command argument, refusing anything this plugin could not have
 # produced.
@@ -341,10 +344,22 @@ sub udevadm_path { return _cmd_path('udevadm', '/usr/bin/udevadm', '/bin/udevadm
 # untainting and the correctness check the same act. Refusing rather than
 # stripping is deliberate: a stripped argument is a different argument, and a
 # device path that needed stripping is one we should not be acting on.
+# The fixed strings this plugin passes to a command that are not device
+# paths, numbers or flags. They are matched EXACTLY rather than by widening
+# the character class below, because a value that reaches untaint_arg() from
+# the array or from multipathd output can never legitimately contain a space
+# or a caret -- only these can. Widening the class would extend that licence
+# to every argument, including the ones this plugin does not choose.
+my %LITERAL_ARGS = map { $_ => 1 } (
+    '%n %w',           # multipathd show maps raw format
+    '^has_journal',    # mkfs.ext4 -O, on the config-backup volume
+);
+
 sub untaint_arg {
     my ($arg) = @_;
 
     return $arg if !defined $arg;
+    return $1 if "$arg" =~ m{\A(\Q$arg\E)\z} && $LITERAL_ARGS{$arg};
     return $1 if "$arg" =~ m{\A([A-Za-z0-9_./:=@,+%-]*)\z};
 
     die "refusing to run a command with an argument this plugin could not "

@@ -1097,7 +1097,12 @@ sub volume_list {
         $params->{destroyed} = 'false';
 
         if ($pattern) {
-            if ($pattern =~ /^([^:]+)::(.+)$/) {
+            # Split on the LAST '::', not the first. A realm-scoped account
+            # names its pod `realm::pod`, so a volume in it is
+            # `realm::pod::pve-...` and splitting on the first separator
+            # yields the realm as the pod and the pod as part of the name.
+            # With a single separator both forms split identically. (#16)
+            if ($pattern =~ /^(.+)::([^:]+)$/) {
                 # Pattern has pod prefix: pod::pattern*
                 # Use pod.name filter to limit results, then filter by name in Perl
                 my ($pod, $volpattern) = ($1, $2);
@@ -1162,7 +1167,7 @@ sub volume_list_destroyed {
         $params->{destroyed} = 'true';
 
         if ($pattern) {
-            if ($pattern =~ /^([^:]+)::(.+)$/) {
+            if ($pattern =~ /^(.+)::([^:]+)$/) {
                 my ($pod, $volpattern) = ($1, $2);
                 $params->{filter} = "pod.name='$pod'";
                 $perl_filter_pattern = $pattern;
@@ -1594,7 +1599,7 @@ sub snapshot_list {
         # Use filter parameter for wildcards, names for exact matches
         my @filters;
         if ($volume) {
-            if ($volume =~ /^([^:]+)::(.+)$/) {
+            if ($volume =~ /^(.+)::([^:]+)$/) {
                 # Volume has pod prefix - use pod.name filter to limit results
                 my $pod = $1;
                 push @filters, "pod.name='$pod'";
@@ -1604,7 +1609,7 @@ sub snapshot_list {
             }
         }
         if ($pattern) {
-            if ($pattern =~ /^([^:]+)::(.+)$/) {
+            if ($pattern =~ /^(.+)::([^:]+)$/) {
                 # Pattern has pod prefix - use pod.name filter
                 my $pod = $1;
                 # Only add pod filter if not already added from volume

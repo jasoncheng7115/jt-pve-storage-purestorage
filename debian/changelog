@@ -1,3 +1,26 @@
+jt-pve-storage-purestorage (1.1.37-1) stable; urgency=medium
+
+  * Accept the multipathd format argument the plugin itself passes. The
+    argument guard added in 1.1.35 had no space in its allowlist, so
+    'multipathd show maps raw format %n %w' was refused -- and because the
+    first caller to reach it is the WWID lookup free_image() uses for its
+    in-use check, deleting a volume and migrating a disk both failed.
+    Reported by @DLTKdevopsmaconomy (#15). The same scan found the mkfs
+    option '^has_journal' was refused too, which had failed silently since
+    1.1.35 because a failed config backup is non-fatal. Both are matched
+    exactly rather than by widening the character class.
+  * Split a pod prefix on the last '::' so a realm-scoped pod keeps its realm.
+    Reported by @DLTKdevopsmaconomy (#16).
+  * Prefix the host object name with the realm when pure-pod carries one.
+    Reported by @DLTKdevopsmaconomy (#17).
+  * Clamp a volume to the 1 MiB minimum the array enforces, so an OVMF
+    efidisk0 (528 KiB) can be created. Reported by @DLTKdevopsmaconomy (#18).
+  * Resolve multipathd to an absolute path in ISCSI.pm; a PVE daemon has no
+    PATH and multipathd lives in /usr/sbin.
+  * Say what to do when a RAM snapshot's device never appears.
+  * Ship the behaviour tests in t/ and run them from `make test`.
+
+ -- Jason Cheng <jason@jason.tools>  Sat, 15 Aug 2026 00:08:37 +0800
 jt-pve-storage-purestorage (1.1.36-1) stable; urgency=medium
 
   * Give REST sessions back to the array. Nothing called a logout, so every

@@ -559,7 +559,10 @@ sub _find_multipath_device {
 
     # Use multipathd to query devices
     my ($stdout, $stderr, $exit) = _run_cmd(
-        ['multipathd', 'show', 'maps', 'raw', 'format', '%n %w'],
+        # Absolute, resolved: a Proxmox VE daemon has no PATH, so exec falls
+        # back to /bin:/usr/bin and multipathd lives in /usr/sbin.
+        [PVE::Storage::Custom::PureStorage::Multipath::multipathd_path(),
+         'show', 'maps', 'raw', 'format', '%n %w'],
         allow_nonzero => 1,
         ignore_errors => 1,
     );
