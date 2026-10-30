@@ -1,3 +1,32 @@
+jt-pve-storage-purestorage (1.1.38-1) stable; urgency=high
+
+  * FC: scan for newly mapped LUNs when the request comes from the web
+    interface. pvedaemon runs under perl -T; the SCSI host scan path was
+    built from readdir() and was therefore tainted, so the write was refused
+    inside the forked writer and failed silently. On FC the host scan is the
+    only discovery mechanism, so a VM started from the web interface waited
+    for a device nothing had scanned for. sysfs_write_with_timeout() now
+    untaints its path against /sys.
+  * FC: match the kernel's remote port names (rport-H:C-N). The pattern
+    expected rport-N-N-N, so activate_storage() warned "No FC target ports
+    detected" on every poll of every FC node with working zoning.
+  * Re-authenticate once on HTTP 401 regardless of the retry count. The
+    single-attempt health client could not recover from an invalidated
+    session -- including the one it was seeded with after another client in
+    the same process logged its session out (1.1.36) -- so activate_storage()
+    failed until that process rebuilt its clients: intermittent HTTP 500 on
+    the storage content view and "active: no" on the storage summary.
+  * Compare pod names case-insensitively, as the array does. With pure-pod
+    spelled differently from the array's spelling, the pod's volume list came
+    back empty: no disks listed, and the orphan reaper treated the storage's
+    tracked devices as stale.
+  * New option pure-pod-capacity (array|pod): for a pod without quota_limit,
+    report the pod's own usage against the array's free space. Default
+    'array' keeps the previous figures. The capacity warning no longer says
+    "pod quota" for a pod that has none.
+
+ -- Jason Cheng <jason@jason.tools>  Fri, 30 Oct 2026 17:20:34 +0800
+
 jt-pve-storage-purestorage (1.1.37-1) stable; urgency=medium
 
   * Accept the multipathd format argument the plugin itself passes. The

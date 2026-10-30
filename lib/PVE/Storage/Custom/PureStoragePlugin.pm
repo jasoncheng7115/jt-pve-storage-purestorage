@@ -326,6 +326,23 @@ sub properties {
             default => 'provisioned',
             optional => 1,
         },
+        'pure-pod-capacity' => {
+            description => "What Proxmox VE is shown for a pod that has NO"
+                . " quota_limit. 'array' (default) reports the whole"
+                . " FlashArray: total capacity and everything used on it,"
+                . " by any host. 'pod' reports this pod's own usage as"
+                . " 'used' (the figure chosen by pure-pod-usage-metric)"
+                . " and the array's free space as 'available', with total"
+                . " = used + available -- a pod without a quota can grow"
+                . " until the array is full, so the array's free space is"
+                . " the only real limit. Ignored when the pod has a"
+                . " quota_limit (then the quota is the total) and when"
+                . " pure-pod is not set. Only affects reporting.",
+            type => 'string',
+            enum => ['array', 'pod'],
+            default => 'array',
+            optional => 1,
+        },
         'pure-rescan-interval' => {
             description => "Minimum seconds between the SAN rescans that"
                 . " activate_storage performs (iSCSI session rescan, SCSI"
@@ -366,6 +383,7 @@ sub options {
         'pure-activate-deadline' => { optional => 1 },
         'pure-pod'           => { optional => 1 },
         'pure-pod-usage-metric' => { optional => 1 },
+        'pure-pod-capacity'     => { optional => 1 },
         'pure-rescan-interval'  => { optional => 1 },
         nodes                => { optional => 1 },
         disable              => { optional => 1 },
@@ -1240,7 +1258,16 @@ sub _get_api {
         # A borrower left holding an invalidated token costs one 401 and the
         # existing retry path re-logs in.
         if (($cached->{pid} // 0) == $$) {
-            eval { $cached->{api}->logout(); };
+            my $released = eval { $cached->{api}->get_session_token(); };
+            my $ok = eval { $cached->{api}->logout(); };
+            # Every other client in this process that borrowed that token is
+            # now holding a dead one -- and the seeding loop below would hand
+            # it straight to the replacement. Clear it everywhere first.
+            if ($ok && defined $released) {
+                for my $other (values %api_cache) {
+                    eval { $other->{api}->drop_session_token($released); };
+                }
+            }
         }
     }
 
@@ -1423,7 +1450,9 @@ sub _strip_pod_prefix {
     my ($scfg, $fullname) = @_;
 
     my $pod = $scfg->{'pure-pod'};
-    if ($pod && $fullname =~ /^\Q${pod}\E::(.+)$/) {
+    # Case-insensitive: the array returns the pod in its own spelling, which
+    # need not match pure-pod (FlashArray names are case-insensitive).
+    if ($pod && $fullname =~ /^\Q${pod}\E::(.+)$/i) {
         return $1;
     }
     return $fullname;
@@ -2840,11 +2869,14 @@ sub status {
 
     eval {
         my $capacity = $api->get_managed_capacity(
-            $pod, usage_metric => $scfg->{'pure-pod-usage-metric'});
+            $pod,
+            usage_metric   => $scfg->{'pure-pod-usage-metric'},
+            no_quota_scope => $scfg->{'pure-pod-capacity'});
 
         $cache->{total}     = $capacity->{total};
         $cache->{used}      = $capacity->{used};
         $cache->{avail}     = $capacity->{available};
+        $cache->{quota_source} = $capacity->{quota_source} // '';
 
         _warn_pod_quota_exhausted($storeid, $scfg, $capacity);
     };
@@ -2856,7 +2888,11 @@ sub status {
     }
 
     # Outage recovery + capacity-health monitoring (NetApp v0.2.10 parity).
-    _record_status_ok($storeid, $cache->{total}, $cache->{used}, $pod ? 1 : 0);
+    # "pod quota" only when the total really is the pod's quota. A pod with no
+    # quota is bounded by the array, in either pure-pod-capacity mode, and the
+    # warning used to tell the operator to expand a quota that did not exist.
+    _record_status_ok($storeid, $cache->{total}, $cache->{used},
+        ($cache->{quota_source} // '') eq 'pod' ? 1 : 0);
 
     # Run periodic background cleanup using the double-fork pattern: the
     # intermediate child forks the actual worker (grandchild) and exits

@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.37-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.38-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -462,7 +462,7 @@ which writes the secret file and removes the old line in one command.
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.37-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.38-1_all.deb
 ```
 
 > **Note:** avoid `dpkg -i` for the first install: it does **not** auto-install
@@ -695,6 +695,7 @@ amending the `nodes` line, or by re-creating the entry.
 | `pure-rescan-interval` | No | 300 | Minimum seconds (0..3600) between the periodic SAN rescans performed by `activate_storage` (iSCSI session rescan, SCSI host scan, `multipathd reconfigure`, `udevadm trigger`). Proxmox VE calls `activate_storage` on every pvestatd poll (~10s), so running these unconditionally means a host-wide multipath rebuild six times a minute on every node. A rescan is always performed immediately when this node logs in to a new iSCSI portal; this interval only bounds the periodic safety net. Set to 0 for the pre-1.1.22 behaviour. |
 | `pure-pod` | No | - | Pod name (see Capacity and Permission Isolation). Sets capacity reporting to the Pod's quota and namespaces all Volume names. |
 | `pure-pod-usage-metric` | No | provisioned | Which pod space figure is reported as `used` when the pod has a `quota_limit`. `provisioned` = sum of the provisioned sizes of the pod's Volumes; this is what the array checks before allowing the next allocation, so it predicts allocation failures — but because Volumes are thin, a pod can read 100% full with almost nothing written. `virtual` = host-written logical bytes (intuitive, but does not predict allocation failures). `physical` = post-reduction bytes on the array. Reporting only; never changes what the array enforces. |
+| `pure-pod-capacity` | No | array | What is reported for a pod that has **no** `quota_limit`. `array` = the whole FlashArray (total capacity and everything used on it, by any host). `pod` = this pod's own usage as `used` (per `pure-pod-usage-metric`) and the array's free space as `available`, total = used + available. Ignored when the pod has a `quota_limit` or `pure-pod` is not set. Reporting only. |
 | `content` | Yes | - | Content types: `images`, `rootdir` |
 | `nodes` | No | (all) | Comma-separated list of cluster nodes where this storage is offered. Omit to make it available everywhere. Standard PVE storage attribute. |
 

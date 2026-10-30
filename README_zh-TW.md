@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.37-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.38-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -432,7 +432,7 @@ pvesm set <storeid> --pure-api-token <token>
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.37-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.38-1_all.deb
 ```
 
 > **注意**：首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件
@@ -647,6 +647,7 @@ PVE 本身擋下。
 | `pure-rescan-interval` | 否 | 300 | `activate_storage` 週期性 SAN 重新掃描（iSCSI session 重新掃描、SCSI host 掃描、`multipathd reconfigure`、`udevadm trigger`）的最小間隔秒數（0..3600）。Proxmox VE 每次 pvestatd 輪詢（約 10 秒）都會呼叫 `activate_storage`，若無條件執行，等於每個節點每分鐘做六次全主機 multipath 重建。本節點登入新的 iSCSI portal 時一定會立即重新掃描；此間隔只限制中間的週期性安全網。設為 0 可回到 1.1.22 之前的行為 |
 | `pure-pod` | 否 | - | Pod 名稱（見「容量與權限隔離」一節）。設定後容量回報以 Pod 配額為準，所有 Volume 名稱進入 Pod 命名空間 |
 | `pure-pod-usage-metric` | 否 | provisioned | Pod 設有 `quota_limit` 時，以哪一個 pod 空間數值回報為 `used`。`provisioned` 為 Pod 內各 Volume 配置大小的總和，也是陣列在允許下一次配置前檢查的數值，因此可預測配置失敗——但由於 Volume 為精簡配置，Pod 可能在幾乎沒有寫入的情況下顯示 100% 已滿。`virtual` 為主機寫入的邏輯位元組（符合直覺，但無法預測配置失敗）。`physical` 為陣列上縮減後的位元組。僅影響回報，不會改變陣列實際的強制行為 |
+| `pure-pod-capacity` | 否 | array | Pod **未**設定 `quota_limit` 時回報的範圍。`array` 為整台 FlashArray（總容量，以及所有主機在陣列上的用量）。`pod` 以此 Pod 自身的用量為 `used`（依 `pure-pod-usage-metric`），以陣列剩餘空間為 `available`，總容量為兩者相加。Pod 已設 `quota_limit` 或未設定 `pure-pod` 時忽略此參數。僅影響回報 |
 | `content` | 是 | - | 內容類型：`images`、`rootdir` |
 | `nodes` | 否 | （全部） | 此 storage 開放給哪些叢集節點，逗號分隔。省略代表全部節點。PVE 通用 Storage 屬性 |
 

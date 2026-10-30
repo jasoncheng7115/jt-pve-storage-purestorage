@@ -155,6 +155,18 @@ sub get_session_token {
     return $self->{_session_token};
 }
 
+# Forget a token that another client in this process has just logged out, so
+# the next call logs in instead of spending a round trip on a guaranteed 401.
+# Only a borrowed token is dropped; an owner keeps (and later releases) its own.
+sub drop_session_token {
+    my ($self, $token) = @_;
+    return 0 unless defined $token && defined $self->{_session_token};
+    return 0 unless $self->{_session_token} eq $token;
+    return 0 if $self->{_session_owned};
+    delete $self->{_session_token};
+    return 1;
+}
+
 # Set API major version flag for conditional logic
 sub _set_api_major {
     my ($self) = @_;
@@ -442,7 +454,21 @@ sub _request {
         $self->{_ua}->timeout($orig_timeout) if $opts{timeout};
     };
 
-    for my $attempt (1 .. $retry_count) {
+    # A 401 is answered by logging in again and repeating the request ONCE,
+    # whatever retry_count says. It used to be handled inside the retry loop,
+    # guarded by `$attempt < $retry_count` -- which a single-attempt client
+    # (the status => 1 health client) can never satisfy. That client is also
+    # the one most likely to be handed a dead token: _get_api() seeds a new
+    # client from another cached client's session, and the owner of that
+    # session logs it out when its own TTL expires. So the health client got
+    # 401 on every call until something else refreshed the shared token, and
+    # activate_storage() failed in the meantime. Re-authenticating is not a
+    # retry of the operation -- a 401 means the array did not act on it -- so
+    # it is safe for every method, POST included.
+    my $reauthed = 0;
+    my $attempt = 0;
+    while ($attempt < $retry_count) {
+        $attempt++;
         my $req = HTTP::Request->new($method => $url);
 
         # Add auth headers
@@ -515,15 +541,20 @@ sub _request {
             $last_error .= " (Hint: Array may be in maintenance mode or overloaded)";
         }
 
-        # Session expired - try to refresh and retry once
-        if ($code == 401 && $attempt < $retry_count) {
-            warn "Pure Storage API returned 401, refreshing session token (attempt $attempt/$retry_count)\n";
+        # Session expired or invalidated: log in again and repeat once.
+        # Does not consume an attempt (see above).
+        if ($code == 401 && !$reauthed) {
+            $reauthed = 1;
             $self->{_session_token} = undef;
+            $self->{_session_owned} = 0;
             eval { $self->_create_session(); };
             # Re-apply per-call timeout override after _create_session may
             # have rebuilt the UA.
             $self->{_ua}->timeout($opts{timeout}) if $opts{timeout};
-            next if $self->{_session_token};
+            if ($self->{_session_token}) {
+                $attempt--;
+                next;
+            }
         }
 
         # Don't retry on client errors (4xx) except 401 (handled above) and 429 (rate limit)
@@ -882,11 +913,39 @@ sub get_managed_capacity {
                 array_count  => $array_count,
             };
         }
+        # No quota_limit on the pod. By default report the whole array, as
+        # before. With pure-pod-capacity = pod, report the POD's usage as
+        # `used` and the array's free space as `available` instead: a pod
+        # without a quota can grow until the array is full, so the array's
+        # free space is the only real limit, but "used" should be what this
+        # storage has actually consumed rather than every other tenant's data.
+        if (($opts{no_quota_scope} // 'array') eq 'pod') {
+            my $arr = $self->_array_capacity();
+            my $avail = $arr->{available};
+            $avail = 0 if $avail < 0;
+            return {
+                total        => $used + $avail,
+                used         => $used,
+                available    => $avail,
+                quota_source => 'pod-noquota',
+                metric       => $metric,
+                raw_used     => $used,
+                raw_space    => $raw_space,
+                array_count  => $array_count,
+            };
+        }
         # Fall through to array capacity if no pod quota_limit is set
     }
 
-    # Get array capacity
-    $resp = $self->array_space();
+    return $self->_array_capacity();
+}
+
+# Whole-array capacity: { total, used, available } in bytes.
+sub _array_capacity {
+    my ($self) = @_;
+
+    my $resp = $self->array_space();
+    my $space;
 
     if (ref($resp) eq 'HASH' && $resp->{items}) {
         $space = $resp->{items}[0];
@@ -1084,6 +1143,37 @@ sub _get_v2_collection {
 }
 
 # List volumes matching pattern
+# The pod's name exactly as the array spells it.
+#
+# FlashArray object names are case-insensitive: a pod created as `pve-pod` is
+# found by `PVE-Pod`, volumes are created in it under that spelling, and
+# everything appears to work. But the array returns names in ITS spelling, and
+# every place this client narrows a list to one pod -- the `pod.name='...'`
+# filter and the local re-match of the returned names -- compared them as
+# exact strings. With the case differing, the pod's volume list came back
+# empty: list_images showed no disks, and the orphan reaper, seeing none of the
+# storage's volumes on the array, treated every tracked device as stale and
+# tore down any that was not open at that moment.
+#
+# `names=` is a name lookup and resolves case-insensitively, so ask the array
+# once per client and use its answer. If the lookup fails, fall back to the
+# configured spelling -- no worse than before -- and the local re-match of
+# returned names is case-insensitive regardless.
+sub _canonical_pod_name {
+    my ($self, $pod) = @_;
+    return $pod unless defined $pod && length $pod;
+    my $key = lc $pod;
+    return $self->{_pod_canon}{$key} if defined $self->{_pod_canon}{$key};
+    my $name = eval {
+        my $r = $self->get('pods', { names => $pod });
+        (ref($r) eq 'HASH' && ref($r->{items}) eq 'ARRAY' && $r->{items}[0])
+            ? $r->{items}[0]{name} : undef;
+    };
+    return $pod unless defined $name && lc($name) eq $key;
+    $self->{_pod_canon}{$key} = $name;
+    return $name;
+}
+
 sub volume_list {
     my ($self, $pattern) = @_;
 
@@ -1106,7 +1196,7 @@ sub volume_list {
                 # Pattern has pod prefix: pod::pattern*
                 # Use pod.name filter to limit results, then filter by name in Perl
                 my ($pod, $volpattern) = ($1, $2);
-                $params->{filter} = "pod.name='$pod'";
+                $params->{filter} = "pod.name='" . $self->_canonical_pod_name($pod) . "'";
                 $perl_filter_pattern = $pattern;
             } elsif ($pattern =~ /\*/) {
                 # Wildcard pattern without pod - use filter parameter
@@ -1148,7 +1238,7 @@ sub volume_list {
         $regex =~ s/([.+?^\${}()|[\]\\])/\\$1/g;  # Escape regex special chars except *
         $regex =~ s/\*/.*/g;  # Convert * to .*
         $regex = "^${regex}\$";  # Anchor pattern
-        @active = grep { $_->{name} && $_->{name} =~ /$regex/ } @active;
+        @active = grep { $_->{name} && $_->{name} =~ /$regex/i } @active;
     }
 
     return \@active;
@@ -1169,7 +1259,7 @@ sub volume_list_destroyed {
         if ($pattern) {
             if ($pattern =~ /^(.+)::([^:]+)$/) {
                 my ($pod, $volpattern) = ($1, $2);
-                $params->{filter} = "pod.name='$pod'";
+                $params->{filter} = "pod.name='" . $self->_canonical_pod_name($pod) . "'";
                 $perl_filter_pattern = $pattern;
             } elsif ($pattern =~ /\*/) {
                 $params->{filter} = "name='$pattern'";
@@ -1208,7 +1298,7 @@ sub volume_list_destroyed {
         $regex =~ s/([.+?^\${}()|[\]\\])/\\$1/g;
         $regex =~ s/\*/.*/g;
         $regex = "^${regex}\$";
-        @destroyed = grep { $_->{name} && $_->{name} =~ /$regex/ } @destroyed;
+        @destroyed = grep { $_->{name} && $_->{name} =~ /$regex/i } @destroyed;
     }
 
     return \@destroyed;
@@ -1601,7 +1691,7 @@ sub snapshot_list {
         if ($volume) {
             if ($volume =~ /^(.+)::([^:]+)$/) {
                 # Volume has pod prefix - use pod.name filter to limit results
-                my $pod = $1;
+                my $pod = $self->_canonical_pod_name($1);
                 push @filters, "pod.name='$pod'";
                 $perl_filter_volume = $volume;  # Will filter by exact volume in Perl
             } else {
@@ -1611,7 +1701,7 @@ sub snapshot_list {
         if ($pattern) {
             if ($pattern =~ /^(.+)::([^:]+)$/) {
                 # Pattern has pod prefix - use pod.name filter
-                my $pod = $1;
+                my $pod = $self->_canonical_pod_name($1);
                 # Only add pod filter if not already added from volume
                 push @filters, "pod.name='$pod'" unless grep { /pod\.name/ } @filters;
                 $perl_filter_pattern = $pattern;
@@ -1660,14 +1750,14 @@ sub snapshot_list {
         $regex =~ s/([.+?^\${}()|[\]\\])/\\$1/g;  # Escape regex special chars except *
         $regex =~ s/\*/.*/g;  # Convert * to .*
         $regex = "^${regex}\$";  # Anchor pattern
-        $snapshots = [grep { $_->{name} && $_->{name} =~ /$regex/ } @$snapshots];
+        $snapshots = [grep { $_->{name} && $_->{name} =~ /$regex/i } @$snapshots];
     }
 
     # Filter by volume if it contains :: (API filter only filtered by pod, not exact volume)
     if ($perl_filter_volume) {
         $snapshots = [grep {
             my $src = $_->{source}{name} // $_->{source} // '';
-            $src eq $perl_filter_volume
+            lc($src) eq lc($perl_filter_volume)
         } @$snapshots];
     }
 

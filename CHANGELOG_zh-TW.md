@@ -8,6 +8,41 @@
 
 ---
 
+## [1.1.38] - 2026-10-30
+
+**使用 Fibre Channel、設定了 `pure-pod`，或儲存頁面偶爾出現 HTTP 500 者請升級。**
+安裝後請在每一台節點執行 `systemctl restart pvedaemon pvestatd pveproxy`。
+
+### 修正
+- **FC：從網頁介面啟動 VM 時找不到磁碟。** `pvedaemon` 以 `perl -T` 執行。SCSI
+  host 掃描會寫入 `/sys/class/scsi_host/hostN/scan`，而這個路徑是由 `readdir()`
+  組出來的，屬於 tainted 資料，寫入在 fork 出的子行程中被拒絕，而且沒有任何訊息。
+  FC 只能靠 host 掃描發現新對應的 LUN，因此從網頁介面啟動 VM 時一直在等一個沒有人
+  掃描的裝置，最後逾時；同樣的動作用 `qm start` 則正常。`sysfs_write_with_timeout()`
+  現在會先 untaint 路徑、只接受 `/sys` 底下的路徑，拒絕時也會明確警告。
+- **FC：每台節點都出現「No FC target ports detected」。** 核心把遠端連接埠命名為
+  `rport-H:C-N`，外掛找的卻是不存在的 `rport-N-N-N`。zoning 正常時這行警告仍在每次
+  輪詢出現，等待裝置的診斷訊息也回報 0 個 target。
+- **儲存頁面偶爾出現 HTTP 500 與「運作中：否」。** 同一個行程中每個儲存有兩個
+  API client，共用同一個陣列工作階段。自 1.1.36 起，client 的本機快取到期時會登出
+  自己的工作階段；接手的健康檢查 client 拿到的正是剛被登出的 token，而遇到 HTTP 401
+  時的重新登入只在「還有剩餘重試次數」時執行——只嘗試一次的健康檢查 client 永遠
+  沒有。現在任何 401 都會重新登入一次，已釋放的 token 也會從所有借用它的 client
+  清除。陣列自行讓工作階段過期的情況也一併修正。
+- **`pure-pod` 的大小寫與陣列上不同。** FlashArray 的名稱不分大小寫，所以建立與
+  連線都正常，但陣列回傳的是它自己的寫法，外掛卻用完全相同字串比對，導致 Pod 的
+  Volume 清單為空：網頁介面看不到磁碟，殘留裝置回收程序也把此儲存追蹤中的裝置都
+  當成殘留。現在會向陣列查詢一次 Pod 的正式名稱，並以不分大小寫方式比對回傳名稱。
+
+### 新增
+- **`pure-pod-capacity`**（`array` | `pod`，預設 `array`）。Pod 未設 `quota_limit`
+  時，`pod` 以此 Pod 自身的用量為已使用、以陣列剩餘空間為可用，而不是整台陣列。
+  已設 quota 的 Pod 不受影響。Pod 沒有 quota 時，容量警告不再要求擴充 Pod quota。
+
+### 測試
+- 新增：`fcrport.pl`、`sysfstaint.pl`（以 `perl -T` 執行）、`sessionshare.pl`、
+  `podscope.pl`、`podcase.pl`。每一個在 1.1.37 上都會失敗。
+
 ## [1.1.37] - 2026-08-15
 
 由 @DLTKdevopsmaconomy 回報的四個缺陷，每一個都附有重現方式與根因：

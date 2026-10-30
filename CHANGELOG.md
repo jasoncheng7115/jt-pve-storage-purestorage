@@ -8,6 +8,52 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.38] - 2026-10-30
+
+**Upgrade if you use Fibre Channel, or `pure-pod`, or see an intermittent
+HTTP 500 on the storage pages.** After installing, run
+`systemctl restart pvedaemon pvestatd pveproxy` on every node.
+
+### Fixed
+- **FC: a VM started from the web interface could not find its disk.**
+  `pvedaemon` runs under `perl -T`. The SCSI host scan writes to
+  `/sys/class/scsi_host/hostN/scan`, and that path was built from `readdir()`,
+  so it was tainted and the write was refused inside the forked writer --
+  silently. On FC the host scan is the only way a newly mapped LUN is
+  discovered, so starting a VM from the web interface waited for a device
+  nothing had scanned for, and timed out. The same start from `qm start`
+  worked. `sysfs_write_with_timeout()` now untaints its path, accepts only
+  paths under `/sys`, and says so when it refuses one.
+- **FC: "No FC target ports detected" on every node.** The kernel names remote
+  ports `rport-H:C-N`; the plugin looked for `rport-N-N-N`, which never exists.
+  The warning repeated on every poll with zoning that was fine, and the
+  device-wait diagnostics reported zero targets.
+- **Intermittent HTTP 500 and "active: no" on the storage pages.** One process
+  holds two API clients per storage that share one array session. Since
+  1.1.36 a client logs its session out when its local cache expires; the
+  replacement health client was then given the token that had just been
+  logged out, and the re-login on HTTP 401 only ran for a client with retries
+  left -- which the single-attempt health client never has. It now logs in
+  again once on any 401, and a released token is cleared from every client
+  that borrowed it. The same fix covers a session the array expires on its own.
+- **`pure-pod` spelled differently from the array.** FlashArray names are
+  case-insensitive, so every create and connect worked, but the array returns
+  names in its own spelling and the plugin compared them exactly. The pod's
+  volume list came back empty: no disks listed, and the orphan reaper treated
+  the storage's tracked devices as stale. The pod name is now resolved once
+  against the array and returned names are matched case-insensitively.
+
+### Added
+- **`pure-pod-capacity`** (`array` | `pod`, default `array`). For a pod without
+  a `quota_limit`, `pod` reports the pod's own usage as used and the array's
+  free space as available, instead of the whole array. A pod with a quota is
+  unaffected. The capacity warning no longer tells you to expand a pod quota
+  when the pod has none.
+
+### Tests
+- New suites: `fcrport.pl`, `sysfstaint.pl` (under `perl -T`),
+  `sessionshare.pl`, `podscope.pl`, `podcase.pl`. Each fails on 1.1.37.
+
 ## [1.1.37] - 2026-08-15
 
 Four defects reported by @DLTKdevopsmaconomy, each with a reproduction and a

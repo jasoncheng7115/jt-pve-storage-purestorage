@@ -7,14 +7,14 @@
 # somebody's scratch directory so that they run on every change, are reviewed
 # with the code they guard, and can be run by anyone.
 #
-# Two of them must run under taint mode: pvedaemon and pveproxy are
+# Three of them must run under taint mode: pvedaemon and pveproxy are
 # #!/usr/bin/perl -T, and a test that does not use the same shebang cannot see
 # that class of defect at all. The shebang is the fixture.
 use strict;
 use warnings;
 use FindBin;
 
-my %NEEDS_TAINT = map { $_ => 1 } qw(taint.pl daemonenv.pl);
+my %NEEDS_TAINT = map { $_ => 1 } qw(taint.pl daemonenv.pl sysfstaint.pl);
 
 # Every suite asserts. A suite that cannot produce its condition on this
 # machine says SKIP in its own output and exits 0 -- see failopen3.pl, whose

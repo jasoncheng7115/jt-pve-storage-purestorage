@@ -150,7 +150,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.37 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.38 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -545,7 +545,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.37-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.38-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -625,7 +625,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.37-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.38-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -1988,6 +1988,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.38 <span class="changelog-tag changelog-tag--critical">Critical</span></div>
+        <div class="changelog-date">2026-10-30</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>FC: a VM started from the web interface could not find its disk (CRITICAL):</strong> <code>pvedaemon</code> runs under <code>perl -T</code>, and the SCSI host scan path was built from <code>readdir()</code>, so the write to <code>/sys/class/scsi_host/hostN/scan</code> was refused inside the forked writer &mdash; silently. On Fibre Channel that scan is the only way a newly mapped LUN is found, so the start waited for a device nothing had scanned for; <code>qm start</code> worked. <strong>Intermittent HTTP 500 and &ldquo;active: no&rdquo; on the storage pages (CRITICAL):</strong> two API clients in one process share a session; after one logged it out on cache expiry, the single-attempt health client was handed the dead token and its 401 re-login only ran for clients with retries left. It now re-authenticates once on any 401. <strong><code>pure-pod</code> spelled differently from the array (HIGH):</strong> array names are case-insensitive but were compared exactly, so the pod's volume list came back empty and the orphan reaper saw every tracked device as stale. Also: FC remote ports are named <code>rport-H:C-N</code>, so &ldquo;No FC target ports detected&rdquo; was printed on every poll; and a new option <code>pure-pod-capacity</code> reports a pod without a quota by its own usage rather than the whole array. Restart <code>pvedaemon pvestatd pveproxy</code> on every node after upgrading.</span>
+            <span class="lang-zh"><strong>FC：從網頁介面啟動 VM 時找不到磁碟（嚴重）：</strong><code>pvedaemon</code> 以 <code>perl -T</code> 執行，而 SCSI host 掃描的路徑由 <code>readdir()</code> 組成，因此寫入 <code>/sys/class/scsi_host/hostN/scan</code> 時在 fork 出的子行程中被拒絕，而且沒有任何訊息。Fibre Channel 只能靠這個掃描發現新對應的 LUN，所以啟動時一直在等一個沒有人掃描的裝置；<code>qm start</code> 則正常。<strong>儲存頁面偶爾出現 HTTP 500 與「運作中：否」（嚴重）：</strong>同一行程中的兩個 API client 共用工作階段；其中一個在快取到期時登出後，只嘗試一次的健康檢查 client 拿到了失效的 token，而 401 時的重新登入只對還有重試次數的 client 執行。現在任何 401 都會重新登入一次。<strong><code>pure-pod</code> 的大小寫與陣列上不同（高）：</strong>陣列名稱不分大小寫，外掛卻以完全相同字串比對，導致 Pod 的 Volume 清單為空，殘留裝置回收程序也把所有追蹤中的裝置當成殘留。另外：FC 遠端連接埠的名稱是 <code>rport-H:C-N</code>，所以先前每次輪詢都會印出「No FC target ports detected」；新增選項 <code>pure-pod-capacity</code>，讓未設 quota 的 Pod 以自身用量回報，而不是整台陣列。升級後請在每台節點重新啟動 <code>pvedaemon pvestatd pveproxy</code>。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.37 <span class="changelog-tag changelog-tag--fix">Fix</span></div>

@@ -8,6 +8,7 @@
 #   claim != APIVER (in range) -> loads, warns on every PVE::Storage load
 #   claim == APIVER            -> loads silently
 use strict;
+use File::Temp ();
 use warnings;
 
 use FindBin; my $LIB = "$FindBin::Bin/../lib";
@@ -42,8 +43,7 @@ PERL
     # Written to a file rather than passed with -e: the stub has to survive
     # two layers of quoting otherwise, and a mangled stub looks exactly like
     # a failing plugin.
-    my $tmp = "/tmp/claude-0/-root-jt-pve-storage-purestorage/"
-        . "30b3cf0b-96d2-469a-8c49-7e16dd633661/scratchpad/.apiver-probe.pl";
+    my (undef, $tmp) = File::Temp::tempfile('.apiver-probe-XXXXXX', SUFFIX => '.pl', TMPDIR => 1);
     open(my $fh, '>', $tmp) or die "cannot write probe: $!";
     print $fh $code;
     close($fh);

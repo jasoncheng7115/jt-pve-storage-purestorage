@@ -133,9 +133,31 @@ sub _untaint_path {
 # underlying kernel layer is unresponsive (e.g. dead SCSI host or stale device).
 # kill -9 cannot recover such a process — only reboot will. Forking lets the
 # parent kill the child if it hangs and continue with the next operation.
+# The only tree sysfs_write_with_timeout() will write into. A variable rather
+# than a literal only so t/sysfstaint.pl can point it at a scratch directory.
+our $SYSFS_ROOT = '/sys';
+
 sub sysfs_write_with_timeout {
     my ($path, $data, $timeout) = @_;
     $timeout //= 10;
+
+    # Untaint here, once, for every caller. pvedaemon and pveproxy run under
+    # `perl -T`, and a path assembled from readdir() of /sys/class/... is
+    # tainted, so open('>') in the child died with "Insecure dependency" --
+    # inside an eval, followed by _exit(1), i.e. silently. That made every
+    # SCSI host scan from the web interface a no-op. On FC the host scan is
+    # the ONLY way a newly mapped LUN is discovered, so a VM started from the
+    # web interface waited for a device that nothing was looking for, while
+    # the same start from `qm start` (no -T) worked. Only /sys is a legitimate
+    # target, and never with a parent-directory component.
+    my ($safe_path) = (defined $path && $path !~ m{/\.\./}
+        && $path =~ m{\A(\Q$SYSFS_ROOT\E/[A-Za-z0-9_:.,+\-/]+)\z});
+    unless (defined $safe_path) {
+        warn "refusing sysfs write to unexpected path '"
+            . ($path // 'undef') . "'\n";
+        return 0;
+    }
+    $path = $safe_path;
 
     my $pid = fork();
     if (!defined $pid) {
@@ -476,7 +498,8 @@ sub rescan_scsi_hosts {
     }
 
     opendir(my $dh, $iscsi_class) or return 1;
-    my @hosts = grep { /^host\d+$/ } readdir($dh);
+    # Captured, not just matched: readdir() output is tainted under -T.
+    my @hosts = map { /^(host\d+)$/ ? $1 : () } readdir($dh);
     closedir($dh);
 
     # No iSCSI hosts registered (storage not activated yet, or all

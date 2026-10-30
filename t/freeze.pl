@@ -18,6 +18,7 @@
 # This checks which of the two runs for a device that is in use, which is
 # exactly what a running container's rootfs looks like.
 use strict;
+use File::Temp ();
 use warnings;
 
 use FindBin; my $LIB = "$FindBin::Bin/../lib";
@@ -113,8 +114,7 @@ eval {
 };
 print join("\n", grep { /sync|flushbufs/ } @ran), "\n";
 PERL
-    my $tmp = '/tmp/claude-0/-root-jt-pve-storage-purestorage/'
-        . '30b3cf0b-96d2-469a-8c49-7e16dd633661/scratchpad/.freeze-probe.pl';
+    my (undef, $tmp) = File::Temp::tempfile('.freeze-probe-XXXXXX', SUFFIX => '.pl', TMPDIR => 1);
     open(my $fh, '>', $tmp) or die $!;
     print $fh $probe;
     close($fh);

@@ -125,12 +125,14 @@ sub get_fc_hosts {
     opendir(my $dh, FC_HOST_PATH) or return [];
     for my $entry (readdir($dh)) {
         next if $entry =~ /^\./;
-        next unless $entry =~ /^host\d+$/;
+        # Captured, not just matched: readdir() output is tainted under -T,
+        # and these names end up in sysfs write paths (rescan_fc_hosts).
+        my ($host) = $entry =~ /^(host\d+)$/ or next;
 
         # Verify it's a valid FC host by checking port_name exists
-        my $port_name_file = FC_HOST_PATH . "/$entry/port_name";
+        my $port_name_file = FC_HOST_PATH . "/$host/port_name";
         if (-r $port_name_file) {
-            push @hosts, $entry;
+            push @hosts, $host;
         }
     }
     closedir($dh);
@@ -329,17 +331,26 @@ sub rescan_fc_hosts {
 
 # Get FC remote port (target) information
 # Returns: arrayref of hashrefs with target details
+#
+# The kernel names these "rport-<host>:<channel>-<number>" (scsi_transport_fc:
+# dev_set_name(dev, "rport-%d:%d-%d", ...)), e.g. rport-3:0-1. This used to
+# match /^rport-\d+:\d+-\d+$/, which no kernel ever produces, so the list was
+# always empty and activate_storage() warned "No FC target ports detected" on
+# every FC node with working zoning -- sending operators to check a fabric
+# that was fine. $root is for tests only.
 sub get_fc_targets {
+    my ($root) = @_;
+    $root //= FC_REMOTE_PATH;
     my @targets;
 
-    return [] unless -d FC_REMOTE_PATH;
+    return [] unless -d $root;
 
-    opendir(my $dh, FC_REMOTE_PATH) or return [];
+    opendir(my $dh, $root) or return [];
     for my $entry (readdir($dh)) {
         next if $entry =~ /^\./;
-        next unless $entry =~ /^rport-\d+-\d+-\d+$/;
+        next unless $entry =~ /^rport-\d+:\d+-\d+$/;
 
-        my $base = FC_REMOTE_PATH . "/$entry";
+        my $base = "$root/$entry";
 
         my $port_name = _read_file("$base/port_name");
         my $node_name = _read_file("$base/node_name");
