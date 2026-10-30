@@ -445,6 +445,62 @@ which writes the secret file and removes the old line in one command.
 > does not touch storage configuration, so an un-migrated storage keeps
 > working from the value in `storage.cfg` on old and new nodes alike.
 
+### When the API token stops working
+
+The plugin logs in with the Pure API token (`POST /login`), receives a session
+token (`x-auth-token`) and sends every REST call with that. Two different
+things can expire:
+
+| What expires | What the plugin does | Action needed |
+|---|---|---|
+| The **session** (array idle timeout, controller failover, array restart) | Gets HTTP 401, logs in again with the API token and repeats the call once | None. Every code path recovers on its own from 1.1.38 on |
+| The **API token** (deleted, expired, its user disabled or removed, password changed for username/password auth) | Logging in again fails too | Replace the token (below) |
+
+While the API token is invalid:
+
+- **Running guests keep running.** Data travels over iSCSI / FC and multipath,
+  not over the REST API, so I/O to existing disks is unaffected.
+- **Anything that needs the array fails**: creating, deleting or resizing a
+  disk, snapshot, rollback, clone, migration that moves or maps a volume, and
+  backups in snapshot mode.
+- **Starting a guest fails** — including a stop/start, a live migration and an
+  HA restart after a node failure — because activating the storage and its
+  volumes asks the array first. A reboot issued from inside the guest keeps the
+  same QEMU process and is unaffected; the Proxmox VE **Reboot** action is a
+  stop and start, and fails.
+- **The storage reports `inactive`** on every node.
+- **The journal says so.** After 3 consecutive failed status polls each node
+  logs `pure-storage: [ERROR] storage '<id>' OUTAGE` with the array's error,
+  re-emitted at most every 30 seconds, and `RECOVERED` when it comes back.
+  Alert on those two lines.
+
+**Recommendations for production**
+
+1. Create the token for a **dedicated** array user (for example `pve-plugin`),
+   not a personal administrator account, so staff changes and account
+   reviews do not take the storage down.
+2. **Do not give the token an expiry** unless your policy requires one. If it
+   does, put the rotation date in your change calendar — the plugin cannot
+   warn you before the array rejects the token.
+3. Do not delete or disable that user while the storage is in use.
+
+**Replacing the token** — run once, on any node; `/etc/pve` replicates it to
+the whole cluster:
+
+```bash
+pvesm set <storeid> --pure-api-token <new-token>
+```
+
+No service restart is needed: the plugin reads the credential on each call
+and keys its client cache on the token, so the next poll uses the new one.
+Confirm with `pvesm status`.
+
+For rotation without a gap, create the new token on a **second** dedicated
+user, switch to it with the command above, confirm `pvesm status`, then
+remove the old token. Do not use `--delete pure-api-token` (see above), and
+note that removing and re-adding the storage deletes its secret file — have
+the token to hand if you do.
+
 ### For iSCSI
 - `open-iscsi` package
 - `multipath-tools` package

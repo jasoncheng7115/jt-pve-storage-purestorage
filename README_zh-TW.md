@@ -416,6 +416,51 @@ pvesm set <storeid> --pure-api-token <token>
 > 升級本身不需要任何協調：安裝套件不會碰 storage 設定，因此尚未遷移的 storage
 > 在新舊節點上都會照常從 `storage.cfg` 讀值運作。
 
+### API token 失效時
+
+外掛以 Pure 的 API token 登入（`POST /login`）取得 session token
+（`x-auth-token`），之後每一個 REST 呼叫都帶這個 session token。會過期的有兩種：
+
+| 過期的是 | 外掛的行為 | 需要處理嗎 |
+|---|---|---|
+| **Session**（陣列閒置逾時、控制器切換、陣列重新啟動） | 收到 HTTP 401 後以 API token 重新登入，並重送該呼叫一次 | 不需要。自 1.1.38 起所有路徑都會自動恢復 |
+| **API token**（被刪除、到期、所屬使用者被停用或刪除；使用帳號密碼認證時則是密碼被更改） | 重新登入也會失敗 | 需要更換 token（見下方） |
+
+API token 失效期間：
+
+- **執行中的 VM／CT 不受影響。** 資料走 iSCSI／FC 與 multipath，不經過 REST API，
+  既有磁碟的 I/O 不會中斷。
+- **需要陣列 API 的操作會失敗**：新增、刪除、擴充磁碟，快照、倒回、複製，需要
+  搬移或對應 Volume 的遷移，以及快照模式的備份。
+- **VM／CT 無法啟動**——包括關機後再開機、線上遷移，以及節點故障後的 HA 重新啟動
+  ——因為啟用儲存與 Volume 時都會先向陣列查詢。從 VM 內部重新開機仍是同一個 QEMU
+  行程，不受影響；Proxmox VE 介面上的**重新啟動**則是先停止再啟動，會失敗。
+- **儲存在每個節點都會顯示為未運作（inactive）。**
+- **journal 會留下紀錄。** 連續 3 次狀態輪詢失敗後，每個節點會記錄
+  `pure-storage: [ERROR] storage '<id>' OUTAGE` 與陣列回傳的錯誤，之後最多每 30 秒
+  重複一次；恢復時記錄 `RECOVERED`。請以這兩行設定監控告警。
+
+**正式環境建議**
+
+1. 以**專用**的陣列使用者（例如 `pve-plugin`）建立 token，不要用個人管理員帳號，
+   避免人員異動或帳號稽核時連帶讓儲存失效。
+2. 除非政策要求，**不要替 token 設定有效期限**。若必須設定，請把更換日期排進變更
+   行事曆——陣列拒絕 token 之前，外掛無法預先警告。
+3. 儲存使用中時，不要刪除或停用該使用者。
+
+**更換 token**：在任一節點執行一次即可，`/etc/pve` 會同步到整個叢集：
+
+```bash
+pvesm set <storeid> --pure-api-token <新token>
+```
+
+不需要重新啟動任何服務：外掛每次呼叫都會讀取憑證，連線快取也以 token 區分，
+下一次輪詢就會改用新 token。以 `pvesm status` 確認。
+
+若要不中斷地輪換，請在**第二個**專用使用者上建立新 token，用上面的指令切換，
+確認 `pvesm status` 正常後，再移除舊 token。請勿使用 `--delete pure-api-token`
+（見上方）；另外，移除再重新加入 storage 會刪除其機密檔，這麼做之前請先備妥 token。
+
 ### iSCSI 需求
 - `open-iscsi` 套件
 - `multipath-tools` 套件

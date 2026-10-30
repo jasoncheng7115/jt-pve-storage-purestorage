@@ -754,8 +754,8 @@
                     <span class="lang-zh">陣列的<strong>虛擬</strong>管理 IP（<code>vir0</code>），或指向它的主機名稱——<strong>不是</strong>單一控制器自己的 IP（<code>ct0.eth0</code>／<code>ct1.eth0</code>）。此為 fixed 參數，無法用 <code>pvesm set</code> 修改。</span>
                 </td><td><code>192.168.1.100</code></td></tr>
                 <tr><td><code>pure-api-token</code><br><span class="lang-en">OR</span><span class="lang-zh">或</span></td><td>
-                    <span class="lang-en">API token (preferred). One of token or username/password is required.</span>
-                    <span class="lang-zh">API token（建議優先使用）。token 或 帳密擇一即可。</span>
+                    <span class="lang-en">API token (preferred). One of token or username/password is required. See <a href="#token-expiry">When the API Token Stops Working</a>.</span>
+                    <span class="lang-zh">API token（建議優先使用）。token 或 帳密擇一即可。請見<a href="#token-expiry">API Token 失效時</a>。</span>
                 </td><td><code>xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</code></td></tr>
                 <tr><td><code>pure-username</code> +<br><code>pure-password</code></td><td>
                     <span class="lang-en">Username and password (alternative to API token)</span>
@@ -1025,6 +1025,60 @@
     <p>
         <span class="lang-en">Realm is the cleaner choice when available -- it isolates capacity AND permissions in a single mechanism. On older Purity, Pod is the only built-in mechanism the plugin recognises for capacity reporting; the Pod's <code>quota_limit</code> still gives you a hard capacity cap that the plugin honours, even though API tokens remain array-wide.</span>
         <span class="lang-zh">若版本支援，Realm 是比較乾淨的選擇——它在單一機制中同時隔離容量與權限。在較舊的 Purity 上，Pod 是唯一外掛能識別的容量機制；Pod 的 <code>quota_limit</code> 仍會給你硬上限，雖然 API Token 本身仍是陣列層級的權限。</span>
+    </p>
+
+    <h3 class="subsection-title" id="token-expiry">
+        <span class="lang-en">When the API Token Stops Working</span>
+        <span class="lang-zh">API Token 失效時</span>
+    </h3>
+    <p>
+        <span class="lang-en">The plugin logs in with the Pure API token (<code>POST /login</code>), receives a session token (<code>x-auth-token</code>) and sends every REST call with it. Two different things can expire:</span>
+        <span class="lang-zh">外掛以 Pure 的 API token 登入（<code>POST /login</code>）取得 session token（<code>x-auth-token</code>），之後每一個 REST 呼叫都帶這個 session token。會過期的有兩種：</span>
+    </p>
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th><span class="lang-en">What expires</span><span class="lang-zh">過期的是</span></th>
+                <th><span class="lang-en">What the plugin does</span><span class="lang-zh">外掛的行為</span></th>
+                <th><span class="lang-en">Action needed</span><span class="lang-zh">需要處理嗎</span></th>
+            </tr></thead>
+            <tbody>
+                <tr>
+                    <td><span class="lang-en">The <strong>session</strong> (array idle timeout, controller failover, array restart)</span><span class="lang-zh"><strong>Session</strong>（陣列閒置逾時、控制器切換、陣列重新啟動）</span></td>
+                    <td><span class="lang-en">Gets HTTP 401, logs in again with the API token and repeats the call once</span><span class="lang-zh">收到 HTTP 401 後以 API token 重新登入，並重送該呼叫一次</span></td>
+                    <td><span class="lang-en">None &mdash; every code path recovers on its own from 1.1.38 on</span><span class="lang-zh">不需要，自 1.1.38 起所有路徑都會自動恢復</span></td>
+                </tr>
+                <tr>
+                    <td><span class="lang-en">The <strong>API token</strong> (deleted, expired, its user disabled or removed; for username/password auth, the password changed)</span><span class="lang-zh"><strong>API token</strong>（被刪除、到期、所屬使用者被停用或刪除；使用帳號密碼認證時則是密碼被更改）</span></td>
+                    <td><span class="lang-en">Logging in again fails too</span><span class="lang-zh">重新登入也會失敗</span></td>
+                    <td><span class="lang-en">Replace the token (below)</span><span class="lang-zh">需要更換 token（見下方）</span></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <p>
+        <span class="lang-en">While the API token is invalid:</span>
+        <span class="lang-zh">API token 失效期間：</span>
+    </p>
+    <ul>
+        <li><span class="lang-en"><strong>Running guests keep running.</strong> Data travels over iSCSI / FC and multipath, not the REST API, so I/O to existing disks is unaffected.</span><span class="lang-zh"><strong>執行中的 VM／CT 不受影響。</strong>資料走 iSCSI／FC 與 multipath，不經過 REST API，既有磁碟的 I/O 不會中斷。</span></li>
+        <li><span class="lang-en"><strong>Anything that needs the array fails:</strong> creating, deleting or resizing a disk, snapshot, rollback, clone, migration that moves or maps a volume, and backups in snapshot mode.</span><span class="lang-zh"><strong>需要陣列 API 的操作會失敗：</strong>新增、刪除、擴充磁碟，快照、倒回、複製，需要搬移或對應 Volume 的遷移，以及快照模式的備份。</span></li>
+        <li><span class="lang-en"><strong>Starting a guest fails</strong> &mdash; including a stop/start, a live migration and an HA restart after a node failure &mdash; because activating the storage and its volumes asks the array first. A reboot issued from inside the guest keeps the same QEMU process and is unaffected; the Proxmox VE <strong>Reboot</strong> action is a stop and start, and fails.</span><span class="lang-zh"><strong>VM／CT 無法啟動</strong>&mdash;&mdash;包括關機後再開機、線上遷移，以及節點故障後的 HA 重新啟動&mdash;&mdash;因為啟用儲存與 Volume 時都會先向陣列查詢。從 VM 內部重新開機仍是同一個 QEMU 行程，不受影響；Proxmox VE 介面上的<strong>重新啟動</strong>則是先停止再啟動，會失敗。</span></li>
+        <li><span class="lang-en"><strong>The storage reports <code>inactive</code></strong> on every node.</span><span class="lang-zh"><strong>儲存在每個節點都會顯示為未運作（inactive）。</strong></span></li>
+        <li><span class="lang-en"><strong>The journal says so.</strong> After 3 consecutive failed status polls each node logs <code>pure-storage: [ERROR] storage '&lt;id&gt;' OUTAGE</code> with the array's error, at most every 30 seconds, and <code>RECOVERED</code> when it comes back. Alert on those two lines.</span><span class="lang-zh"><strong>journal 會留下紀錄。</strong>連續 3 次狀態輪詢失敗後，每個節點會記錄 <code>pure-storage: [ERROR] storage '&lt;id&gt;' OUTAGE</code> 與陣列回傳的錯誤，之後最多每 30 秒重複一次；恢復時記錄 <code>RECOVERED</code>。請以這兩行設定監控告警。</span></li>
+    </ul>
+    <div class="alert alert--warning">
+        <span class="lang-en"><strong>Recommendations for production:</strong> create the token for a <strong>dedicated</strong> array user (for example <code>pve-plugin</code>), not a personal administrator account; <strong>do not give it an expiry</strong> unless policy requires one, and if it does, put the rotation date in your change calendar &mdash; the plugin cannot warn you before the array rejects the token; and do not delete or disable that user while the storage is in use.</span>
+        <span class="lang-zh"><strong>正式環境建議：</strong>以<strong>專用</strong>的陣列使用者（例如 <code>pve-plugin</code>）建立 token，不要用個人管理員帳號；除非政策要求，<strong>不要替 token 設定有效期限</strong>，若必須設定，請把更換日期排進變更行事曆&mdash;&mdash;陣列拒絕 token 之前，外掛無法預先警告；儲存使用中時，不要刪除或停用該使用者。</span>
+    </div>
+    <p>
+        <span class="lang-en"><strong>Replacing the token</strong> &mdash; run once, on any node; <code>/etc/pve</code> replicates it to the whole cluster. No service restart is needed: the plugin reads the credential on each call and keys its client cache on the token, so the next poll uses the new one. Confirm with <code>pvesm status</code>.</span>
+        <span class="lang-zh"><strong>更換 token</strong>：在任一節點執行一次即可，<code>/etc/pve</code> 會同步到整個叢集。不需要重新啟動任何服務：外掛每次呼叫都會讀取憑證，連線快取也以 token 區分，下一次輪詢就會改用新 token。以 <code>pvesm status</code> 確認。</span>
+    </p>
+    <pre><span class="cmd">pvesm</span> set &lt;storeid&gt; <span class="flag">--pure-api-token</span> &lt;new-token&gt;</pre>
+    <p>
+        <span class="lang-en">For rotation without a gap, create the new token on a <strong>second</strong> dedicated user, switch to it, confirm <code>pvesm status</code>, then remove the old token. Do not use <code>--delete pure-api-token</code>: Proxmox VE reports that as an explicit removal and the secret file goes with it. Removing and re-adding the storage also deletes its secret file &mdash; have the token to hand if you do.</span>
+        <span class="lang-zh">若要不中斷地輪換，請在<strong>第二個</strong>專用使用者上建立新 token，切換過去，確認 <code>pvesm status</code> 正常後，再移除舊 token。請勿使用 <code>--delete pure-api-token</code>：Proxmox VE 會把它當成明確移除，連機密檔也會一併刪除。移除再重新加入 storage 同樣會刪除其機密檔，這麼做之前請先備妥 token。</span>
     </p>
 
     <h3 class="subsection-title">
