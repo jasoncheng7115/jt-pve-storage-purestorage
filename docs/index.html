@@ -150,7 +150,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.38 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.39 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -545,7 +545,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.38-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.39-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -625,7 +625,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.38-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.39-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -639,6 +639,10 @@
 <span class="cmd">nano</span> /etc/multipath.conf
 <span class="comment"># Apply: no_path_retry queue -&gt; 30, remove queue_if_no_path, dev_loss_tmo infinity -&gt; 60</span>
 <span class="cmd">systemctl</span> restart multipathd  <span class="comment"># restart, NOT reload</span>
+
+<span class="comment"># Load the new plugin code (the package only reloads; PIDs must change)</span>
+<span class="cmd">systemctl</span> restart pvedaemon pvestatd pveproxy
+<span class="cmd">systemctl</span> show <span class="flag">-p</span> MainPID pvedaemon pvestatd pveproxy
 
 <span class="comment"># Verify</span>
 <span class="cmd">dpkg</span> <span class="flag">-l</span> jt-pve-storage-purestorage | <span class="cmd">grep</span> ii
@@ -1838,6 +1842,11 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-zh">常見問題及解決方案。完整指南請參閱 repository 中的 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/docs/TROUBLESHOOTING_zh-TW.md">docs/TROUBLESHOOTING_zh-TW.md</a>。</span>
     </p>
 
+    <div class="alert alert--warning" id="san-wipe">
+        <span class="lang-en"><strong>Proxmox VE 9.3: never wipe a Pure LUN from Node &gt; SAN.</strong> The new SAN view can wipe a LUN or create a volume group on it. It recognises only Proxmox VE's own storage types and has no way for a plugin to claim its LUNs, so a LUN of this plugin counts as in use only while a process on <em>that node</em> has it open. Every disk is connected to every node, so the disk of a stopped guest shows as <code>unused</code> on all nodes, and the disk of a running guest on every node except the one it runs on. Partitions do not block the wipe. Do not run <strong>Wipe</strong> or <strong>Create VG</strong> on a LUN whose WWID starts with <code>3624a9370</code>; the 24 hex digits after that prefix are the volume serial on the array. A wiped disk can only be recovered from an array snapshot. Also do not give a Pure WWID an alias in the cluster-wide multipath settings: the plugin addresses disks as <code>/dev/mapper/&lt;wwid&gt;</code>.</span>
+        <span class="lang-zh"><strong>Proxmox VE 9.3：不要在「節點 &gt; SAN」抹除 Pure LUN。</strong>新的 SAN 檢視可以抹除 LUN，也可以在 LUN 上建立 VG。它只認得 Proxmox VE 自己的儲存類型，也沒有讓外掛宣告自己 LUN 的機制，所以本外掛的 LUN 只有在<em>該節點</em>上有行程開著時才算使用中。每顆磁碟都連到所有節點，因此停機中 guest 的磁碟在每個節點上都顯示 <code>unused</code>，執行中 guest 的磁碟則在它所在節點以外的節點上顯示 <code>unused</code>。分割區擋不住抹除。WWID 以 <code>3624a9370</code> 開頭的 LUN 不要執行<strong>抹除</strong>或<strong>建立 VG</strong>；這個字首之後的 24 位十六進位數字就是陣列上該 Volume 的序號。被抹除的磁碟只能從陣列快照救回。另外，不要在叢集層級的 multipath 設定中替 Pure 的 WWID 加 alias：外掛以 <code>/dev/mapper/&lt;wwid&gt;</code> 存取磁碟。</span>
+    </div>
+
     <h3 class="subsection-title">
         <span class="lang-en">Quick Diagnostic Commands</span>
         <span class="lang-zh">快速診斷指令</span>
@@ -2042,6 +2051,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.39 <span class="changelog-tag changelog-tag--feature">Feature</span></div>
+        <div class="changelog-date">2026-11-27</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Proxmox VE 9.3 support:</strong> <code>api()</code> now negotiates up to storage API 17 (9.3 ships APIVER 17 / APIAGE 8), so <code>pvesm</code>, <code>qm</code> and <code>pct</code> no longer print &ldquo;implementing an older storage API&rdquo;. Versions 16 and 17 need no code change: <code>alloc_image()</code> and <code>rename_volume()</code> are overridden without the base, and <code>parse_volname()</code> keeps returning <code>images</code>. <strong>Node &gt; SAN warning:</strong> the new view treats a plugin's LUN as in use only while a process on that node has it open, so the disks of stopped guests, and of guests running on another node, are offered for wipe &mdash; see <a href="#san-wipe">Troubleshooting</a>. Also: the postinst upgrade notice now asks for a restart of <code>pvedaemon pvestatd pveproxy</code>, not <code>pvestatd</code> alone.</span>
+            <span class="lang-zh"><strong>支援 Proxmox VE 9.3：</strong><code>api()</code> 現在最高協商到 storage API 17（9.3 為 APIVER 17／APIAGE 8），<code>pvesm</code>、<code>qm</code>、<code>pct</code> 不再印出「implementing an older storage API」。16 與 17 不需要改程式：<code>alloc_image()</code> 與 <code>rename_volume()</code> 已自行覆寫且不呼叫 base，<code>parse_volname()</code> 繼續回傳 <code>images</code>。<strong>「節點 &gt; SAN」警告：</strong>新的檢視只有在該節點上有行程開著外掛的 LUN 時才視為使用中，因此停機中 guest 的磁碟，以及在其他節點執行的 guest 的磁碟，都可以被抹除，詳見<a href="#san-wipe">疑難排解</a>。另外：postinst 的升級提示改為要求重新啟動 <code>pvedaemon pvestatd pveproxy</code>，不再只有 <code>pvestatd</code>。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.38 <span class="changelog-tag changelog-tag--critical">Critical</span></div>

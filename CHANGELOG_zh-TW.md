@@ -8,6 +8,32 @@
 
 ---
 
+## [1.1.39] - 2026-11-27
+
+**支援 Proxmox VE 9.3。** 舊版本上的行為不變。使用 Proxmox VE 9.3 者，請在有人使用
+SAN 檢視之前先閱讀下方的警告。安裝後請在每一台節點執行
+`systemctl restart pvedaemon pvestatd pveproxy`。
+
+### 變更
+- **Storage API 17**：Proxmox VE 9.3（`libpve-storage-perl` 9.1.26）回報
+  APIVER 17／APIAGE 8。外掛可以載入，但宣告 15，所以每次執行 `pvesm`、`qm`、
+  `pct` 都會印出「implementing an older storage API」。`api()` 現在最高協商到 17。
+  16 與 17 不需要改程式：`alloc_image()` 與 `rename_volume()` 已自行覆寫且不呼叫
+  base，`parse_volname()` 繼續回傳 `images`，Proxmox VE 對所有 guest Volume 類型
+  都接受。
+- **升級提示列出三個服務**：postinst 原本只要求重新啟動 `pvestatd`；`pvedaemon`
+  與 `pveproxy` 也會執行外掛，處理每個網頁介面與 API 請求。
+
+### 文件
+- **Proxmox VE 9.3 節點 > SAN：不要抹除 Pure LUN**：新的檢視只有在該節點上有行程
+  開著第三方外掛的 LUN 時，才視為使用中。本外掛的每顆磁碟都連到所有節點，因此
+  停機中 guest 的磁碟，以及在其他節點執行的 guest 的磁碟，都會顯示 `unused` 並可
+  被抹除，分割區也擋不住。見 README 的「已知限制」與 TROUBLESHOOTING 第 14 節，
+  後者也說明新的叢集層級 multipath 設定中 alias 的注意事項。
+- README 的升級 SOP 加上重新啟動服務的步驟。
+
+---
+
 ## [1.1.38] - 2026-10-30
 
 **使用 Fibre Channel、設定了 `pure-pod`，或儲存頁面偶爾出現 HTTP 500 者請升級。**

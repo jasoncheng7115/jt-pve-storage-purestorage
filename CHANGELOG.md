@@ -8,6 +8,37 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.39] - 2026-11-27
+
+**Proxmox VE 9.3 support.** No change in behaviour on earlier versions. If you
+run Proxmox VE 9.3, read the SAN view warning below before anyone uses it.
+After installing, run `systemctl restart pvedaemon pvestatd pveproxy` on every
+node.
+
+### Changed
+- **Storage API 17.** Proxmox VE 9.3 (`libpve-storage-perl` 9.1.26) reports
+  APIVER 17 / APIAGE 8. The plugin loaded but claimed 15, so every `pvesm`,
+  `qm` and `pct` call printed "implementing an older storage API". `api()` now
+  negotiates up to 17. Versions 16 and 17 need no code change: `alloc_image()`
+  and `rename_volume()` are overridden without calling the base, and
+  `parse_volname()` keeps returning `images`, which Proxmox VE accepts for
+  every guest volume type.
+- **The upgrade notice names all three services.** postinst asked for a
+  restart of `pvestatd` only; `pvedaemon` and `pveproxy` also run the plugin,
+  for every web interface and API request.
+
+### Documentation
+- **Proxmox VE 9.3 Node > SAN: never wipe a Pure LUN.** The new view treats a
+  third-party plugin's LUN as in use only while a process on that node has it
+  open. Every disk of this plugin is connected to every node, so the disks of
+  stopped guests, and of guests running on another node, show as `unused` and
+  can be wiped; partitions do not prevent it. See README, Known Limitations,
+  and TROUBLESHOOTING section 14, which also covers the multipath alias
+  caveat for the new cluster-wide multipath settings.
+- The upgrade SOP in the README now includes the service restart.
+
+---
+
 ## [1.1.38] - 2026-10-30
 
 **Upgrade if you use Fibre Channel, or `pure-pod`, or see an intermittent

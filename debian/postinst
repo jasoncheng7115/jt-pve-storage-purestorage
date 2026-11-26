@@ -324,7 +324,9 @@ reload_pve_services() {
     # versions — pvestatd can keep running the OLD code in memory even though
     # the new .pm files are on disk. We deliberately use reload (not restart)
     # to avoid the stop-phase hang on D-state children, but that means the
-    # operator MUST restart pvestatd to actually activate new code. Only
+    # operator MUST restart the services to actually activate new code. All
+    # three: pvedaemon and pveproxy run the plugin for every web interface and
+    # API request, not only pvestatd for the status poll. Only
     # surface this on an upgrade (fresh installs have no stale code to clear).
     if [ -n "$old_version" ]; then
         # ANSI yellow if writing to a terminal, plain otherwise.
@@ -336,15 +338,17 @@ ${Y}============================================================================
  ACTION REQUIRED AFTER THIS UPGRADE (every cluster node)
 ==============================================================================${N}
  The plugin files were updated and PVE services were reloaded (SIGHUP), but
- on many PVE versions reload does NOT reload Perl modules — pvestatd may keep
- running the OLD plugin code from memory. To actually activate ${old_version:+the new }code:
+ on many PVE versions reload does NOT reload Perl modules — pvedaemon,
+ pvestatd and pveproxy may keep running the OLD plugin code from memory.
+ To actually activate ${old_version:+the new }code:
 
-     systemctl restart pvestatd
+     systemctl restart pvedaemon pvestatd pveproxy
 
- Run this on EVERY node in the cluster. To verify the restart took effect,
- confirm the MainPID changed:
+ Run this on EVERY node in the cluster. pvedaemon and pveproxy serve the web
+ interface and API, so an open web session reconnects. To verify the restart
+ took effect, confirm the MainPIDs changed:
 
-     systemctl show -p MainPID pvestatd     # before and after — PID MUST change
+     systemctl show -p MainPID pvedaemon pvestatd pveproxy   # PIDs MUST change
 
  We intentionally use reload (not auto-restart) in this package to avoid the
  stop-phase hang on D-state children left by very old code; the manual

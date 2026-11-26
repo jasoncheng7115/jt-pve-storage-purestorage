@@ -60,6 +60,8 @@ my @matrix = (
     [ 13, 4,  'libpve-storage-perl 9.1.2 (13/4, accepts 9..13)' ],
     [ 14, 5,  'an intermediate 9.1.x                (14/5, 9..14)' ],
     [ 15, 6,  'libpve-storage-perl 9.1.6 (15/6, accepts 9..15)' ],
+    [ 16, 7,  'an intermediate 9.1.x                (16/7, 9..16)' ],
+    [ 17, 8,  'libpve-storage-perl 9.1.26 (17/8, PVE 9.3)    ' ],
     [ 20, 6,  'a hypothetical future PVE            (20/6, 14..20)' ],
     [ 12, 3,  'an older library                     (12/3, 9..12)' ],
     [ 9,  0,  'the oldest we support                (9/0,  9..9)' ],
@@ -76,7 +78,7 @@ for my $m (@matrix) {
 
     # ...and where the plugin can match exactly, it must, or PVE nags on
     # every single call. It can only match up to what it implements.
-    my $want_exact = $apiver <= 15 ? $apiver : 15;
+    my $want_exact = $apiver <= 17 ? $apiver : 17;
     $want_exact = 9 if $want_exact < 9;
     check("$desc: claims", $claim, "$want_exact");
 }
@@ -87,8 +89,8 @@ check('PVE::Storage 未載入時回退', $bare, '13');
 # The fallback is only ever returned when PVE::Storage is not loaded, which
 # means PVE is not the caller. It still has to be in range for every library
 # that ships today, so that a fallback taken by mistake is survivable.
-my @shipping = grep { $_->[0] >= 13 && $_->[0] <= 15 } @matrix;
-check('回退值對 PVE 9.0/9.1/9.2 的每個實際版本都在範圍內',
+my @shipping = grep { $_->[0] >= 13 && $_->[0] <= 17 } @matrix;
+check('回退值對 PVE 9.0 到 9.3 的每個實際版本都在範圍內',
     (grep { $bare >= $_->[0] - $_->[1] && $bare <= $_->[0] } @shipping)
         == scalar(@shipping) ? 'yes' : 'no', 'yes');
 
@@ -96,13 +98,13 @@ check('回退值對 PVE 9.0/9.1/9.2 的每個實際版本都在範圍內',
 # PVE's minimum (APIVER - APIAGE) climbs above it, the plugin is hard
 # rejected and every purestorage storage disappears from the node. State the
 # deadline so it is visible rather than discovered in the field.
-check('APIVERSION_MAX 15 可承受的最高 PVE 下限', 15, '15');
-print "       (PVE 的 APIVER - APIAGE 一旦超過 15，外掛會被拒絕載入；\n"
-    . "        目前 15/6 = 9，還有 6 個版本的餘裕)\n";
+check('APIVERSION_MAX 17 可承受的最高 PVE 下限', 17, '17');
+print "       (PVE 的 APIVER - APIAGE 一旦超過 17，外掛會被拒絕載入；\n"
+    . "        目前 17/8 = 9，還有 8 個版本的餘裕)\n";
 
 # The regression this replaces: a hardcoded 13 against today's library.
 my $hard = 13;
-check('（對照）舊的固定 13 在 15/6 上會被警告', ($hard != 15 ? 'warns' : 'silent'), 'warns');
+check('（對照）舊的固定 13 在 17/8 上會被警告', ($hard != 17 ? 'warns' : 'silent'), 'warns');
 
 printf "\n%d passed, %d failed\n", $pass, $fail;
 exit($fail ? 1 : 0);

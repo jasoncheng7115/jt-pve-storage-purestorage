@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.38-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.39-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -139,6 +139,13 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
     `# pure-multipath-config-version:`, see the warning box above —
     you must either manually align the device block with the new
     template OR `rm` the file to let the plugin recreate it.
+6b. **Restart the PVE services** so they load the new plugin code — the
+    package only reloads them, which on many PVE versions keeps the old code
+    in memory:
+    ```
+    systemctl restart pvedaemon pvestatd pveproxy
+    systemctl show -p MainPID pvedaemon pvestatd pveproxy   # PIDs must change
+    ```
 7. **Verify**:
    ```
    pvesm status pure1                                # < 5s, active
@@ -518,7 +525,7 @@ the token to hand if you do.
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.38-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.39-1_all.deb
 ```
 
 > **Note:** avoid `dpkg -i` for the first install: it does **not** auto-install
@@ -1082,6 +1089,21 @@ You can now start the VM from PVE web UI or CLI:
 - If VM config already exists in PVE, restore will be refused (delete it first)
 
 ## Known Limitations
+
+### Proxmox VE 9.3 SAN view: never wipe a Pure LUN
+
+Proxmox VE 9.3 adds **Node > SAN**, which can wipe a LUN or create a volume
+group on it. It recognises only its own storage types as owners and offers no
+way for a plugin to claim its LUNs, so a LUN of this plugin counts as in use
+only while a process on that node has it open. Because every disk is
+connected to every node, the disk of a stopped guest shows as `unused` on all
+nodes, and the disk of a running guest on every node except the one it runs
+on. Partitions do not block the wipe.
+
+Do not run **Wipe** or **Create VG** on a LUN whose WWID starts with
+`3624a9370`; the 24 hex digits after that prefix are the volume serial on the
+array. A wiped disk can only be recovered from an array snapshot. Details and
+the related multipath alias caveat: `docs/TROUBLESHOOTING.md`, section 14.
 
 ### Full Clone Limitation
 

@@ -295,24 +295,60 @@ behaviour is unchanged — a fix appears to have no effect.
 
 **Cause:** The package uses `systemctl reload` (SIGHUP) to avoid the
 stop-phase hang on D-state children, but on many PVE versions reload does
-NOT reload the plugin's Perl modules. `pvestatd` keeps running the OLD code
-from memory even though the new files are on disk.
+NOT reload the plugin's Perl modules. `pvedaemon`, `pvestatd` and `pveproxy`
+keep running the OLD code from memory even though the new files are on disk.
+All three load the plugin: `pvestatd` for the status poll, `pvedaemon` and
+`pveproxy` for every web interface and API request, including guest start.
 
-**Solution:** After any plugin upgrade, restart `pvestatd` on **every**
+**Solution:** After any plugin upgrade, restart all three on **every**
 cluster node:
 
 ```
-systemctl restart pvestatd
+systemctl restart pvedaemon pvestatd pveproxy
 ```
 
-Verify the restart took effect — the MainPID must change:
+Verify the restart took effect — the MainPIDs must change:
 
 ```
-systemctl show -p MainPID pvestatd     # run before and after; PID MUST change
+systemctl show -p MainPID pvedaemon pvestatd pveproxy   # run before and after; PIDs MUST change
 ```
 
-`pvedaemon` and `pveproxy` similarly load plugin code; restart them too if a
-Web UI / API path still shows stale behaviour.
+An open web interface session reconnects after `pveproxy` restarts.
+
+### 14. Proxmox VE 9.3: the SAN view lists Pure LUNs as unused
+
+**Symptom:** Under **Node > SAN** (new in Proxmox VE 9.3), LUNs whose WWID
+starts with `3624a9370` show usage `unused` and no storage, and the **Wipe**
+and **Create VG** actions are offered for them.
+
+**Cause:** Proxmox VE recognises a LUN as in use only through its own storage
+types (LVM volume groups, iSCSI targets, NVMe-oF subsystems, LVM base
+volumes). It has no way for a third-party plugin to declare its LUNs. A LUN of
+this plugin counts as in use only while a process on **that node** has it
+open for writing. This plugin connects every disk to every cluster node, so:
+
+- a disk of a stopped guest is `unused` on every node;
+- a disk of a running guest is `unused` on every node except the one the
+  guest runs on.
+
+Partitions do not stop the wipe: Proxmox VE removes the kpartx partition
+mappings and their signatures before wiping the LUN.
+
+**What to do:** never run **Wipe** or **Create VG** on a LUN whose WWID
+starts with `3624a9370` unless you have confirmed on the array that the
+volume does not belong to a Pure storage. To map a WWID to a volume, take
+the 24 hex digits after `3624a9370` — that is the volume serial on the
+array. A wiped disk can only be recovered from an array snapshot.
+
+Two related points for the cluster-wide multipath settings that Proxmox VE
+9.3 adds (written to `/etc/multipath/conf.d/pve-*.conf`):
+
+- Do not add a Pure WWID there with an alias. The plugin addresses every
+  disk as `/dev/mapper/<wwid>`; an alias renames the map and the disk can no
+  longer be found.
+- A `devices` section for `PURE` in the overrides is read after this
+  plugin's `pure-storage.conf` and replaces its settings
+  (`no_path_retry 30`, `fast_io_fail_tmo 5`, `dev_loss_tmo 60`).
 
 ## What a guest costs on the array
 

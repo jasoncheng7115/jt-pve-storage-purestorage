@@ -268,26 +268,56 @@ defaults {
 
 ### 13. 升級後新的外掛程式碼未生效
 
-**症狀：** 你安裝了新的 `.deb`，postinst 回報成功，但行為未變——修正彷彿沒有作用。
+**症狀**：你安裝了新的 `.deb`，postinst 回報成功，但行為未變，修正彷彿沒有作用。
 
-**原因：** 本套件使用 `systemctl reload`（SIGHUP）以避免 stop 階段卡在 D-state
-子行程，但在許多 PVE 版本上 reload 並不會重新載入外掛的 Perl 模組。`pvestatd`
-仍從記憶體執行舊程式碼，即使磁碟上已是新檔案。
+**原因**：本套件使用 `systemctl reload`（SIGHUP）以避免 stop 階段卡在 D-state
+子行程，但在許多 PVE 版本上 reload 並不會重新載入外掛的 Perl 模組。`pvedaemon`、
+`pvestatd` 與 `pveproxy` 仍從記憶體執行舊程式碼，即使磁碟上已是新檔案。三者都會
+載入外掛：`pvestatd` 負責狀態輪詢，`pvedaemon` 與 `pveproxy` 處理每個網頁介面與
+API 請求，包括啟動 guest。
 
-**解法：** 任何外掛升級後，請在叢集的每個節點重新啟動 `pvestatd`：
-
-```
-systemctl restart pvestatd
-```
-
-驗證重新啟動已生效——MainPID 必須變更：
+**解法**：任何外掛升級後，請在叢集的**每個**節點重新啟動這三個服務：
 
 ```
-systemctl show -p MainPID pvestatd     # 前後各執行一次；PID 必須改變
+systemctl restart pvedaemon pvestatd pveproxy
 ```
 
-`pvedaemon` 與 `pveproxy` 同樣會載入外掛程式碼；若 Web UI／API 路徑仍出現舊行為，
-也一併重新啟動。
+驗證重新啟動已生效，MainPID 必須變更：
+
+```
+systemctl show -p MainPID pvedaemon pvestatd pveproxy   # 前後各執行一次；PID 必須改變
+```
+
+`pveproxy` 重新啟動後，已開啟的網頁介面會重新連線。
+
+### 14. Proxmox VE 9.3：SAN 檢視把 Pure LUN 顯示為未使用
+
+**症狀**：在 **節點 > SAN**（Proxmox VE 9.3 新增）中，WWID 以 `3624a9370` 開頭的
+LUN 顯示為 `unused`、沒有對應的儲存，而且可以對它們執行**抹除**與**建立 VG**。
+
+**原因**：Proxmox VE 只透過自己的儲存類型判斷 LUN 是否使用中（LVM VG、iSCSI
+target、NVMe-oF subsystem、LVM base volume），沒有讓第三方外掛宣告自己 LUN 的
+機制。本外掛的 LUN 只有在**該節點**上有行程以寫入模式開著時才算使用中。本外掛
+會把每顆磁碟連到叢集所有節點，因此：
+
+- 停機中 guest 的磁碟，在每個節點上都是 `unused`；
+- 執行中 guest 的磁碟，除了它所在的節點，在其他節點上都是 `unused`。
+
+分割區擋不住抹除：Proxmox VE 會先移除 kpartx 分割區對應與簽章，再抹除整顆 LUN。
+
+**處理方式**：WWID 以 `3624a9370` 開頭的 LUN，除非已在陣列上確認該 Volume
+不屬於任何 Pure 儲存，否則不要執行**抹除**或**建立 VG**。WWID 中 `3624a9370`
+之後的 24 位十六進位數字，就是陣列上該 Volume 的序號。被抹除的磁碟只能從陣列
+快照救回。
+
+Proxmox VE 9.3 新增了叢集層級的 multipath 設定（寫入
+`/etc/multipath/conf.d/pve-*.conf`），相關的兩點：
+
+- 不要在那裡替 Pure 的 WWID 加 alias。本外掛以 `/dev/mapper/<wwid>` 存取每顆
+  磁碟，加了 alias 會讓對應改名，外掛就找不到磁碟。
+- overrides 中針對 `PURE` 的 `devices` 區段，會在本外掛的 `pure-storage.conf`
+  之後讀取，並取代其設定（`no_path_retry 30`、`fast_io_fail_tmo 5`、
+  `dev_loss_tmo 60`）。
 
 ## 一台 guest 在陣列上佔用多少物件
 

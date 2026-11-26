@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.38-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.39-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -132,6 +132,12 @@
     若該檔案存在但**沒有** `# pure-multipath-config-version:` 開頭的
     那一行,請參考上方警告框 — 你必須手動對齊新版 device 區塊範本,
     或是 `rm` 掉該檔讓外掛重新建立。
+6b. **重新啟動 PVE 服務**，讓它們載入新的外掛程式碼。套件只會 reload 這些服務，
+    在許多 PVE 版本上舊程式碼仍會留在記憶體中：
+    ```
+    systemctl restart pvedaemon pvestatd pveproxy
+    systemctl show -p MainPID pvedaemon pvestatd pveproxy   # PID 必須改變
+    ```
 7. **驗證**:
    ```
    pvesm status pure1                                # < 5s, active
@@ -477,7 +483,7 @@ pvesm set <storeid> --pure-api-token <新token>
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.38-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.39-1_all.deb
 ```
 
 > **注意**：首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件
@@ -1023,6 +1029,18 @@ You can now start the VM from PVE web UI or CLI:
 - 如果 PVE 中已存在該 VM 設定，還原會被拒絕（請先刪除或使用其他 VMID）
 
 ## 已知限制
+
+### Proxmox VE 9.3 SAN 檢視：不要抹除 Pure LUN
+
+Proxmox VE 9.3 新增了 **節點 > SAN**，可以抹除 LUN，也可以在 LUN 上建立 VG。
+它只認得自己的儲存類型，也沒有讓外掛宣告自己 LUN 的機制，所以本外掛的 LUN
+只有在該節點上有行程開著時才算使用中。由於每顆磁碟都連到所有節點，停機中
+guest 的磁碟在每個節點上都顯示 `unused`，執行中 guest 的磁碟則在它所在節點以外
+的節點上顯示 `unused`。分割區擋不住抹除。
+
+WWID 以 `3624a9370` 開頭的 LUN 不要執行**抹除**或**建立 VG**；這個字首之後的
+24 位十六進位數字就是陣列上該 Volume 的序號。被抹除的磁碟只能從陣列快照救回。
+詳細說明與 multipath alias 的注意事項見 `docs/TROUBLESHOOTING_zh-TW.md` 第 14 節。
 
 ### Full Clone 限制
 

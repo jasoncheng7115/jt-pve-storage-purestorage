@@ -96,16 +96,24 @@ use PVE::Storage::Custom::PureStorage::FC qw(
 # only a load-time gate. Nothing in PVE branches on the value afterwards --
 # it calls plugin methods with its own current signatures either way.
 #
-# Raise APIVERSION_MAX only after implementing that version's delta:
-#   14  volume_resize gained a $snapname parameter (handled: refused, because
+# Raise APIVERSION_MAX only after implementing that version's delta
+# (pve-storage ApiChangeLog):
+#   14  get_identity()
+#   15  volume_resize gained a $snapname parameter (handled: refused, because
 #       this plugin does snapshots on the array, not as a volume chain)
-#   15  get_identity()
-use constant APIVERSION_MAX => 15;
+#   16  volname_for_format() / get_parsed_format() and friends. Only the base
+#       alloc_image() and rename_volume() call them; both are overridden here
+#       without SUPER, so they are never reached.
+#   17  vtypes vm-vol / vm-state / ct-vol. parse_volname() keeps returning
+#       'images', which PVE accepts wherever a guest volume type is expected;
+#       plugindata() adds none of the new content types, and
+#       isolate-properties is not set.
+use constant APIVERSION_MAX => 17;
 use constant APIVERSION_MIN => 9;
 
 # What to claim when PVE::Storage is not loaded at all, i.e. `perl -c` and the
 # unit tests. Any value in range does; this is the version the plugin was
-# first written against, and the one every Proxmox VE 9.0/9.1/9.2 storage
+# first written against, and the one every Proxmox VE 9.0 through 9.3 storage
 # library accepts.
 use constant APIVERSION => 13;
 use constant MIN_APIVERSION => APIVERSION_MIN;

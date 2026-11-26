@@ -1,3 +1,25 @@
+jt-pve-storage-purestorage (1.1.39-1) stable; urgency=medium
+
+  * Proxmox VE 9.3 support: api() now negotiates up to storage API 17
+    (libpve-storage-perl 9.1.26 reports APIVER 17 / APIAGE 8), so the plugin
+    no longer triggers "implementing an older storage API" on every load.
+    Versions 16 and 17 need no code change here: alloc_image() and
+    rename_volume() are overridden without calling the base, and
+    parse_volname() keeps returning 'images', which PVE accepts for every
+    guest volume type. The comment listing each version's delta had 14 and
+    15 swapped; corrected against the pve-storage ApiChangeLog.
+  * postinst: the upgrade notice now asks for a restart of pvedaemon,
+    pvestatd and pveproxy, not pvestatd alone. pvedaemon and pveproxy run
+    the plugin for every web interface and API request.
+  * Docs: the Proxmox VE 9.3 Node > SAN view treats a third-party plugin's
+    LUN as in use only while a process on that node has it open, and this
+    plugin connects every disk to every node, so the disks of stopped guests
+    -- and of guests running on another node -- are offered for wipe.
+    Documented, with the multipath alias caveat for the new cluster-wide
+    multipath settings.
+
+ -- Jason Cheng <jason@jason.tools>  Fri, 27 Nov 2026 00:19:44 +0800
+
 jt-pve-storage-purestorage (1.1.38-1) stable; urgency=high
 
   * FC: scan for newly mapped LUNs when the request comes from the web
