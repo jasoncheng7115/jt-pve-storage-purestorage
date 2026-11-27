@@ -321,11 +321,11 @@ An open web interface session reconnects after `pveproxy` restarts.
 starts with `3624a9370` show usage `unused` and no storage, and the **Wipe**
 and **Create VG** actions are offered for them.
 
-**Cause:** Proxmox VE recognises a LUN as in use only through its own storage
-types (LVM volume groups, iSCSI targets, NVMe-oF subsystems, LVM base
-volumes). It has no way for a third-party plugin to declare its LUNs. A LUN of
-this plugin counts as in use only while a process on **that node** has it
-open for writing. This plugin connects every disk to every cluster node, so:
+**Cause:** Proxmox VE recognises a LUN as in use through its own storage
+types (LVM volume groups, NVMe-oF subsystems, LVM base volumes), through a
+storage whose `target` matches the LUN's iSCSI target, or while a process on
+**that node** has it open for writing. This plugin connects every disk to
+every cluster node, so without `target`:
 
 - a disk of a stopped guest is `unused` on every node;
 - a disk of a running guest is `unused` on every node except the one the
@@ -334,11 +334,30 @@ open for writing. This plugin connects every disk to every cluster node, so:
 Partitions do not stop the wipe: Proxmox VE removes the kpartx partition
 mappings and their signatures before wiping the LUN.
 
-**What to do:** never run **Wipe** or **Create VG** on a LUN whose WWID
-starts with `3624a9370` unless you have confirmed on the array that the
-volume does not belong to a Pure storage. To map a WWID to a volume, take
-the 24 hex digits after `3624a9370` — that is the volume serial on the
-array. A wiped disk can only be recovered from an array snapshot.
+**What to do, iSCSI (1.1.40 and later):** set the array's iSCSI IQN as the
+storage's `target`. Upgrade **every** cluster node to 1.1.40 first. An older
+version of the plugin does not know `target`: it prints
+`unexpected property 'target'` on every command and drops the key the next
+time that node writes the storage configuration, which removes the
+protection on all nodes.
+
+```bash
+iscsiadm -m session | awk '{print $4}' | sort -u   # the array's IQN
+pvesm set <storage-id> --target <iqn>
+```
+
+The string must match exactly; the plugin checks it against the array's IQN
+when it is set and warns on a mismatch. Afterwards the SAN view lists the
+LUNs under the storage, and Wipe and Create VG fail with
+`storage '<storage-id>' serves images from this target`. Upgrade notices from
+`dpkg -i` name every iSCSI Pure storage that still has no `target`.
+
+**What to do, Fibre Channel:** `target` cannot help; the SAN view matches it
+against iSCSI sessions only. Never run **Wipe** or **Create VG** on a LUN
+whose WWID starts with `3624a9370` unless you have confirmed on the array
+that the volume does not belong to a Pure storage. To map a WWID to a
+volume, take the 24 hex digits after `3624a9370` — that is the volume serial
+on the array. A wiped disk can only be recovered from an array snapshot.
 
 Two related points for the cluster-wide multipath settings that Proxmox VE
 9.3 adds (written to `/etc/multipath/conf.d/pve-*.conf`):

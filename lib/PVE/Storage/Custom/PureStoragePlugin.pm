@@ -182,12 +182,31 @@ sub plugindata {
             'pure-api-token' => 1,
             'pure-password'  => 1,
         },
+        # Proxmox VE 9.3 builds the add/edit storage dialog from the schema:
+        # `title` on each property, these two keys, and the display name.
+        # Earlier versions ignore all three. Advanced = tuning knobs whose
+        # defaults are right for nearly every installation.
+        'advanced-properties' => {
+            'pure-cluster-name'          => 1,
+            'pure-device-timeout'        => 1,
+            'pure-portal-probe-timeout'  => 1,
+            'pure-config-backup-timeout' => 1,
+            'pure-status-timeout'        => 1,
+            'pure-activate-deadline'     => 1,
+            'pure-rescan-interval'       => 1,
+            'pure-pod-usage-metric'      => 1,
+            'pure-pod-capacity'          => 1,
+        },
+        meta => {
+            'display-name' => 'Pure Storage FlashArray',
+        },
     };
 }
 
 sub properties {
     return {
         'pure-portal' => {
+            title => "Management Address (vir0)",
             description => "Pure Storage FlashArray management address. Use the"
                 . " array's VIRTUAL management IP (vir0), or a hostname that"
                 . " resolves to it — NOT the address of an individual"
@@ -205,42 +224,50 @@ sub properties {
             type => 'string',
         },
         'pure-api-token' => {
+            title => "API Token",
             description => "API token for Pure Storage REST API authentication.",
             type => 'string',
         },
         'pure-username' => {
+            title => "Username",
             description => "Username for Pure Storage REST API (if not using API token).",
             type => 'string',
             optional => 1,
         },
         'pure-password' => {
+            title => "Password",
             description => "Password for Pure Storage REST API (if not using API token).",
             type => 'string',
             optional => 1,
         },
         'pure-ssl-verify' => {
+            title => "Verify TLS Certificate",
             description => "Verify SSL certificate.",
             type => 'boolean',
             default => 0,
         },
         'pure-protocol' => {
+            title => "Protocol",
             description => "SAN protocol: 'iscsi' or 'fc' (Fibre Channel).",
             type => 'string',
             enum => ['iscsi', 'fc'],
             default => 'iscsi',
         },
         'pure-host-mode' => {
+            title => "Host Mode",
             description => "Host mode: 'per-node' creates host per PVE node, 'shared' uses single shared host.",
             type => 'string',
             enum => ['per-node', 'shared'],
             default => 'per-node',
         },
         'pure-cluster-name' => {
+            title => "Cluster Name (host naming)",
             description => "PVE cluster name for host naming on Pure Storage.",
             type => 'string',
             optional => 1,
         },
         'pure-device-timeout' => {
+            title => "Device Timeout (s)",
             description => "Timeout in seconds for device discovery after volume connection.",
             type => 'integer',
             minimum => 10,
@@ -248,6 +275,7 @@ sub properties {
             default => 60,
         },
         'pure-portal-probe-timeout' => {
+            title => "Portal Probe Timeout (s)",
             description => "Timeout in seconds for the TCP pre-check that skips"
                 . " unreachable iSCSI portals before iscsiadm discovery/login."
                 . " Set to 0 to disable the pre-check (legacy behaviour). Raise"
@@ -258,6 +286,7 @@ sub properties {
             default => 2,
         },
         'pure-config-backup-timeout' => {
+            title => "Config Backup Timeout (s)",
             description => "Timeout in seconds for the auxiliary 1 MB config-"
                 . " backup volume's multipath device to appear during snapshot"
                 . " operations. The config backup is non-critical (used only"
@@ -272,6 +301,7 @@ sub properties {
             default => 15,
         },
         'pure-status-timeout' => {
+            title => "Status Timeout (s)",
             description => "Timeout in seconds for REST calls on the pvestatd"
                 . " health path (activate_storage + the foreground of status)."
                 . " This path is polled every ~10s and PVE processes storages"
@@ -291,6 +321,7 @@ sub properties {
             default => 5,
         },
         'pure-activate-deadline' => {
+            title => "Activation Deadline (s)",
             description => "Cumulative wall-clock budget in seconds for the"
                 . " iSCSI portal discover/login loop in activate_storage."
                 . " Per-portal timeouts (probe/discovery/login) bound each"
@@ -308,11 +339,13 @@ sub properties {
             default => 30,
         },
         'pure-pod' => {
+            title => "Pod",
             description => "Pod name for ActiveCluster configurations. Required when File service is enabled.",
             type => 'string',
             optional => 1,
         },
         'pure-pod-usage-metric' => {
+            title => "Pod Usage Metric",
             description => "Which Pure pod space figure is reported to Proxmox"
                 . " VE as 'used' when the pod has a quota_limit set."
                 . " 'provisioned' (default) is the sum of the provisioned"
@@ -335,6 +368,7 @@ sub properties {
             optional => 1,
         },
         'pure-pod-capacity' => {
+            title => "Pod Capacity Reporting",
             description => "What Proxmox VE is shown for a pod that has NO"
                 . " quota_limit. 'array' (default) reports the whole"
                 . " FlashArray: total capacity and everything used on it,"
@@ -352,6 +386,7 @@ sub properties {
             optional => 1,
         },
         'pure-rescan-interval' => {
+            title => "Rescan Interval (s)",
             description => "Minimum seconds between the SAN rescans that"
                 . " activate_storage performs (iSCSI session rescan, SCSI"
                 . " host scan, multipath reconfigure, udev trigger)."
@@ -393,6 +428,24 @@ sub options {
         'pure-pod-usage-metric' => { optional => 1 },
         'pure-pod-capacity'     => { optional => 1 },
         'pure-rescan-interval'  => { optional => 1 },
+        # The array's iSCSI target IQN. The plugin does not use it; it is
+        # here for PVE::Storage::SAN (Proxmox VE 9.3 Node > SAN), whose
+        # assert_lun_unreferenced() refuses Wipe / Create VG on a LUN reached
+        # through an iSCSI session to a storage's `target`, for ANY storage
+        # type. Without it every Pure LUN not open on the local node --
+        # including the disk of a guest running on another node -- is offered
+        # for wiping. iSCSI only: that check builds its target list from iSCSI
+        # sessions, so an FC LUN never matches.
+        #
+        # Declared by ISCSIPlugin in the shared property list, so it is only
+        # listed here, never redeclared in properties(). Every other PVE
+        # consumer of a storage's `target` is gated on type 'iscsi'.
+        #
+        # A node still running 1.1.39 or older does not know this key: it
+        # warns on every parse of storage.cfg and drops the key on its next
+        # write, which removes the protection cluster-wide. Upgrade every node
+        # before setting it.
+        target               => { optional => 1 },
         nodes                => { optional => 1 },
         disable              => { optional => 1 },
         content              => { optional => 1 },
@@ -531,6 +584,46 @@ sub _assert_storeid_prefix_unique {
     return;
 }
 
+# `target` protects the LUNs only if it is byte-for-byte the IQN the iSCSI
+# sessions report: PVE::Storage::SAN compares the strings exactly, and a value
+# that matches nothing fails silently -- the SAN view just keeps offering the
+# LUNs for wiping. So check it where it is set. Warn only: an array that does
+# not answer must not block a config change.
+sub _check_san_target {
+    my ($storeid, $scfg) = @_;
+
+    my $target = $scfg->{target};
+    return unless defined $target && length $target;
+
+    if (($scfg->{'pure-protocol'} // 'iscsi') eq 'fc') {
+        warn "Storage '$storeid': 'target' has no effect with pure-protocol fc. "
+           . "The Proxmox VE 9.3 SAN view matches it against iSCSI sessions "
+           . "only, so FC LUNs stay unprotected.\n";
+        return;
+    }
+
+    my $iqns = eval {
+        my $api = _get_api($scfg, $storeid, status => 1);
+        my %seen;
+        [grep { !$seen{$_}++ } map { $_->{iqn} } @{ $api->iscsi_get_ports() }];
+    };
+    if (!$iqns) {
+        my $err = $@ // 'unknown error';
+        chomp $err;
+        warn "Storage '$storeid': could not read the array's iSCSI IQN to "
+           . "check 'target' ($err). Verify it against "
+           . "'iscsiadm -m session'.\n";
+        return;
+    }
+    return if grep { $_ eq $target } @$iqns;
+
+    warn "Storage '$storeid': 'target' is '$target', but the array's iSCSI "
+       . "target is " . (@$iqns ? join(', ', map { "'$_'" } @$iqns) : 'not reported')
+       . ". The SAN view compares the exact string, so these LUNs are NOT "
+       . "protected. Fix with: pvesm set $storeid --target <iqn>\n";
+    return;
+}
+
 sub on_add_hook {
     my ($class, $storeid, $scfg, %param) = @_;
 
@@ -544,6 +637,9 @@ sub on_add_hook {
             _delete_secret($storeid, $kind);
         }
     }
+
+    # After the secrets are written: the check needs the credentials.
+    _check_san_target($storeid, $scfg);
 
     return;
 }
@@ -635,6 +731,15 @@ sub on_update_hook_full {
             _delete_secret($storeid, $kind);
             delete $scfg->{$opt};
         }
+    }
+
+    # Only when this update sets `target` or changes the protocol it depends
+    # on, so an unrelated `pvesm set` makes no REST call. $scfg is still the
+    # old config here; check the one PVE is about to write.
+    if (grep { exists $update->{$_} } qw(target pure-protocol)) {
+        my %new = (%$scfg, %$update);
+        delete @new{ @{ $delete // [] } };
+        _check_san_target($storeid, \%new);
     }
 
     return;

@@ -287,6 +287,31 @@ warn_inflight_operations() {
     fi
 }
 
+# Proxmox VE 9.3 Node > SAN offers a Pure LUN for Wipe / Create VG unless a
+# storage's `target` matches the LUN's iSCSI target. Name the iSCSI storages
+# that have none. FC storages are not listed: `target` cannot protect them.
+detect_unclaimed_san_luns() {
+    [ -f /usr/share/perl5/PVE/Storage/SAN.pm ] || return 0
+    local cfg
+    cfg=$(timeout 5 cat /etc/pve/storage.cfg 2>/dev/null) || return 0
+    local unclaimed
+    unclaimed=$(printf '%s\n' "$cfg" | awk '
+        function flush() { if (id != "" && proto != "fc" && !tgt) print id }
+        /^[a-z]+:/ { flush(); id = ($1 == "purestorage:") ? $2 : ""; proto = "iscsi"; tgt = 0; next }
+        /^[ \t]+pure-protocol[ \t]/ { proto = $2 }
+        /^[ \t]+target[ \t]/ { tgt = 1 }
+        END { flush() }')
+    [ -n "$unclaimed" ] || return 0
+    echo ""
+    echo "NOTE: Proxmox VE 9.3 Node > SAN can wipe the LUNs of these iSCSI storages,"
+    echo "because they have no 'target' set:"
+    printf '    %s\n' $unclaimed
+    echo "After EVERY cluster node runs this version, set the array's iSCSI IQN"
+    echo "(shown by 'iscsiadm -m session') on each:"
+    echo "    pvesm set <storage-id> --target <iqn>"
+    echo "See README, Known Limitations, 'Proxmox VE 9.3 SAN view'."
+}
+
 reload_pve_services() {
     # PVE services load Perl plugin modules at startup and keep them in
     # memory (shared via COW in forked workers). Installing new .pm files
@@ -462,6 +487,7 @@ case "$1" in
         detect_stale_pure_devices
         detect_missing_lvm_global_filter
         warn_inflight_operations
+        detect_unclaimed_san_luns
         # $2 = previously-configured version on upgrade, empty on fresh install.
         reload_pve_services "$2"
         ;;

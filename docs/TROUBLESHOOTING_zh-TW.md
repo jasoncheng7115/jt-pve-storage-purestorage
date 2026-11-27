@@ -295,20 +295,35 @@ systemctl show -p MainPID pvedaemon pvestatd pveproxy   # 前後各執行一次�
 **症狀**：在 **節點 > SAN**（Proxmox VE 9.3 新增）中，WWID 以 `3624a9370` 開頭的
 LUN 顯示為 `unused`、沒有對應的儲存，而且可以對它們執行**抹除**與**建立 VG**。
 
-**原因**：Proxmox VE 只透過自己的儲存類型判斷 LUN 是否使用中（LVM VG、iSCSI
-target、NVMe-oF subsystem、LVM base volume），沒有讓第三方外掛宣告自己 LUN 的
-機制。本外掛的 LUN 只有在**該節點**上有行程以寫入模式開著時才算使用中。本外掛
-會把每顆磁碟連到叢集所有節點，因此：
+**原因**：Proxmox VE 判斷 LUN 是否使用中的依據有三種：自己的儲存類型（LVM VG、
+NVMe-oF subsystem、LVM base volume）、`target` 與該 LUN 的 iSCSI target 相符的
+儲存，以及**該節點**上以寫入模式開著它的行程。本外掛會把每顆磁碟連到叢集所有
+節點，因此沒有設定 `target` 時：
 
 - 停機中 guest 的磁碟，在每個節點上都是 `unused`；
 - 執行中 guest 的磁碟，除了它所在的節點，在其他節點上都是 `unused`。
 
 分割區擋不住抹除：Proxmox VE 會先移除 kpartx 分割區對應與簽章，再抹除整顆 LUN。
 
-**處理方式**：WWID 以 `3624a9370` 開頭的 LUN，除非已在陣列上確認該 Volume
-不屬於任何 Pure 儲存，否則不要執行**抹除**或**建立 VG**。WWID 中 `3624a9370`
-之後的 24 位十六進位數字，就是陣列上該 Volume 的序號。被抹除的磁碟只能從陣列
-快照救回。
+**處理方式：iSCSI（1.1.40 起）**：把陣列的 iSCSI IQN 設為該儲存的 `target`。
+先把叢集**每一個**節點升級到 1.1.40。舊版外掛不認得 `target`，每個指令都會印出
+`unexpected property 'target'`，而且該節點下次寫入儲存設定時會把它刪掉，所有
+節點的保護就一起消失。
+
+```bash
+iscsiadm -m session | awk '{print $4}' | sort -u   # 陣列的 IQN
+pvesm set <storage-id> --target <iqn>
+```
+
+字串必須完全相同；設定時外掛會與陣列的 IQN 比對，不符就發出警告。設定後，SAN
+檢視會把這些 LUN 列在該儲存底下，抹除與建立 VG 都會失敗，訊息為
+`storage '<storage-id>' serves images from this target`。`dpkg -i` 的升級訊息會
+列出所有還沒設定 `target` 的 iSCSI Pure 儲存。
+
+**處理方式：Fibre Channel**：`target` 幫不上忙，SAN 檢視只拿它比對 iSCSI
+session。WWID 以 `3624a9370` 開頭的 LUN，除非已在陣列上確認該 Volume 不屬於任何
+Pure 儲存，否則不要執行**抹除**或**建立 VG**。WWID 中 `3624a9370` 之後的 24 位
+十六進位數字，就是陣列上該 Volume 的序號。被抹除的磁碟只能從陣列快照救回。
 
 Proxmox VE 9.3 新增了叢集層級的 multipath 設定（寫入
 `/etc/multipath/conf.d/pve-*.conf`），相關的兩點：

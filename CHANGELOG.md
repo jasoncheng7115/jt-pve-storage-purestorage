@@ -8,6 +8,36 @@ this project adheres to a `MAJOR.MINOR.PATCH-DEBIAN` versioning scheme.
 
 ---
 
+## [1.1.40] - 2026-11-27
+
+**Proxmox VE 9.3: iSCSI LUNs can now be protected from the SAN view's Wipe.**
+Upgrade every node, restart `pvedaemon pvestatd pveproxy`, then set `target`
+on each iSCSI storage. Fibre Channel is not covered.
+
+### Added
+- **`target` option (iSCSI).** Proxmox VE 9.3 Node > SAN refuses Wipe and
+  Create VG on a LUN whose iSCSI target matches a storage's `target`, for any
+  storage type. Set it to the array's IQN:
+  `pvesm set <storage-id> --target <iqn>`. The plugin checks the value
+  against the array's IQN when it is set and warns on a mismatch, on FC, or
+  when the array does not answer. Set it only after every node runs 1.1.40:
+  older versions warn about the unknown key and drop it the next time they
+  write `storage.cfg`.
+- **Proxmox VE 9.3 storage dialog.** Every option has a title, the storage
+  type is shown as "Pure Storage FlashArray", and the timeouts, rescan
+  interval, host naming and pod reporting options are in the advanced
+  section. Earlier versions ignore this.
+
+### Changed
+- postinst lists the iSCSI Pure storages without `target` on a Proxmox VE
+  9.3 node.
+
+### Documentation
+- README Known Limitations and TROUBLESHOOTING section 14 describe the
+  `target` procedure; FC LUNs still must not be wiped by hand.
+
+---
+
 ## [1.1.39] - 2026-11-27
 
 **Proxmox VE 9.3 support.** No change in behaviour on earlier versions. If you

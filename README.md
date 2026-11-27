@@ -121,7 +121,7 @@ Follow this procedure when upgrading from any earlier version (1.0.x) to
    possible (recommended; not strictly required).
 3. **Install the new package**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.39-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.40-1_all.deb
    ```
 4. **Read the postinst output carefully**. It will warn about:
    - dangerous multipath.conf settings (Section above)
@@ -525,7 +525,7 @@ the token to hand if you do.
 ```bash
 # Recommended — apt resolves and installs the iSCSI / multipath / SCSI
 # tooling dependencies automatically:
-apt install ./jt-pve-storage-purestorage_1.1.39-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.40-1_all.deb
 ```
 
 > **Note:** avoid `dpkg -i` for the first install: it does **not** auto-install
@@ -759,6 +759,7 @@ amending the `nodes` line, or by re-creating the entry.
 | `pure-pod` | No | - | Pod name (see Capacity and Permission Isolation). Sets capacity reporting to the Pod's quota and namespaces all Volume names. |
 | `pure-pod-usage-metric` | No | provisioned | Which pod space figure is reported as `used` when the pod has a `quota_limit`. `provisioned` = sum of the provisioned sizes of the pod's Volumes; this is what the array checks before allowing the next allocation, so it predicts allocation failures — but because Volumes are thin, a pod can read 100% full with almost nothing written. `virtual` = host-written logical bytes (intuitive, but does not predict allocation failures). `physical` = post-reduction bytes on the array. Reporting only; never changes what the array enforces. |
 | `pure-pod-capacity` | No | array | What is reported for a pod that has **no** `quota_limit`. `array` = the whole FlashArray (total capacity and everything used on it, by any host). `pod` = this pod's own usage as `used` (per `pure-pod-usage-metric`) and the array's free space as `available`, total = used + available. Ignored when the pod has a `quota_limit` or `pure-pod` is not set. Reporting only. |
+| `target` | No | - | iSCSI only, Proxmox VE 9.3: the array's iSCSI target IQN, exactly as `iscsiadm -m session` shows it. Not used by the plugin; it makes the 9.3 Node > SAN view refuse Wipe and Create VG on this storage's LUNs. Set it only after every node runs 1.1.40 or later. See [Proxmox VE 9.3 SAN view](#proxmox-ve-93-san-view-protect-pure-luns-from-wipe). |
 | `content` | Yes | - | Content types: `images`, `rootdir` |
 | `nodes` | No | (all) | Comma-separated list of cluster nodes where this storage is offered. Omit to make it available everywhere. Standard PVE storage attribute. |
 
@@ -1090,20 +1091,38 @@ You can now start the VM from PVE web UI or CLI:
 
 ## Known Limitations
 
-### Proxmox VE 9.3 SAN view: never wipe a Pure LUN
+### Proxmox VE 9.3 SAN view: protect Pure LUNs from Wipe
 
 Proxmox VE 9.3 adds **Node > SAN**, which can wipe a LUN or create a volume
-group on it. It recognises only its own storage types as owners and offers no
-way for a plugin to claim its LUNs, so a LUN of this plugin counts as in use
-only while a process on that node has it open. Because every disk is
-connected to every node, the disk of a stopped guest shows as `unused` on all
-nodes, and the disk of a running guest on every node except the one it runs
-on. Partitions do not block the wipe.
+group on it. It treats a LUN as belonging to a storage when that storage's
+`target` matches the LUN's iSCSI target, or while a process on that node has
+the LUN open. Because every disk of this plugin is connected to every node,
+without `target` the disk of a stopped guest shows as `unused` on all nodes,
+and the disk of a running guest on every node except the one it runs on.
+Partitions do not block the wipe.
 
-Do not run **Wipe** or **Create VG** on a LUN whose WWID starts with
-`3624a9370`; the 24 hex digits after that prefix are the volume serial on the
-array. A wiped disk can only be recovered from an array snapshot. Details and
-the related multipath alias caveat: `docs/TROUBLESHOOTING.md`, section 14.
+**iSCSI: set `target`** (1.1.40 and later). Upgrade **every** cluster node to
+1.1.40 first: an older version of the plugin does not know the key, warns on
+every command and removes it from `storage.cfg` the next time that node
+changes the storage configuration. Then, on one node:
+
+```bash
+iscsiadm -m session | awk '{print $4}' | sort -u   # the array's IQN
+pvesm set <storage-id> --target <iqn>
+```
+
+The value must match exactly. The plugin compares it with the array's IQN
+when it is set and warns if it does not match. With `target` set, the SAN
+view refuses Wipe and Create VG with `storage '<storage-id>' serves images
+from this target`.
+
+**Fibre Channel: no protection.** The SAN view matches `target` against iSCSI
+sessions only. Do not run **Wipe** or **Create VG** on a LUN whose WWID
+starts with `3624a9370`; the 24 hex digits after that prefix are the volume
+serial on the array. A wiped disk can only be recovered from an array
+snapshot.
+
+Details and the multipath alias caveat: `docs/TROUBLESHOOTING.md`, section 14.
 
 ### Full Clone Limitation
 

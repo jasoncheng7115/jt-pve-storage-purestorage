@@ -1,3 +1,24 @@
+jt-pve-storage-purestorage (1.1.40-1) stable; urgency=medium
+
+  * Proxmox VE 9.3 Node > SAN: accept the iSCSI target IQN as `target`.
+    PVE::Storage::SAN refuses Wipe and Create VG on a LUN reached through
+    an iSCSI session to a storage's `target`, for any storage type; without
+    it every Pure LUN not open on the local node was offered for wiping.
+    The key is ISCSIPlugin's shared property, listed in options() only.
+    on_add_hook and on_update_hook_full compare it with the array's IQN and
+    warn on a mismatch, on FC (where it cannot match), or when the array
+    does not answer. A plugin older than 1.1.40 drops the key on its next
+    write of storage.cfg, so every node must be upgraded before it is set.
+  * postinst names the iSCSI purestorage storages that have no `target`
+    on a Proxmox VE 9.3 node.
+  * Proxmox VE 9.3 add/edit dialog: a title for every pure-* property, the
+    display name "Pure Storage FlashArray", and the tuning options moved to
+    the advanced section. Earlier versions ignore all three.
+  * New test suite t/sanclaim.pl runs PVE's own assert_lun_unreferenced()
+    against the plugin's configuration.
+
+ -- Jason Cheng <jason@jason.tools>  Fri, 27 Nov 2026 22:53:39 +0800
+
 jt-pve-storage-purestorage (1.1.39-1) stable; urgency=medium
 
   * Proxmox VE 9.3 support: api() now negotiates up to storage API 17

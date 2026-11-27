@@ -8,6 +8,31 @@
 
 ---
 
+## [1.1.40] - 2026-11-27
+
+**Proxmox VE 9.3：iSCSI LUN 現在可以防止被 SAN 檢視抹除**。先升級每個節點並重新
+啟動 `pvedaemon pvestatd pveproxy`，再替每個 iSCSI 儲存設定 `target`。Fibre
+Channel 不在保護範圍內。
+
+### 新增
+- **`target` 選項（iSCSI）**：Proxmox VE 9.3 的節點 > SAN 會拒絕對 iSCSI target
+  與某個儲存的 `target` 相符的 LUN 執行抹除與建立 VG，不論儲存類型。設為陣列的
+  IQN：`pvesm set <storage-id> --target <iqn>`。設定時外掛會與陣列的 IQN 比對，
+  不符、使用 FC 或陣列沒有回應時發出警告。所有節點都升到 1.1.40 後才設定：舊版會
+  對不認得的設定發出警告，並在下次寫入 `storage.cfg` 時把它刪掉。
+- **Proxmox VE 9.3 儲存對話框**：每個選項都有標題，儲存類型顯示為
+  「Pure Storage FlashArray」，各項逾時、重新掃描間隔、主機命名與 pod 容量回報
+  選項收進進階區。舊版本會忽略這些設定。
+
+### 變更
+- postinst 會在 Proxmox VE 9.3 節點上列出尚未設定 `target` 的 iSCSI Pure 儲存。
+
+### 文件
+- README 已知限制與 TROUBLESHOOTING 第 14 節說明 `target` 的設定步驟；FC 的 LUN
+  仍然不能手動抹除。
+
+---
+
 ## [1.1.39] - 2026-11-27
 
 **支援 Proxmox VE 9.3。** 舊版本上的行為不變。使用 Proxmox VE 9.3 者，請在有人使用

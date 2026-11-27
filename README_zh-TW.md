@@ -115,7 +115,7 @@
 2. **停機或遷移**執行中的 VM 離開要升級的節點 （建議；非強制）。
 3. **安裝新套件**:
    ```
-   dpkg -i jt-pve-storage-purestorage_1.1.39-1_all.deb
+   dpkg -i jt-pve-storage-purestorage_1.1.40-1_all.deb
    ```
 4. **仔細閱讀 postinst 輸出**。它會警告：
    - 危險的 multipath.conf 設定 （上一節）
@@ -483,7 +483,7 @@ pvesm set <storeid> --pure-api-token <新token>
 
 ```bash
 # 建議——apt 會自動解決並安裝 iSCSI ／ multipath ／ SCSI 相依工具：
-apt install ./jt-pve-storage-purestorage_1.1.39-1_all.deb
+apt install ./jt-pve-storage-purestorage_1.1.40-1_all.deb
 ```
 
 > **注意**：首次安裝請**避免**用 `dpkg -i`：它不會自動安裝宣告的相依套件
@@ -699,6 +699,7 @@ PVE 本身擋下。
 | `pure-pod` | 否 | - | Pod 名稱（見「容量與權限隔離」一節）。設定後容量回報以 Pod 配額為準，所有 Volume 名稱進入 Pod 命名空間 |
 | `pure-pod-usage-metric` | 否 | provisioned | Pod 設有 `quota_limit` 時，以哪一個 pod 空間數值回報為 `used`。`provisioned` 為 Pod 內各 Volume 配置大小的總和，也是陣列在允許下一次配置前檢查的數值，因此可預測配置失敗——但由於 Volume 為精簡配置，Pod 可能在幾乎沒有寫入的情況下顯示 100% 已滿。`virtual` 為主機寫入的邏輯位元組（符合直覺，但無法預測配置失敗）。`physical` 為陣列上縮減後的位元組。僅影響回報，不會改變陣列實際的強制行為 |
 | `pure-pod-capacity` | 否 | array | Pod **未**設定 `quota_limit` 時回報的範圍。`array` 為整台 FlashArray（總容量，以及所有主機在陣列上的用量）。`pod` 以此 Pod 自身的用量為 `used`（依 `pure-pod-usage-metric`），以陣列剩餘空間為 `available`，總容量為兩者相加。Pod 已設 `quota_limit` 或未設定 `pure-pod` 時忽略此參數。僅影響回報 |
+| `target` | 否 | - | 僅 iSCSI，Proxmox VE 9.3：陣列的 iSCSI target IQN，與 `iscsiadm -m session` 顯示的完全相同。外掛本身不使用；它讓 9.3 的節點 > SAN 檢視拒絕對本儲存的 LUN 執行抹除與建立 VG。所有節點都升到 1.1.40 以上後才設定。見「Proxmox VE 9.3 SAN 檢視：保護 Pure LUN 不被抹除」 |
 | `content` | 是 | - | 內容類型：`images`、`rootdir` |
 | `nodes` | 否 | （全部） | 此 storage 開放給哪些叢集節點，逗號分隔。省略代表全部節點。PVE 通用 Storage 屬性 |
 
@@ -1030,16 +1031,31 @@ You can now start the VM from PVE web UI or CLI:
 
 ## 已知限制
 
-### Proxmox VE 9.3 SAN 檢視：不要抹除 Pure LUN
+### Proxmox VE 9.3 SAN 檢視：保護 Pure LUN 不被抹除
 
 Proxmox VE 9.3 新增了 **節點 > SAN**，可以抹除 LUN，也可以在 LUN 上建立 VG。
-它只認得自己的儲存類型，也沒有讓外掛宣告自己 LUN 的機制，所以本外掛的 LUN
-只有在該節點上有行程開著時才算使用中。由於每顆磁碟都連到所有節點，停機中
-guest 的磁碟在每個節點上都顯示 `unused`，執行中 guest 的磁碟則在它所在節點以外
-的節點上顯示 `unused`。分割區擋不住抹除。
+它判斷 LUN 屬於某個儲存的方式，是該儲存的 `target` 與 LUN 的 iSCSI target
+相符，或該節點上有行程開著這顆 LUN。由於本外掛的每顆磁碟都連到所有節點，
+沒有設定 `target` 時，停機中 guest 的磁碟在每個節點上都顯示 `unused`，執行中
+guest 的磁碟則在它所在節點以外的節點上顯示 `unused`。分割區擋不住抹除。
 
-WWID 以 `3624a9370` 開頭的 LUN 不要執行**抹除**或**建立 VG**；這個字首之後的
-24 位十六進位數字就是陣列上該 Volume 的序號。被抹除的磁碟只能從陣列快照救回。
+**iSCSI：設定 `target`**（1.1.40 起）。先把叢集**每一個**節點升級到 1.1.40：
+舊版外掛不認得這個設定，每個指令都會印出警告，而且該節點下次修改儲存設定時
+會把它從 `storage.cfg` 刪掉。之後在任一節點執行：
+
+```bash
+iscsiadm -m session | awk '{print $4}' | sort -u   # 陣列的 IQN
+pvesm set <storage-id> --target <iqn>
+```
+
+值必須完全相同。設定時外掛會與陣列的 IQN 比對，不符就發出警告。設定
+`target` 後，SAN 檢視會拒絕抹除與建立 VG，訊息為
+`storage '<storage-id>' serves images from this target`。
+
+**Fibre Channel：沒有保護**。SAN 檢視只拿 `target` 比對 iSCSI session。WWID 以
+`3624a9370` 開頭的 LUN 不要執行**抹除**或**建立 VG**；這個字首之後的 24 位
+十六進位數字就是陣列上該 Volume 的序號。被抹除的磁碟只能從陣列快照救回。
+
 詳細說明與 multipath alias 的注意事項見 `docs/TROUBLESHOOTING_zh-TW.md` 第 14 節。
 
 ### Full Clone 限制

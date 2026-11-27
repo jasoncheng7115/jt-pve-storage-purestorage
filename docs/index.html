@@ -150,7 +150,7 @@
     <div class="hero__glow"></div>
     <div class="hero__glow-left"></div>
     <div class="hero__content">
-        <div class="hero__badge">v1.1.39 <span class="hero__badge-sep"></span> MIT License</div>
+        <div class="hero__badge">v1.1.40 <span class="hero__badge-sep"></span> MIT License</div>
         <h1 class="hero__title">jt-pve-storage-purestorage</h1>
         <p class="hero__project-desc">
             <span class="lang-en">Pure Storage FlashArray iSCSI/FC Storage Plugin for Proxmox VE</span>
@@ -545,7 +545,7 @@
                 <span class="lang-en">Install the plugin package</span>
                 <span class="lang-zh">安裝 plugin 套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.39-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.40-1_all.deb</pre>
             <p>
                 <span class="lang-en">The plugin automatically writes <code>/etc/multipath/conf.d/pure-storage.conf</code> with Pure-recommended settings, detects dangerous existing multipath.conf settings, and reloads Proxmox VE services (pvedaemon, pvestatd, pveproxy) via SIGHUP.</span>
                 <span class="lang-zh">Plugin 會自動寫入 <code>/etc/multipath/conf.d/pure-storage.conf</code>（採 Pure 推薦設定）、偵測 multipath.conf 危險設定，並透過 SIGHUP 重新載入 Proxmox VE 服務（pvedaemon、pvestatd、pveproxy）。</span>
@@ -625,7 +625,7 @@
                 <span class="lang-en">Install new package</span>
                 <span class="lang-zh">安裝新套件</span>
             </div>
-            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.39-1_all.deb</pre>
+            <pre><span class="cmd">dpkg</span> <span class="flag">-i</span> jt-pve-storage-purestorage_1.1.40-1_all.deb</pre>
         </div>
     </div>
     <div class="step">
@@ -850,6 +850,10 @@
                 </th>
             </tr></thead>
             <tbody>
+                <tr><td><code>target</code></td><td>-</td><td>
+                    <span class="lang-en">iSCSI only, Proxmox VE 9.3: the array's iSCSI target IQN, exactly as <code>iscsiadm -m session</code> shows it. Not used by the plugin; it makes Node &gt; SAN refuse Wipe and Create VG on this storage's LUNs. Set it only after every node runs 1.1.40 or later. See <a href="#san-wipe">Troubleshooting</a>.</span>
+                    <span class="lang-zh">僅 iSCSI，Proxmox VE 9.3：陣列的 iSCSI target IQN，與 <code>iscsiadm -m session</code> 顯示的完全相同。外掛本身不使用；它讓「節點 &gt; SAN」拒絕對本儲存的 LUN 執行抹除與建立 VG。所有節點都升到 1.1.40 以上後才設定。見<a href="#san-wipe">疑難排解</a>。</span>
+                </td></tr>
                 <tr><td><code>content</code></td><td><code>images</code></td><td>
                     <span class="lang-en">Content types this storage can hold. Use <code>images</code> for VM disks only, or <code>images,rootdir</code> to also support LXC containers.</span>
                     <span class="lang-zh">此儲存可存放的內容類型。使用 <code>images</code> 僅支援 VM 磁碟，或使用 <code>images,rootdir</code> 同時支援 LXC 容器。</span>
@@ -1843,8 +1847,8 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
     </p>
 
     <div class="alert alert--warning" id="san-wipe">
-        <span class="lang-en"><strong>Proxmox VE 9.3: never wipe a Pure LUN from Node &gt; SAN.</strong> The new SAN view can wipe a LUN or create a volume group on it. It recognises only Proxmox VE's own storage types and has no way for a plugin to claim its LUNs, so a LUN of this plugin counts as in use only while a process on <em>that node</em> has it open. Every disk is connected to every node, so the disk of a stopped guest shows as <code>unused</code> on all nodes, and the disk of a running guest on every node except the one it runs on. Partitions do not block the wipe. Do not run <strong>Wipe</strong> or <strong>Create VG</strong> on a LUN whose WWID starts with <code>3624a9370</code>; the 24 hex digits after that prefix are the volume serial on the array. A wiped disk can only be recovered from an array snapshot. Also do not give a Pure WWID an alias in the cluster-wide multipath settings: the plugin addresses disks as <code>/dev/mapper/&lt;wwid&gt;</code>.</span>
-        <span class="lang-zh"><strong>Proxmox VE 9.3：不要在「節點 &gt; SAN」抹除 Pure LUN。</strong>新的 SAN 檢視可以抹除 LUN，也可以在 LUN 上建立 VG。它只認得 Proxmox VE 自己的儲存類型，也沒有讓外掛宣告自己 LUN 的機制，所以本外掛的 LUN 只有在<em>該節點</em>上有行程開著時才算使用中。每顆磁碟都連到所有節點，因此停機中 guest 的磁碟在每個節點上都顯示 <code>unused</code>，執行中 guest 的磁碟則在它所在節點以外的節點上顯示 <code>unused</code>。分割區擋不住抹除。WWID 以 <code>3624a9370</code> 開頭的 LUN 不要執行<strong>抹除</strong>或<strong>建立 VG</strong>；這個字首之後的 24 位十六進位數字就是陣列上該 Volume 的序號。被抹除的磁碟只能從陣列快照救回。另外，不要在叢集層級的 multipath 設定中替 Pure 的 WWID 加 alias：外掛以 <code>/dev/mapper/&lt;wwid&gt;</code> 存取磁碟。</span>
+        <span class="lang-en"><strong>Proxmox VE 9.3: protect Pure LUNs from Node &gt; SAN.</strong> The new SAN view can wipe a LUN or create a volume group on it. It treats a LUN as belonging to a storage when that storage's <code>target</code> matches the LUN's iSCSI target, or while a process on <em>that node</em> has it open. Every disk is connected to every node, so without <code>target</code> the disk of a stopped guest shows as <code>unused</code> on all nodes, and the disk of a running guest on every node except the one it runs on. Partitions do not block the wipe.<br><br><strong>iSCSI (1.1.40 and later):</strong> upgrade every node first &mdash; an older version drops the key from <code>storage.cfg</code> &mdash; then run <code>pvesm set &lt;storage-id&gt; --target &lt;iqn&gt;</code> with the IQN from <code>iscsiadm -m session</code>. The value must match exactly; the plugin warns if it does not.<br><br><strong>Fibre Channel:</strong> not covered. Do not run <strong>Wipe</strong> or <strong>Create VG</strong> on a LUN whose WWID starts with <code>3624a9370</code>; the 24 hex digits after that prefix are the volume serial on the array. A wiped disk can only be recovered from an array snapshot. Also do not give a Pure WWID an alias in the cluster-wide multipath settings: the plugin addresses disks as <code>/dev/mapper/&lt;wwid&gt;</code>.</span>
+        <span class="lang-zh"><strong>Proxmox VE 9.3：保護 Pure LUN 不被「節點 &gt; SAN」抹除。</strong>新的 SAN 檢視可以抹除 LUN，也可以在 LUN 上建立 VG。它判斷 LUN 屬於某個儲存的方式，是該儲存的 <code>target</code> 與 LUN 的 iSCSI target 相符，或<em>該節點</em>上有行程開著這顆 LUN。每顆磁碟都連到所有節點，因此沒有設定 <code>target</code> 時，停機中 guest 的磁碟在每個節點上都顯示 <code>unused</code>，執行中 guest 的磁碟則在它所在節點以外的節點上顯示 <code>unused</code>。分割區擋不住抹除。<br><br><strong>iSCSI（1.1.40 起）：</strong>先升級每個節點（舊版會把這個設定從 <code>storage.cfg</code> 刪掉），再以 <code>iscsiadm -m session</code> 顯示的 IQN 執行 <code>pvesm set &lt;storage-id&gt; --target &lt;iqn&gt;</code>。值必須完全相同，不符時外掛會發出警告。<br><br><strong>Fibre Channel：</strong>沒有保護。WWID 以 <code>3624a9370</code> 開頭的 LUN 不要執行<strong>抹除</strong>或<strong>建立 VG</strong>；這個字首之後的 24 位十六進位數字就是陣列上該 Volume 的序號。被抹除的磁碟只能從陣列快照救回。另外，不要在叢集層級的 multipath 設定中替 Pure 的 WWID 加 alias：外掛以 <code>/dev/mapper/&lt;wwid&gt;</code> 存取磁碟。</span>
     </div>
 
     <h3 class="subsection-title">
@@ -2051,6 +2055,15 @@ global_filter = [ <span class="string">"r|/dev/mapper/3624a9370.*|"</span>, <spa
         <span class="lang-en">Version history. For full details see <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</span>
         <span class="lang-zh">版本紀錄。完整內容請參閱 <a href="https://github.com/jasoncheng7115/jt-pve-storage-purestorage/blob/main/CHANGELOG_zh-TW.md">CHANGELOG_zh-TW.md</a>。</span>
     </p>
+
+    <div class="changelog-entry">
+        <div class="changelog-version">v1.1.40 <span class="changelog-tag changelog-tag--feature">Feature</span></div>
+        <div class="changelog-date">2026-11-27</div>
+        <div class="changelog-summary">
+            <span class="lang-en"><strong>Node &gt; SAN protection for iSCSI:</strong> new option <code>target</code>, set to the array's iSCSI IQN, makes Proxmox VE 9.3 refuse Wipe and Create VG on the storage's LUNs. The plugin checks it against the array's IQN and warns on a mismatch; set it only after every node runs 1.1.40, because older versions drop it from <code>storage.cfg</code>. Fibre Channel is not covered &mdash; see <a href="#san-wipe">Troubleshooting</a>. <strong>Proxmox VE 9.3 storage dialog:</strong> every option has a title, the type is shown as &ldquo;Pure Storage FlashArray&rdquo;, and tuning options are in the advanced section. Also: postinst lists the iSCSI storages still without <code>target</code>.</span>
+            <span class="lang-zh"><strong>iSCSI 的「節點 &gt; SAN」保護：</strong>新選項 <code>target</code> 設為陣列的 iSCSI IQN 後，Proxmox VE 9.3 會拒絕對該儲存的 LUN 執行抹除與建立 VG。外掛會與陣列的 IQN 比對，不符時發出警告；所有節點都升到 1.1.40 後才設定，因為舊版會把它從 <code>storage.cfg</code> 刪掉。Fibre Channel 不在保護範圍內，詳見<a href="#san-wipe">疑難排解</a>。<strong>Proxmox VE 9.3 儲存對話框：</strong>每個選項都有標題，類型顯示為「Pure Storage FlashArray」，調校類選項收進進階區。另外：postinst 會列出尚未設定 <code>target</code> 的 iSCSI 儲存。</span>
+        </div>
+    </div>
 
     <div class="changelog-entry">
         <div class="changelog-version">v1.1.39 <span class="changelog-tag changelog-tag--feature">Feature</span></div>
